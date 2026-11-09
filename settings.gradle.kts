@@ -2,7 +2,6 @@ pluginManagement {
     repositories {
         maven("https://maven.neoforged.net/releases")
         maven("https://maven.kikugie.dev/releases")
-        maven("https://maven.kikugie.dev/snapshots")
         mavenCentral()
         gradlePluginPortal()
     }
