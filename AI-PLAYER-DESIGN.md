@@ -194,10 +194,20 @@ backtracking, and planning by item identity only (NBT/components are re-checked 
 execution). Keep them until an agent run actually fails on them. Then fix them in solver-core
 so SprawlCrafting benefits too.
 
-**Code sharing:** solver-core moves to its own repo/artifact that both mods consume (GitHub
-Packages or JitPack maven artifact; a Gradle composite build for local development). Do not
+**Code sharing:** solver-core stays in the SprawlCrafting repo as a real Gradle subproject that
+publishes a plain-Java library artifact (mavenLocal or a Gradle composite build for local
+development; JitPack or GitHub Packages for releases). Every SprawlCrafting node, the
+`forge-1.12.2/` build and this mod depend on that artifact and jar-in-jar it. Solver fixes
+are made in the SprawlCrafting repo and both mods pick them up with a version bump. Do not
 copy it into this mod. Two copies of the planner will drift, and planner bugs found by the
 agent are exactly the bugs SprawlCrafting wants fixed. It stays Java 8 for the 1.12.2 consumer.
+
+Rejected: depending on the SprawlCrafting *mod* (with a config to hide its player features).
+SprawlCrafting has no 1.21.10/1.21.11 nodes, so that would mean maintaining two full mod nodes
+to carry ~1.2k lines of plain Java; hidden features still load its mixins and hooks on every
+bot server; every solver fix would wait on a SprawlCrafting release across all its nodes; and
+SprawlCrafting would carry a feature-gate for every future feature. Its Minecraft→solver
+adapters are version-specific code the bot needs on its own versions anyway (§4.2).
 
 Current state the extraction has to replace: solver-core is not a Gradle module today. Every
 SprawlCrafting node build adds `solver-core/src/main/java` (and its tests) as an extra source
@@ -305,7 +315,7 @@ Two profiles (same idea as AIBot's):
 
 | # | Deliverable | Done when |
 |---|---|---|
-| M0 | solver-core extracted to its own artifact; SprawlCrafting consumes it. Acquisition resolver + `/aiplayer lint` command (no agent). | SprawlCrafting builds and behaves identically on all nodes; lint lists unobtainable items in vanilla (should be ~creative-only items) and in a BuildCraft dev world. |
+| M0 | solver-core made a published subproject of the SprawlCrafting repo; SprawlCrafting consumes the artifact. Acquisition resolver + `/aiplayer lint` command (no agent). | SprawlCrafting builds and behaves identically on all nodes; lint lists unobtainable items in vanilla (should be ~creative-only items) and in a BuildCraft dev world. |
 | M0.5 | Spike (time-boxed): read AIBot's task/goal core and navigation. Record lift-vs-reimplement in §2, fill in §3.4, and judge whether its A* is good enough. | Decision and executor contract written into this doc. |
 | M1 | Body: spawn, follow owner, navigate, reflex layer (defense, eat, hazards). | (a) Survives a night outdoors in a dev world, defending itself, without player help. (b) Navigation: reaches a target 200+ blocks away across mixed terrain (hills, water, a ravine or cave), bridging, pillaring and digging through where needed, with no teleports. |
 | M2 | Vanilla gather-and-craft goals via solver-core + resolver (crafting only). | "Make a stone pickaxe" and "make a crafting table" from an empty inventory in a fresh world. |
