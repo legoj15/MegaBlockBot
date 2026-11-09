@@ -212,9 +212,9 @@ adapters are version-specific code the bot needs on its own versions anyway (§4
 Current state the extraction has to replace: solver-core is not a Gradle module today. Every
 SprawlCrafting node build adds `solver-core/src/main/java` (and its tests) as an extra source
 directory, and the separate `forge-1.12.2/` RetroFuturaGradle build does the same. Extraction
-has to change all of them. Also decide whether to rename the package
-(`com.legoj15.sprawlcrafting.craft.solver`) before the first published version, because
-renaming it afterwards breaks every consumer.
+has to change all of them. The same change renames the package from
+`com.legoj15.sprawlcrafting.craft.solver` to `com.legoj15.botsolver` (decided in #1), before
+the first published version, because renaming it afterwards breaks every consumer.
 
 ### 4.2 Producer adapters
 
