@@ -1,0 +1,26 @@
+modLoader="javafml"
+loaderVersion="[1,]"
+license="MIT"
+issueTrackerURL="https://github.com/legoj15/MegaBlockBot/issues"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="MegaBlockBot"
+description='''
+A server-side AI player that takes natural-language goals and achieves them through survival play.
+'''
+
+[[dependencies.${mod_id}]]
+    modId="neoforge"
+    type="required"
+    versionRange="${neo_dep_range}"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="minecraft"
+    type="required"
+    versionRange="${mc_dep_range}"
+    ordering="NONE"
+    side="BOTH"

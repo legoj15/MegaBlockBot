@@ -1,7 +1,23 @@
+# Gradle
 .gradle/
 build/
+
+# Run directories (moddev dev runs)
 run/
+run-*/
+logs/
+
+# IDE
 .idea/
 *.iml
+.vscode/
+.settings/
+.classpath
+.project
+eclipse/
+bin/
+
+# OS
+*.log
 out/
 .claude/worktrees/
