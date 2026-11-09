@@ -34,7 +34,8 @@ in a world.
 
 ## 2. Prior art and base decision
 
-Checked 2026-11-08. All are Fabric; none target NeoForge or Forge.
+Checked 2026-11-08. All the prior-art mods are Fabric; none target NeoForge or Forge (Mindcraft
+is an external Mineflayer client, not a mod).
 
 | Project | Licence | Notes |
 |---|---|---|
@@ -186,7 +187,7 @@ so SprawlCrafting's behaviour is unchanged:
 | `RecipeInfo.station()` → station key or none | Smelting, stonecutting, and machine recipes need a place to run; the station becomes a prerequisite goal. | none (2×2/3×3 gating stays in the adapter) |
 | Per-slot quantity | Machine recipes consume more than one per slot; vanilla crafting is always 1. | 1 |
 | Byproducts / chance outputs | Pulverizer-style secondary outputs. | none |
-| Pluggable cost function replacing "first satisfiable, fewest steps" | An agent starting empty needs "cheapest to gather", not "satisfiable from inventory". | current rule |
+| Pluggable cost function replacing the current rule (producers tried in the order the adapter supplies; the first covers as much as it can, the next the rest; no plan-length search) | An agent starting empty needs "cheapest to gather", not "satisfiable from inventory". | current rule |
 | Memoization option | Long modded chains will exhaust the attempt budget. Depth and attempt limits are already constructor parameters (`maxDepth`, `maxAttempts`), so larger budgets need no change; caching repeated sub-solves does. | off |
 
 Known limits carried over: greedy left-to-right slot resolution with no cross-slot
@@ -315,13 +316,13 @@ Two profiles (same idea as AIBot's):
 
 | # | Deliverable | Done when |
 |---|---|---|
-| M0 | solver-core made a published subproject of the SprawlCrafting repo; SprawlCrafting consumes the artifact. Acquisition resolver + `/aiplayer lint` command (no agent). | SprawlCrafting builds and behaves identically on all nodes; lint lists unobtainable items in vanilla (should be ~creative-only items) and in a BuildCraft dev world. |
+| M0 | solver-core made a published subproject of the SprawlCrafting repo; SprawlCrafting consumes the artifact. Acquisition resolver + `/aiplayer lint` command (no agent). | SprawlCrafting builds and behaves identically on all nodes; lint lists unobtainable items in vanilla (should be ~creative-only items) and in a BuildCraft dev world, where it should list exactly the assembly-table products (chipsets and other items with no crafting recipe) until the M5 recipe source exists. |
 | M0.5 | Spike (time-boxed): read AIBot's task/goal core and navigation. Record lift-vs-reimplement in §2, fill in §3.4, and judge whether its A* is good enough. | Decision and executor contract written into this doc. |
 | M1 | Body: spawn, follow owner, navigate, reflex layer (defense, eat, hazards). | (a) Survives a night outdoors in a dev world, defending itself, without player help. (b) Navigation: reaches a target 200+ blocks away across mixed terrain (hills, water, a ravine or cave), bridging, pillaring and digging through where needed, with no teleports. |
 | M2 | Vanilla gather-and-craft goals via solver-core + resolver (crafting only). | "Make a stone pickaxe" and "make a crafting table" from an empty inventory in a fresh world. |
-| M3 | Smelting producers, tool-tier prerequisites, branch mining/cave strategy. | "Equip full iron armor" from an empty inventory. |
-| M4 | Strategies: librarian reroll, fishing, blueprint build. | "Get a book of mending" in `assisted`, then in `strict_survival`. |
-| M5 | BuildCraft recipe source (assembly table) + "power a station" strategy; cost model and budget tuning for deep chains. | (a) "Craft a quarry and give it to me" in a BuildCraft dev world. The quarry and its gears are plain crafting, so this tests the deep chain (diamonds, gold, iron), not the adapter. (b) "Make a gate" (or another item that needs a chipset), which forces the assembly table adapter and a powered station. |
+| M3 | Smelting producers, tool-tier prerequisites, branch mining/cave strategy. Needs the solver-core station, per-slot quantity and cost-function changes (§4.1). | "Equip full iron armor" from an empty inventory. |
+| M4 | Strategies: librarian reroll, fishing, blueprint build. | (a) "Get a book of mending" in `assisted`, then in `strict_survival`. (b) "Fish for it": catch a named fishing-loot item with the manual fishing strategy. (c) Build one structure from an NBT blueprint, gathering its missing blocks. |
+| M5 | BuildCraft recipe source (assembly table) + "power a station" strategy; cost model and budget tuning for deep chains. | (a) "Craft a quarry and give it to me" in a BuildCraft dev world. The quarry and its gears are plain crafting, so this tests the deep chain (diamonds, gold, iron), not the adapter. (b) "Make goggles". Their recipe needs a redstone chipset, and chipsets come only from the assembly table, so this forces the adapter and a powered station. Gates are not a valid check: the basic and iron gates have plain crafting recipes, and identity-only planning picks those. |
 | M6 | LLM layer polish: progress chat, failure explanations, local-model profile. | The M2–M5 goals work when phrased loosely. |
 
 The LLM layer can be a thin stub (fixed command parser) through M5. The body's correctness
