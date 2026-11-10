@@ -4,8 +4,10 @@
 .DESCRIPTION
   Proves "a dev server starts with the mod loaded" per Stonecutter node. For each node it accepts the EULA in
   versions/<node>/run, runs :<node>:runServer and watches the output for "MegaBlockBot ready (NeoForge on Minecraft
-  <node>)". The server's process tree is recorded on every poll (PID plus creation time) and killed afterwards
-  by identity, so the game JVM dies even if the Gradle client exits first, and a reused PID is never killed. The smoke runs classes from build/classes, not the shipped jar.
+  <node>)". Afterwards it kills Gradle's process tree, then any java.exe whose command line names this repo's
+  versions/<node>/ folder or runs :<node>:runServer through this repo's wrapper. Matching by command line, not by a
+  remembered PID, finds a server JVM orphaned by an early Gradle exit and never touches a process that reused a PID.
+  The same sweep runs before each node starts, so a server left by an interrupted run cannot hold the port. The smoke runs classes from build/classes, not the shipped jar.
   Logs go to build/smoke/<node>.log. Exit code is the number of failed nodes.
 .EXAMPLE
   ./scripts/smoke-server.ps1
@@ -20,7 +22,7 @@ param(
 
 $root = Split-Path $PSScriptRoot -Parent
 $known = Get-ChildItem (Join-Path $root 'versions') -Directory | ForEach-Object Name
-if (-not $Nodes) { $Nodes = $known }
+if (-not $PSBoundParameters.ContainsKey('Nodes')) { $Nodes = $known }
 $Nodes = @($Nodes | ForEach-Object { $_ -split ',' } | ForEach-Object Trim | Where-Object { $_ } | Select-Object -Unique)
 if (-not $Nodes) { throw "No nodes selected. Known: $($known -join ', ')" }
 $unknown = $Nodes | Where-Object { $_ -notin $known }
@@ -30,37 +32,27 @@ $logDir = Join-Path $root 'build/smoke'
 New-Item -ItemType Directory -Force $logDir | Out-Null
 $failed = @()
 
-# The server's process tree: $tree.Order lists PIDs in discovery order, $tree.Created maps PID -> creation time.
-# (Not an [ordered] map: Windows PowerShell treats an integer index on one as a position, not a key.) The creation time is the process's
-# identity: Windows reuses PIDs, so a PID is only killed or counted as a survivor while its creation time still
-# matches. A child is accepted only if it was created after its recorded parent, which also rules out children of
-# a process that later reused the parent's PID.
-function Get-Live {
-    $live = @{}
-    foreach ($p in Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CreationDate) {
-        $live[[int]$p.ProcessId] = $p
-    }
-    return $live
+function Get-NodeJvms([string]$Node) {
+    # Normalise slashes and doubled separators: Gradle writes both into command lines.
+    $norm = { param($t) ($t -replace '/', '\' -replace '\+', '\').ToLowerInvariant() }
+    $rootN = & $norm $root
+    $serverMark = "$rootN\versions\$Node\"
+    $clientMark = "$rootN\gradle\wrapper\gradle-wrapper.jar"
+    $task = ":${Node}:runserver"
+    @(Get-CimInstance Win32_Process -Filter "Name='java.exe'" -Property ProcessId, CommandLine | Where-Object {
+        $c = & $norm "$($_.CommandLine)"
+        $c.Contains($serverMark) -or ($c.Contains($clientMark) -and $c.Contains($task))
+    } | ForEach-Object { [int]$_.ProcessId })
 }
 
-function Test-Same($live, [int]$id, [datetime]$created) {
-    $p = $live[$id]
-    return $p -and $p.CreationDate -eq $created
-}
-
-function Update-Tree($tree) {
-    $live = Get-Live
-    $frontier = @($tree.Order | Where-Object { Test-Same $live $_ $tree.Created[$_] })
-    while ($frontier.Count) {
-        $next = @()
-        foreach ($p in $live.Values) {
-            $id = [int]$p.ProcessId; $parent = [int]$p.ParentProcessId
-            if (-not $tree.Created.ContainsKey($id) -and $parent -in $frontier -and $p.CreationDate -gt $tree.Created[$parent]) {
-                $tree.Created[$id] = $p.CreationDate; $tree.Order.Add($id); $next += $id
-            }
-        }
-        $frontier = $next
+function Stop-NodeJvms([string]$Node) {
+    foreach ($id in Get-NodeJvms $Node) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+    for ($i = 0; $i -lt 10; $i++) {
+        $left = Get-NodeJvms $Node
+        if (-not $left) { return @() }
+        Start-Sleep -Seconds 1
     }
+    return $left
 }
 
 foreach ($node in $Nodes) {
@@ -70,6 +62,8 @@ foreach ($node in $Nodes) {
 
     $log = Join-Path $logDir "$node.log"
     $err = Join-Path $logDir "$node.err.log"
+    $stale = Stop-NodeJvms $node
+    if ($stale) { Write-Host "[$node] could not stop a leftover server JVM: $($stale -join ', ')"; $failed += $node; continue }
     Remove-Item $log, $err -ErrorAction SilentlyContinue
     Write-Host "[$node] starting dev server"
     try {
@@ -86,16 +80,11 @@ foreach ($node in $Nodes) {
 
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $result = 'timeout'
-    $tree = @{ Order = New-Object 'System.Collections.Generic.List[int]'; Created = @{} }
-    $self = (Get-Live)[[int]$proc.Id]
-    $tree.Created[[int]$proc.Id] = if ($self) { $self.CreationDate } else { [datetime]::MinValue }
-    $tree.Order.Add([int]$proc.Id)
     try {
         while ((Get-Date) -lt $deadline) {
             Start-Sleep -Seconds 3
             # Sample the exit state before reading the logs, so output written just before an exit is still seen.
             $exited = $proc.HasExited
-            Update-Tree $tree
             $text = (Get-Content $log -Raw -ErrorAction SilentlyContinue) + (Get-Content $err -Raw -ErrorAction SilentlyContinue)
             if ($text -match 'MegaBlockBot ready \((.+)\)') {
                 $result = if ($Matches[1] -eq "NeoForge on Minecraft $node") { "ok: $($Matches[1])" } else { "wrong version: $($Matches[1])" }
@@ -105,19 +94,10 @@ foreach ($node in $Nodes) {
             if ($exited) { $result = 'exited early'; break }
         }
     } finally {
-        # One last walk catches a JVM spawned since the last poll; Windows keeps an orphan's parent PID, so it is
-        # found even after Gradle exits. Then kill children first, by identity.
-        Update-Tree $tree
-        $ids = $tree.Order.ToArray(); [array]::Reverse($ids)
-        $live = Get-Live
-        foreach ($id in $ids) {
-            if (Test-Same $live $id $tree.Created[$id]) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
-        }
+        if (-not $proc.HasExited) { & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null }
         $proc.WaitForExit(30000) | Out-Null
-        Start-Sleep -Seconds 2
-        $live = Get-Live
-        $survivors = @($ids | Where-Object { Test-Same $live $_ $tree.Created[$_] })
-        if ($survivors) { $result = "$result; processes survived the kill: $($survivors -join ', ')" }
+        $survivors = Stop-NodeJvms $node
+        if ($survivors) { $result = "$result; server JVMs survived the kill: $($survivors -join ', ')" }
     }
 
     Write-Host "[$node] $result"
