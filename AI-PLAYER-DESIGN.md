@@ -2,7 +2,8 @@
 
 Working name: MegaBlockBot (repo name; the mod id/display name can change before first release).
 Status: pre-implementation design, 2026-11-08; corrected 2026-11-09 after checking claims against
-SprawlCrafting, BuildCraft, NeoForge and upstream repos. Audience: agents implementing it. Planned
+SprawlCrafting, BuildCraft, NeoForge and upstream repos; M0.5 spike recorded 2026-11-24 (§2.1,
+§2.2, §3.4). Audience: agents implementing it. Planned
 work lives in GitHub Issues, not here.
 
 ## 1. Goal
@@ -34,13 +35,14 @@ in a world.
 
 ## 2. Prior art and base decision
 
-Checked 2026-11-08. All the prior-art mods are Fabric; none target NeoForge or Forge (Mindcraft
-is an external Mineflayer client, not a mod).
+Checked 2026-11-08; PlayerEngine corrected 2026-11-24. All the prior-art mods are Fabric except
+PlayerEngine, whose `*-arch` branches are Architectury builds with a NeoForge module (§2.2).
+Mindcraft is an external Mineflayer client, not a mod.
 
 | Project | Licence | Notes |
 |---|---|---|
-| [zoyluoblue/mc_aiplayer](https://github.com/zoyluoblue/mc_aiplayer) ("AIBot") | MIT | 1.21.3. Closest match to this design: "LLM chooses intent, goals define completion, deterministic tasks execute". 63 LLM tools, 34 task state machines, typed goals with postconditions, a `strict_survival` profile, already has fishing + trading tasks. Its own A* navigation. ~146 stars, active. |
-| [Goodbird-git/PlayerEngine](https://github.com/Goodbird-git/PlayerEngine) | LGPL-3.0 | AltoClef's task engine moved server-side. Most mature gather/craft/navigation behaviour. Behind Player2 NPC. |
+| [zoyluoblue/mc_aiplayer](https://github.com/zoyluoblue/mc_aiplayer) ("AIBot") | MIT | 1.21.3. Closest match to this design: "LLM chooses intent, goals define completion, deterministic tasks execute". 63 LLM tools, 38 task state machines, typed goals with postconditions, a `strict_survival` profile, already has fishing + trading tasks. Its own A* navigation. ~146 stars, active. |
+| [Goodbird-git/PlayerEngine](https://github.com/Goodbird-git/PlayerEngine) | LGPL-3.0 | AltoClef's task engine moved server-side, on an embedded copy of Automatone (server-side Baritone). Most mature gather/craft/navigation behaviour. Behind Player2 NPC. Fabric + NeoForge via Architectury on branches `1.21.1-arch`, `1.21.8-arch`, `1.21.10-arch`. |
 | [adevivo/ai-companion](https://github.com/adevivo/ai-companion) | LGPL-3.0 | 1.20.1, bundles a PlayerEngine fork, any OpenAI-compatible endpoint incl. local llama.cpp. |
 | [kylejckson/CraftDroid](https://github.com/kylejckson/CraftDroid) / MineAgent | LGPL-3.0 | 1.21.1 fake player + LLM tool calls + memory. Small. |
 | [Mindcraft](https://github.com/kolbytn/mindcraft) | — | Mineflayer. Reference for LLM prompting/tooling only. |
@@ -48,23 +50,96 @@ is an external Mineflayer client, not a mod).
 Correction to earlier advice: adevivo's fork is not the "cleanest licence" — it inherits
 PlayerEngine's LGPL-3.0. AIBot is the only MIT one.
 
-**Decision: study AIBot as the architectural base; treat PlayerEngine as the navigation/behaviour
-reference.**
-- AIBot's MIT licence matches SprawlCrafting and McDevBridge, its layering already matches §1,
-  and it already has the trading and fishing tasks that PlayerEngine-family mods lack.
-- Its weak point is navigation maturity (custom A*). **There is no drop-in fallback**:
-  PlayerEngine is Fabric-only, so it cannot be loaded as a jar next to a NeoForge mod, and
-  Baritone is a client-side mod that steers the local player, so it cannot drive a server-side
-  body at all. If AIBot's A* falls short, the fallback is *porting* PlayerEngine's movement code
-  to NeoForge. LGPL-3.0 code copied into the tree makes those files LGPL; keep any port in a
-  separate module/jar so the rest stays MIT.
-- Either way the work starts with a port to NeoForge (AIBot is Fabric 1.21.3), so "fork" means
-  "lift the design and selected classes", not "track upstream". Check upstream's attribution
-  requirements before lifting.
+**Decision (2026-11-08, settled by the M0.5 spike, §2.1–2.2):**
+- **Architecture: reimplement AIBot's layering on NeoForge.** Its MIT licence matches
+  SprawlCrafting and McDevBridge, its layering matches §1, and its fishing and trading tasks are
+  useful behaviour references. Its contracts are taken; its classes are not (§2.1).
+- **Navigation: port Automatone's pathing and movement from PlayerEngine's `common` module into a
+  separate LGPL-3.0 module** (§2.2). AIBot's A\* is not used. LGPL-3.0 code copied into the tree
+  makes those files LGPL; keeping the port in its own module/jar keeps the rest MIT.
+- Neither is a fork that tracks upstream. Both start from a specific commit, recorded where the
+  code lands.
 
-Open question, settled by a time-boxed spike **before** M1 (milestone M0.5): lift AIBot's code,
-or reimplement its layering cleanly on NeoForge. Read its task/goal core (~32K lines main Java)
-and its navigation, and record the decision here. The spike also fills in §3.4.
+### 2.1 M0.5 spike result (2026-11-24, AIBot commit `a029fa6`, 2026-09-02)
+
+**Decision: reimplement AIBot's layering cleanly on NeoForge. Lift its contracts and a few
+hazard rules, not its classes.** The main tree is now ~66K lines (task/ 36.5K, goal/ 9.3K,
+pathfinding/ 1.7K, the rest brain, persistence, commands). What it has and what we take:
+
+| Piece | AIBot | Take? |
+|---|---|---|
+| Goal + postcondition | Sealed `Goal` (9 records), sealed `GoalPredicate` evaluated against an immutable, Minecraft-free `GoalSnapshot`; "done" = predicate SATISFIED; a goal result is PARTIAL when some matched. | **Shape, yes** (§3.4). It is ~600 lines and is the one part that already matches this design. Rewrite rather than copy: its snapshot collector has side effects (capability decisions) and the goal set is hard-wired to its planner. |
+| Task lifecycle | `Task` interface + 110-line `AbstractTask` with guarded transitions (start from PENDING only, pause from RUNNING, resume from PAUSED, abort/cancel no-op on terminal states). | **Shape, yes** (§3.4). |
+| Planner | `GoalPlanner`: ~2.3K-line hand-coded expander per goal kind, ~60-entry hand recipe table, falls back to crafting recipes only, reads the live world (not off-thread safe), mining policy embedded. A second, separate recipe planner in `craft/CraftingHelper`. | **No.** solver-core + acquisition resolver replace it (§4). |
+| Executor | `GoalExecutor`: 6K-line singleton; `submit` alone is ~1.3K lines; 900 lines of checkpoint codec; builds ~15 task classes directly and names ~30. | **No.** Its replan budgets are worth keeping (§3.4). |
+| Tasks | 38 task classes, largest 5.2K lines (`OreDigTask`), helpers copy-pasted across 7 files, 377 `fail("…")` sites with ~270 distinct string reasons routed by `startsWith`. | **No.** Read individual tasks (fishing, trading, ore dig lava handling) as behaviour references when writing ours. |
+| Reflex | `DangerWatcher` (1.2K lines) + `SurvivalGuard` + `NavSafetyNet` + `StuckWatcher`, LIFO pause stack. Two hard-coded "survival task" lists that disagree. | **Ideas only**: the resume gate (§3.4, Preemption) and the hazard rules (§2.2). |
+| Body | `ServerPlayerEntity` subclass + fake `ClientConnection` + six mixins; no Carpet dependency. Movement: sets `forwardSpeed`/`sidewaysSpeed`, but every jump, drop, descent, swim step and sneak-edge shift is a bounded one-block `teleport`, and rescues teleport further (gated off in `strict_survival`). Its comments disagree on why: one says the server never runs `travel()` for its body (no passive gravity), another says gravity does pull it down. | **No.** Violates "never teleports" (§3.1). Carpet and Automatone fake players move through inputs, so plain-input movement is achievable; #6 must prove it. |
+| Navigation | See §2.2. | **No.** |
+| LLM | One OpenAI-compatible client (`DeepSeekApiClient`), 63 tools, async off-thread, never per-tick; terminal goal result injected into the next model turn. | Pattern only. Our tool set is deliberately smaller (§3.3). |
+| Persistence | Gson `runtime.json` per world, schema-versioned, atomic writes, read-only on schema mismatch; saves mission spec + checkpoint map, re-plans on restore. | **Pattern, yes** (§3.4), stored in player data instead. |
+
+Why not lift: every class is written against Yarn names and Fabric, so lifting means a full
+remap anyway; the reusable parts are small; and the large parts are exactly the ones this design
+replaces (planner, executor) or rejects (teleport movement, string failures). Lifting the task
+layer drags most of `GoalExecutor` with it. Its tests would not carry either: confidence sits in
+~590 GameTests plus "source contract" tests that assert on source text, not behaviour; no unit
+test calls the planner or `TaskManager`.
+
+Licence: nothing is copied, so no MIT notice is owed. If a class is lifted later, keep its
+copyright header and add AIBot's licence text to the jar's licences folder.
+
+### 2.2 Navigation verdict
+
+**AIBot's A\* cannot meet M1(b).** It is a block-grid A\* with six moves (walk, diagonal, jump up
+one, drop up to the safe-fall limit, dig through, pillar up). Against the M1(b) check:
+
+- Water: no. `Standability` rejects any cell with fluid at feet or head as a place to stand; a
+  comment says the clientless body cannot swim. Lakes and rivers are walls.
+- Bridging: no horizontal place-and-walk move, only pillaring straight up. A ravine is crossed by
+  going down and out, or not at all.
+- Digging: flat cost 8 regardless of tool or hardness, and only a whitelist of stone, dirt, sand,
+  gravel and ores. Logs, leaves, planks, netherrack and terracotta are impassable.
+- Range: a single synchronous search on the server thread, capped at 50 ms and 10,000 nodes for
+  walking (4,000 for the dig fallback, 24,000 for mining approach), start to goal, no segmenting (a weighted ε=3 mode trades optimality for reach). 200 blocks of mixed
+  terrain very likely exceeds that budget (not measured; the evidence row below agrees).
+- No teleports: no. Jumps, drops and descents are executed as one-block teleports (§2.1, Body).
+- Its own evidence: `docs/CAPABILITY_MATRIX.md` row `navigate_120` (natural terrain, long
+  distance) is 0/4, status BLOCKED.
+
+Rules to carry into our navigation (#7), whatever engine it uses: never open a dig cell whose
+sides or top touch lava, except the target cell itself, which a task seals first (AIBot's
+`ore_dig_lava_seal`); never dig a cell with a falling block (sand, gravel) above its head cell;
+treat the blocks in AIBot's `Standability.isDangerous` (lava, fire, soul fire, cactus, magma,
+campfires, sweet berry bush, wither rose, powder snow, pointed dripstone) as never-stand cells.
+
+**Plan: port Automatone's pathing and movement, taken from PlayerEngine's `common` module, into a
+separate LGPL-3.0 module.** Facts checked 2026-11-24 against PlayerEngine branch `1.21.1-arch`
+(commit `aa4ad2d`, 2026-01-29) and Automatone:
+
+- PlayerEngine embeds Automatone (Ladysnake's server-side Baritone fork, LGPL-3.0) as
+  `com.player2.playerengine.automaton`: 278 files, ~27.7K lines, in the Architectury `common`
+  module, Mojang mappings plus Parchment, with no Fabric or NeoForge imports. A NeoForge module
+  (one bootstrap class) and a Fabric module sit beside it; `common` also carries 17 mixins,
+  which the port has to re-check. Branches `1.21.8-arch` and `1.21.10-arch` also exist, so two
+  of our six versions (§5) have an upstream to diff against.
+- Movement is input-driven: `InputOverrideHandler` writes the entity's `xxa`/`zza` (strafe and
+  forward input), jumping and sneaking each tick. No teleports. Automatone's own
+  `FakeServerPlayerEntity extends ServerPlayerEntity` on a dummy connection is the same body
+  shape as §3.1. Which entity class PlayerEngine itself drives is unconfirmed; the engine takes a
+  `LivingEntity`, so pointing it at our player body is part of the port.
+- Automatone has what AIBot lacks, per its feature list (not yet checked in code): segmented long
+  paths with the next segment precomputed, path search off the server thread, a chunk cache,
+  parkour, sneak-back-place bridging, pillaring, tool-aware breaking, ladders, doors and gates.
+- Swimming is the open risk. It is not a listed Automatone feature; its `feature/swimming` branch
+  was last touched 2021-04-30. PlayerEngine's copy has 17 references to swimming, unread. The
+  first check after the port is crossing a lake and a river.
+- Upstream Automatone is stale (Fabric only, `main` last touched at 1.18), and upstream Baritone
+  steers the local client player, so neither is a better base than PlayerEngine's copy.
+  PlayerEngine's licence is LGPL-3.0 in its repo (Modrinth lists MIT; the repo file wins).
+
+This makes #7 the largest M1 issue: porting an engine, not writing a feature. Still no drop-in:
+PlayerEngine as a jar brings its own task engine, LLM integration and Player2 service.
 
 ## 3. Architecture
 
@@ -97,7 +172,10 @@ chat ──► Language layer (LLM, tool calls) ──► typed Goal
 - **Movement is simulated server-side.** A normal `ServerPlayer` never moves itself; its position
   comes from the client's movement packets. The body must set its own movement input (forward
   and strafe, jumping, sneaking, look direction) and run the living-entity movement step each
-  tick, as Carpet does. Navigation outputs those inputs, never teleports.
+  tick, as Carpet does. Navigation outputs those inputs, never teleports. AIBot's `ServerPlayer`
+  subclass (`super.tick()` + `playerTick()`) moves its jumps, drops and descents by teleport,
+  and one of its comments blames a missing `travel()` step (§2.1). #6's first check is that our body falls,
+  walks, jumps and swims under plain inputs on 1.21.1, in a GameTest.
 - It has a real inventory, real interaction distance, and real tool-tier rules.
 - A client-less player is visible to the rest of the game. Decide each case in M1: the tab list
   entry, sleep-percentage counting, advancements and stats, and mods that send packets to "all
@@ -132,23 +210,160 @@ be resumable after preemption; this is a hard requirement on every task.
   model never stalls the body.
 - API keys live in a server-side config file that is never synced to clients or echoed in chat.
 
-### 3.4 Executor contract (filled in by the M0.5 spike)
+### 3.4 Executor contract (M0.5 spike, 2026-11-24)
 
-The least-specified piece of this design, and the core of M1–M3. The spike writes down, from
-AIBot's code or a clean design:
+The core of M1–M3. A clean design that keeps AIBot's Goal/Task shapes and replan budgets and
+fixes what went wrong there (§2.1). Every rule below names the AIBot failure it prevents where
+there is one.
 
-- **Goal:** a typed target plus a postcondition checked against live world/inventory state.
-  "Done" is the postcondition holding, never "the task returned".
-- **Task:** a resumable state machine. Required operations: start, tick, pause (reflex
-  preemption), resume, abort. Resume must re-check the world, not trust saved state.
-- **Failure:** each task reports a typed failure (unreachable, missing tool, target gone,
-  timed out). The planner decides retry, replan or give up. The model is told only on give-up.
-- **Replanning:** when inventory or the world changes under a running plan (items picked up,
-  a block mined by someone else), the planner re-solves from live state; plans are cheap
-  (§8, off-thread).
-- **Persistence:** the goal tree serialises into the body's player data, so a server restart
-  resumes the goal. Running task internals are not saved; tasks restart from their
-  postcondition check.
+**Snapshot.** An immutable, Minecraft-free record: body position and dimension (plain ints and an
+id string), inventory and equipment counts by item key, best tool tier per tool class, food
+units, nearby stations and container contents (radius configurable), and the extra data an
+active goal asks for: per-stack component facts for the item keys a `componentCheck` names
+(enchantments, potion, fill state), a structure report for a build goal. Collected on the server
+thread, read-only. Collecting it never changes state (AIBot's collector made capability
+decisions as a side effect).
+
+**Goal.** A sealed set of typed goals: `HaveItem(key, count, componentCheck?)`,
+`HaveToolTier(toolClass, tier)`, `Equip(slotSet)`, `Stockpile(key, count, container)`,
+`Build(blueprint, anchor)`, `Reach(pos, radius)`; strategies add their own. Each goal maps to a
+**postcondition**: a pure function `Snapshot → Evaluation` where `Evaluation` is
+`SATISFIED | UNSATISFIED | UNKNOWN` plus matched, required and the unmet keys. `UNKNOWN` means
+the snapshot cannot tell (a container out of range or in an unloaded chunk) and is never treated
+as done. On UNKNOWN the executor inserts one `Reach` node to bring the thing into snapshot range
+and evaluates again; still UNKNOWN after that fails the node with `TARGET_GONE`.
+- "Done" is SATISFIED on a fresh snapshot, never "the task returned". The executor evaluates the
+  goal after every node completes and when the tree runs out. On give-up the goal *result* is
+  PARTIAL when matched > 0, otherwise FAILED (PARTIAL is a result status, not an Evaluation).
+
+**Goal tree.** The planner (§4) produces a tree; each node holds a sub-goal with its own
+postcondition, and each leaf binds to a task kind plus parameters. Node states: `PENDING`,
+`ACTIVE`, `SATISFIED`, `FAILED`, `SKIPPED`. Before a node starts, its postcondition is checked;
+if it already holds (items picked up on the way, a chest the owner filled), it is marked
+SATISFIED without running. Nodes may be marked best-effort (food top-ups, torches); a failed
+best-effort node is SKIPPED, not a goal failure.
+
+| Node transition | When |
+|---|---|
+| PENDING → SATISFIED | postcondition holds before start |
+| PENDING → ACTIVE | executor starts a **new** task instance for it |
+| ACTIVE → SATISFIED | task completed and postcondition holds |
+| ACTIVE → FAILED | task failed, or completed with the postcondition unmet |
+| FAILED → PENDING | executor grants the one retry for that failure type |
+| FAILED → SKIPPED | node is best-effort |
+| any non-terminal → removed | a replan replaces the subtree |
+
+A retry always creates a fresh task; failed task instances are never restarted. Satisfied nodes
+are re-checked only at load and on replan, not continuously.
+
+The **goal** has its own states: `RUNNING`, `PAUSED` (owner paused it), `SATISFIED`, `GAVE_UP`,
+`CANCELLED`. Cancel (owner or the `cancel` tool, §3.3) aborts the active task, discards the tree,
+publishes a CANCELLED result, and removes the goal from saved state at once, so a restart cannot
+resume it.
+
+**Task.** A resumable state machine with guarded transitions:
+
+| Operation | Allowed from | Result |
+|---|---|---|
+| `start(body)` | PENDING | RUNNING, or FAILED with a typed failure |
+| `tick(body)` | RUNNING | `Running`, `Completed`, or `Failed(failure)` |
+| `pause(body, reason)` | RUNNING | PAUSED; releases inputs and any held use/break |
+| `resume(body)` | PAUSED | RUNNING; must re-acquire its targets from the world |
+| `abort(body, reason)` | any non-terminal | CANCELLED; releases inputs; no-op on terminal |
+
+- Resume re-checks the world: re-path from the current position, re-find the target block or
+  entity, re-count inventory. Saved fields are hints for where to look, never facts. (Only 7 of
+  AIBot's 38 tasks override resume, and most of those trust saved fields.)
+- A task's `Completed` is a hint; the node is SATISFIED only when its postcondition holds. A
+  task that completes with the postcondition still unmet counts as `Failed(NO_PROGRESS)`.
+- Tasks never move the body directly. Movement goes through navigation as inputs (§3.1, §2.2).
+- A task that throws is failed with `INTERNAL` and logged with its stack trace. Nothing swallows
+  exceptions around the whole body tick (AIBot catches every `NullPointerException` there).
+- Each task kind has a tick budget; exceeding it is `TIMED_OUT`. A stuck watchdog (no position
+  or inventory change for N ticks while RUNNING) fails it as `NO_PROGRESS`. Budgets, N, and the
+  reflex thresholds below are config values; their starting numbers are set and tuned in M1
+  (#7, #8), not here.
+
+**Failure.** A sealed type, never a string. Routing decisions read the type; free text is
+attached for logs only. (AIBot has ~270 distinct reason strings and routes on `startsWith`, so
+renaming a message silently changes behaviour.)
+
+| Failure | Carries | Default executor response |
+|---|---|---|
+| `UNREACHABLE` | target, navigation reason | retry once with a fresh path search; then replan (another source or target) |
+| `TARGET_GONE` | what | re-search once; then replan |
+| `MISSING_TOOL` | tool class + tier | replan (tool tier becomes a prerequisite node) |
+| `MISSING_INPUT` | item key + count | replan from live inventory |
+| `NO_SOURCE` | item key | replan with that source excluded; give up when none remain |
+| `PROTECTED` | position, rule (§3.5) | replan with that block or region excluded |
+| `HAZARD` | kind (lava, fall, drowning…) | replan avoiding it; the reflex layer handles the immediate danger |
+| `TIMED_OUT`, `NO_PROGRESS` | budget used | retry once; then replan |
+| `DIED` | drop positions, death time | abort the active task; the node returns to PENDING; if the drops can still be reached before they despawn (§3.1), insert a "recover drops" node before it; otherwise drop the death record; then replan from the respawned inventory |
+| `PREEMPT_STALLED` | reflex cause | the reflex layer held the goal paused past its limit (see Preemption); replan (e.g. leave the area), then give up |
+| `INTERNAL` | exception | give up on the goal; report to the owner and the server log |
+
+**Retry, replan, give up.** The executor, not the task, decides. Budgets, based on AIBot's
+tuned numbers:
+- Retries: at most one per node per failure type, as listed above.
+- A replan counts as progress if the goal's matched count rose or the plan fingerprint changed.
+  The **plan fingerprint** is a hash of the tree's pending nodes (kind, target key, count). AIBot
+  applies this test only to postcondition repairs; here it applies to every replan.
+- At most 3 consecutive replans without progress and 12 per goal in total. A strategy with long
+  random phases (librarian reroll, long ore expeditions) may declare a higher total, capped by a
+  server config ceiling; AIBot hard-codes a raise only for rare-ore runs. The total counts every
+  replan, progress or not, so a plan that keeps changing shape still ends.
+- When the tree runs out with the goal unsatisfied, at most 3 repair replans (AIBot's
+  `MAX_POSTCONDITION_REPLANS`), each also counted in the totals above.
+- The counters persist with the goal, so a restart does not reset them.
+- Give-up publishes a goal result (status, matched/required, unmet keys, the failure that ended
+  it) to the owner and, only then, to the model (§3.3). Node-level failures the executor is still
+  handling are not sent to the model (AIBot also holds model wake-ups while a goal plan is
+  active).
+
+**Replanning from live state.** Triggers, all counted against the budgets above: a node fails
+with a replan response; the tree runs out with the goal still unsatisfied; the goal-level
+shortfall changes (an item the plan needs was lost, or appeared from somewhere the plan did not
+expect); restore after a restart; respawn after death. Between triggers, inventory changes only
+re-check pending nodes' postconditions, which is cheap and not a replan.
+
+Planning runs off-thread on a snapshot (§8). The **input fingerprint** is a hash of the inputs the
+planner actually read: counts of the item keys in the shortfall and its recipe closure, tool
+tiers, and known stations. Item pickups outside that set do not change it. The result is adopted
+on the server thread if the input fingerprint still matches; otherwise it is re-run, at most twice
+in a row, and the third result is adopted regardless. Drift that slips through is caught by the
+per-node postcondition check before each node starts.
+
+**Preemption.** The reflex layer (§3.2) sits above the executor. On preempt, the executor pauses
+the active task and keeps it; reflex actions are not nodes in the goal tree and are not stacked
+as tasks. One registry lists the reflex behaviours (AIBot keeps two hand-written lists that
+disagree). Resume needs: no mob targeting the body, not hurt in the last N ticks, health above
+the retreat threshold. On resume, the active node's postcondition is checked first, then the
+task resumes. If the gate stays shut past a configured limit (total paused ticks, or repeated
+preemptions within a window), the active node fails with `PREEMPT_STALLED`, so a spawner or an
+empty food supply cannot hold a goal paused forever without a result.
+
+**Persistence.** Two records, both schema-versioned:
+- **Body record**, in a server-level saved-data file: body UUID and name, owner, dimension and
+  position, and whether it has an active goal. At server start every body with an active goal is
+  re-created from this record (AIBot does the same from its `runtime.json`). Bodies without one
+  respawn when their owner next asks for them.
+- **Goal state**, in the body's player data: the root goal, the goal tree's node specs and states,
+  a small per-node checkpoint map, the replan counters, pending
+  death records (drop positions and death time), the queued goals and the owner's paused flag.
+  #6 must confirm that vanilla saves player data for a stub-connection body; if it does not, the
+  goal state moves into the body record's file.
+
+The checkpoint map holds the few facts a task kind declares worth keeping across a restart,
+as hints for where to look (a mine shaft's position and the Y it reached, a village found, a
+librarian already rerolled). Each task kind owns and validates its keys; a task restarting from
+a checkpoint still re-checks the world (Task rules above). Not stored: other task internals,
+paths, reflex state, failure details beyond the counters. On load: re-evaluate every
+node's postcondition, mark the satisfied ones, re-plan the rest from live state. A checkpoint that fails validation is dropped and that node
+re-plans; a root goal that cannot be decoded is dropped and reported to the owner. A bad save
+never crashes the server or blocks other bodies.
+
+**Threading.** Executor, tasks, reflexes and snapshot collection run on the server thread.
+Planning and path search run off-thread on immutable inputs.
 
 ### 3.5 Block safety
 
@@ -345,9 +560,10 @@ doesn't depend on it.
 ## 8. Risks and open questions
 
 - **Navigation quality** is what makes or breaks the whole project and is the least within our
-  control. There is no jar to drop in on NeoForge (§2): PlayerEngine is Fabric-only and Baritone
-  is client-side. Mitigation: judge AIBot's A* in the M0.5 spike against M1's navigation check.
-  If it falls short, budget a port of PlayerEngine's movement into a separate LGPL module.
+  control. There is no jar to drop in on NeoForge (§2.2): PlayerEngine's jar brings its own task
+  engine and LLM service, and Baritone is client-side. The M0.5 spike found AIBot's A* falls short (§2.2), so M1 budgets a port of
+  the Automatone copy in PlayerEngine's `common` module into a separate LGPL module. Remaining
+  risk: swimming, which Automatone does not list as supported.
 - **Modded recipe coverage** is adapter-per-mod, forever. The lint makes the gaps visible
   instead of silent.
 - **NBT-dependent goals** (a specific enchantment, potion, or filled bucket): solver-core plans
