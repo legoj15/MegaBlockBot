@@ -345,7 +345,10 @@ tuned numbers:
 with the goal still unsatisfied; the goal-level shortfall changes (an item the plan needs was
 lost, or appeared from somewhere the plan did not expect); restore after a restart; respawn after
 death. All but the last two count against the budgets above; a restart or a death is not the
-plan's fault and must not use up a long goal's budget. Between triggers, inventory changes only
+plan's fault and must not use up a long goal's replan budget. Deaths have their own cap instead:
+the third death within one goal gives up (persisted with the counters), and a death replan
+excludes the area around the death position the way `HAZARD` excludes a hazard, so the planner
+does not walk back into the same shaft. Between triggers, inventory changes only
 re-check pending nodes' postconditions, which is cheap and not a replan.
 
 Planning runs off-thread on a snapshot (§8). The **input fingerprint** is a hash of the inputs the
