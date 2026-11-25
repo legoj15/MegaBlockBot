@@ -119,10 +119,12 @@ separate LGPL-3.0 module.** Facts checked 2026-11-24 against PlayerEngine branch
 
 - PlayerEngine embeds Automatone (Ladysnake's server-side Baritone fork, LGPL-3.0) as
   `com.player2.playerengine.automaton`: 278 files, ~27.7K lines, in the Architectury `common`
-  module, Mojang mappings plus Parchment, with no Fabric or NeoForge imports. A NeoForge module
-  (one bootstrap class) and a Fabric module sit beside it; `common` also carries 17 mixins,
-  which the port has to re-check. Branches `1.21.8-arch` and `1.21.10-arch` also exist, so two
-  of our six versions (§5) have an upstream to diff against.
+  module, Mojang mappings, with no Fabric or NeoForge imports. It does import PlayerEngine's root
+  class (logger, mod id, executor, a few tags) and an enchantment helper; the port replaces
+  those. A NeoForge module (one bootstrap class) and a Fabric module sit beside it; `common` also
+  carries 17 mixins, which the port has to re-check. Branches `1.21.8-arch` and `1.21.10-arch`
+  also exist, so two of our six versions (1.21.1 and 1.21.10, §5) have an upstream to diff
+  against.
 - Movement is input-driven: `InputOverrideHandler` writes the entity's `xxa`/`zza` (strafe and
   forward input), jumping and sneaking each tick. No teleports. Automatone's own
   `FakeServerPlayerEntity extends ServerPlayerEntity` on a dummy connection is the same body
@@ -134,7 +136,8 @@ separate LGPL-3.0 module.** Facts checked 2026-11-24 against PlayerEngine branch
 - Swimming is the open risk. It is not a listed Automatone feature; its `feature/swimming` branch
   was last touched 2021-04-30. PlayerEngine's copy has 17 references to swimming, unread. The
   first check after the port is crossing a lake and a river.
-- Upstream Automatone is stale (Fabric only, `main` last touched at 1.18), and upstream Baritone
+- Upstream Automatone is stale (Fabric only; `main` last committed 2021-05, newest activity on
+  its version branches 2022), and upstream Baritone
   steers the local client player, so neither is a better base than PlayerEngine's copy.
   PlayerEngine's licence is LGPL-3.0 in its repo (Modrinth lists MIT; the repo file wins).
 
@@ -180,7 +183,8 @@ chat ──► Language layer (LLM, tool calls) ──► typed Goal
 - A client-less player is visible to the rest of the game. Decide each case in M1: the tab list
   entry, sleep-percentage counting, advancements and stats, and mods that send packets to "all
   players" (the stub connection must swallow them safely).
-- Bound to an owner; it only takes goals from its owner (or ops).
+- Bound to an owner; it only takes goals from its owner (or ops). The owner can pause, resume
+  and cancel its goal by command (§3.4).
 - Chunk loading: keeps a ticket around itself only while it has an active goal.
 - Death: drops are recorded with coordinates; respawn re-enters the goal tree with a
   "recover drops" prerequisite if they are still within reach and the despawn timer allows.
@@ -220,7 +224,8 @@ there is one.
 id string), inventory and equipment counts by item key, best tool tier per tool class, food
 units, nearby stations and container contents (radius configurable), and the extra data an
 active goal asks for: per-stack component facts for the item keys a `componentCheck` names
-(enchantments, potion, fill state), a structure report for a build goal. Collected on the server
+(enchantments, potion, fill state), a structure report for a build goal, and observations a
+strategy declares (the current offers of the villager a librarian reroll is watching). Collected on the server
 thread, read-only. Collecting it never changes state (AIBot's collector made capability
 decisions as a side effect).
 
@@ -230,8 +235,15 @@ decisions as a side effect).
 **postcondition**: a pure function `Snapshot → Evaluation` where `Evaluation` is
 `SATISFIED | UNSATISFIED | UNKNOWN` plus matched, required and the unmet keys. `UNKNOWN` means
 the snapshot cannot tell (a container out of range or in an unloaded chunk) and is never treated
-as done. On UNKNOWN the executor inserts one `Reach` node to bring the thing into snapshot range
-and evaluates again; still UNKNOWN after that fails the node with `TARGET_GONE`.
+as done. On UNKNOWN, for a node or for the goal itself once the tree has run out, the executor
+inserts one `Reach` node to bring the thing into snapshot range and evaluates again; still
+UNKNOWN after that fails with `TARGET_GONE` (the node's, or the goal's last node).
+- **Component goals.** For a goal with a `componentCheck` (a mending book, a water bucket), only
+  stacks that pass the check count, both in the postcondition and in the shortfall the planner
+  receives. The solver still plans by identity (§4.1): target resolution turns a
+  component-qualified shortfall into a strategy (§4.4, the librarian reroll for mending), never
+  into a recipe. A component miss is therefore an ordinary unmet key, and a wrong-component stack
+  in the inventory does not hide it.
 - "Done" is SATISFIED on a fresh snapshot, never "the task returned". The executor evaluates the
   goal after every node completes and when the tree runs out. On give-up the goal *result* is
   PARTIAL when matched > 0, otherwise FAILED (PARTIAL is a result status, not an Evaluation).
@@ -241,23 +253,31 @@ postcondition, and each leaf binds to a task kind plus parameters. Node states: 
 `ACTIVE`, `SATISFIED`, `FAILED`, `SKIPPED`. Before a node starts, its postcondition is checked;
 if it already holds (items picked up on the way, a chest the owner filled), it is marked
 SATISFIED without running. Nodes may be marked best-effort (food top-ups, torches); a failed
-best-effort node is SKIPPED, not a goal failure.
+best-effort node is SKIPPED with no retry or replan, whatever the failure type says.
 
 | Node transition | When |
 |---|---|
 | PENDING → SATISFIED | postcondition holds before start |
 | PENDING → ACTIVE | executor starts a **new** task instance for it |
-| ACTIVE → SATISFIED | task completed and postcondition holds |
+| ACTIVE → SATISFIED | task completed and postcondition holds, or postcondition holds at resume |
 | ACTIVE → FAILED | task failed, or completed with the postcondition unmet |
+| ACTIVE → PENDING | task aborted by the body's death (`DIED`) |
+| (new) → PENDING | executor inserts a `Reach` (UNKNOWN) or "recover drops" (`DIED`) node |
 | FAILED → PENDING | executor grants the one retry for that failure type |
 | FAILED → SKIPPED | node is best-effort |
 | any non-terminal → removed | a replan replaces the subtree |
 
-A retry always creates a fresh task; failed task instances are never restarted. Satisfied nodes
-are re-checked only at load and on replan, not continuously.
+The table is for leaves. A non-leaf node has no task; its state is derived: SATISFIED when its
+own postcondition holds, ACTIVE while a descendant is, otherwise PENDING. Failures, retries and
+skips apply to leaves only. A retry always creates a fresh task; failed task instances are never
+restarted. Satisfied nodes are re-checked only at load and on replan, not continuously.
+Executor-inserted nodes survive a replan: they stay at the front of the new tree until they
+finish or fail.
 
-The **goal** has its own states: `RUNNING`, `PAUSED` (owner paused it), `SATISFIED`, `GAVE_UP`,
-`CANCELLED`. Cancel (owner or the `cancel` tool, §3.3) aborts the active task, discards the tree,
+The **goal** has its own states: `RUNNING`, `PAUSED`, `SATISFIED`, `GAVE_UP`, `CANCELLED`.
+`PAUSED` is set and cleared only by the owner's pause/resume command (§3.1; not a model tool);
+the active task is paused, and the goal still counts as active for respawn at server start. Goals the owner submits while one
+is running wait in a FIFO queue and start, in order, when the current goal ends. Cancel (owner or the `cancel` tool, §3.3) aborts the active task, discards the tree,
 publishes a CANCELLED result, and removes the goal from saved state at once, so a restart cannot
 resume it.
 
@@ -298,15 +318,16 @@ renaming a message silently changes behaviour.)
 | `PROTECTED` | position, rule (§3.5) | replan with that block or region excluded |
 | `HAZARD` | kind (lava, fall, drowning…) | replan avoiding it; the reflex layer handles the immediate danger |
 | `TIMED_OUT`, `NO_PROGRESS` | budget used | retry once; then replan |
-| `DIED` | drop positions, death time | abort the active task; the node returns to PENDING; if the drops can still be reached before they despawn (§3.1), insert a "recover drops" node before it; otherwise drop the death record; then replan from the respawned inventory |
-| `PREEMPT_STALLED` | reflex cause | the reflex layer held the goal paused past its limit (see Preemption); replan (e.g. leave the area), then give up |
+| `DIED` | drop positions, death time | abort the active task, if any; its node returns to PENDING; replan from the respawned inventory; if the drops can still be reached before they despawn (§3.1), a "recover drops" node goes in front of the new tree, otherwise the death record is dropped |
+| `PREEMPT_STALLED` | reflex cause | the reflex layer held the goal paused past its limit (see Preemption); give up the goal at once (the reflex layer still owns the body, so no replan can run) |
 | `INTERNAL` | exception | give up on the goal; report to the owner and the server log |
 
 **Retry, replan, give up.** The executor, not the task, decides. Budgets, based on AIBot's
 tuned numbers:
 - Retries: at most one per node per failure type, as listed above.
 - A replan counts as progress if the goal's matched count rose or the plan fingerprint changed.
-  The **plan fingerprint** is a hash of the tree's pending nodes (kind, target key, count). AIBot
+  The **plan fingerprint** is a hash of the tree's pending nodes (kind, target key, count, and
+  the chosen source or position), so switching to another source counts as a change. AIBot
   applies this test only to postcondition repairs; here it applies to every replan.
 - At most 3 consecutive replans without progress and 12 per goal in total. A strategy with long
   random phases (librarian reroll, long ore expeditions) may declare a higher total, capped by a
@@ -320,10 +341,11 @@ tuned numbers:
   handling are not sent to the model (AIBot also holds model wake-ups while a goal plan is
   active).
 
-**Replanning from live state.** Triggers, all counted against the budgets above: a node fails
-with a replan response; the tree runs out with the goal still unsatisfied; the goal-level
-shortfall changes (an item the plan needs was lost, or appeared from somewhere the plan did not
-expect); restore after a restart; respawn after death. Between triggers, inventory changes only
+**Replanning from live state.** Triggers: a node fails with a replan response; the tree runs out
+with the goal still unsatisfied; the goal-level shortfall changes (an item the plan needs was
+lost, or appeared from somewhere the plan did not expect); restore after a restart; respawn after
+death. All but the last two count against the budgets above; a restart or a death is not the
+plan's fault and must not use up a long goal's budget. Between triggers, inventory changes only
 re-check pending nodes' postconditions, which is cheap and not a replan.
 
 Planning runs off-thread on a snapshot (§8). The **input fingerprint** is a hash of the inputs the
@@ -331,7 +353,8 @@ planner actually read: counts of the item keys in the shortfall and its recipe c
 tiers, and known stations. Item pickups outside that set do not change it. The result is adopted
 on the server thread if the input fingerprint still matches; otherwise it is re-run, at most twice
 in a row, and the third result is adopted regardless. Drift that slips through is caught by the
-per-node postcondition check before each node starts.
+per-node postcondition check before each node starts. A planner that throws is treated like a
+task `INTERNAL` failure: the goal gives up and the exception is logged.
 
 **Preemption.** The reflex layer (§3.2) sits above the executor. On preempt, the executor pauses
 the active task and keeps it; reflex actions are not nodes in the goal tree and are not stacked
@@ -351,11 +374,14 @@ empty food supply cannot hold a goal paused forever without a result.
   a small per-node checkpoint map, the replan counters, pending
   death records (drop positions and death time), the queued goals and the owner's paused flag.
   #6 must confirm that vanilla saves player data for a stub-connection body; if it does not, the
-  goal state moves into the body record's file.
+  goal state *and* the body's inventory, equipment, health and hunger move into the body record's
+  file.
 
 The checkpoint map holds the few facts a task kind declares worth keeping across a restart,
 as hints for where to look (a mine shaft's position and the Y it reached, a village found, a
-librarian already rerolled). Each task kind owns and validates its keys; a task restarting from
+librarian already rerolled). Checkpoints are keyed by node identity (task kind plus target); a
+replan carries a checkpoint over to a new node with the same identity and drops the rest. Each
+task kind owns and validates its keys; a task restarting from
 a checkpoint still re-checks the world (Task rules above). Not stored: other task internals,
 paths, reflex state, failure details beyond the counters. On load: re-evaluate every
 node's postcondition, mark the satisfied ones, re-plan the rest from live state. A checkpoint that fails validation is dropped and that node
@@ -520,8 +546,9 @@ Two profiles (same idea as AIBot's):
   the same set McDevBridge targets), so every BuildCraft dev workspace can use it. SprawlCrafting
   has no 1.21.10/1.21.11 nodes, which doesn't matter: solver-core is plain Java and runs on any
   version.
-- Fabric second. BuildCraft now ships Fabric nodes for the same versions, and AIBot and
-  PlayerEngine are Fabric, so a Fabric body is cheaper than it looked. Keep loader-specific
+- Fabric second. BuildCraft now ships Fabric nodes for the same versions, AIBot is Fabric,
+  and the navigation port's source already has a Fabric module (§2.2), so a Fabric body is
+  cheaper than it looked. Keep loader-specific
   code behind a thin platform layer from M1 (BuildCraft's `buildcraft.platform` split is the
   local precedent). 1.12.2: not planned. solver-core already supports it, but the body would
   be a separate implementation.
