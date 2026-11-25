@@ -200,7 +200,8 @@ done. Priority order:
 3. Health/hunger thresholds: eat, and retreat when health is low.
 4. Night/exposure policy (configurable: shelter, bed, or ignore).
 
-The reflex layer never changes the goal tree. It only pauses it. Task state machines must
+The reflex layer never changes the goal tree. It only pauses the active task (§3.4,
+Preemption). Task state machines must
 be resumable after preemption; this is a hard requirement on every task.
 
 ### 3.3 Language layer
@@ -235,9 +236,9 @@ decisions as a side effect).
 **postcondition**: a pure function `Snapshot → Evaluation` where `Evaluation` is
 `SATISFIED | UNSATISFIED | UNKNOWN` plus matched, required and the unmet keys. `UNKNOWN` means
 the snapshot cannot tell (a container out of range or in an unloaded chunk) and is never treated
-as done. On UNKNOWN, for a node or for the goal itself once the tree has run out, the executor
-inserts one `Reach` node to bring the thing into snapshot range and evaluates again; still
-UNKNOWN after that fails with `TARGET_GONE` (the node's, or the goal's last node).
+as done. On UNKNOWN the executor inserts one `Reach` node to bring the thing into snapshot range
+and evaluates again. Still UNKNOWN after that: a leaf fails with `TARGET_GONE`; for a non-leaf
+node or for the goal itself (the tree has run out), the goal gives up with `TARGET_GONE`.
 - **Component goals.** For a goal with a `componentCheck` (a mending book, a water bucket), only
   stacks that pass the check count, both in the postcondition and in the shortfall the planner
   receives. The solver still plans by identity (§4.1): target resolution turns a
@@ -276,10 +277,14 @@ finish or fail.
 
 The **goal** has its own states: `RUNNING`, `PAUSED`, `SATISFIED`, `GAVE_UP`, `CANCELLED`.
 `PAUSED` is set and cleared only by the owner's pause/resume command (§3.1; not a model tool);
-the active task is paused, and the goal still counts as active for respawn at server start. Goals the owner submits while one
-is running wait in a FIFO queue and start, in order, when the current goal ends. Cancel (owner or the `cancel` tool, §3.3) aborts the active task, discards the tree,
-publishes a CANCELLED result, and removes the goal from saved state at once, so a restart cannot
-resume it.
+the active task is paused, and the goal still counts as active for respawn at server start. A
+reflex preemption (below) pauses only the task; the goal stays RUNNING.
+
+Goals the owner submits while one is running wait in a FIFO queue, saved with the goal state,
+and start in order when the current goal ends (but not while the reflex layer holds the body; see
+Preemption). Cancel (owner or the `cancel` tool, §3.3) aborts the active task, discards the tree,
+publishes a CANCELLED result, and removes that goal from saved state at once, so a restart cannot
+resume it; the queue then advances. "Cancel all" also clears the queue.
 
 **Task.** A resumable state machine with guarded transitions:
 
@@ -332,7 +337,8 @@ tuned numbers:
 - At most 3 consecutive replans without progress and 12 per goal in total. A strategy with long
   random phases (librarian reroll, long ore expeditions) may declare a higher total, capped by a
   server config ceiling; AIBot hard-codes a raise only for rare-ore runs. The total counts every
-  replan, progress or not, so a plan that keeps changing shape still ends.
+  plan-caused replan, progress or not, so a plan that keeps changing shape still ends (restart
+  and death replans are capped separately; see Replanning).
 - When the tree runs out with the goal unsatisfied, at most 3 repair replans (AIBot's
   `MAX_POSTCONDITION_REPLANS`), each also counted in the totals above.
 - The counters persist with the goal, so a restart does not reset them.
@@ -363,8 +369,10 @@ task `INTERNAL` failure: the goal gives up and the exception is logged.
 the active task and keeps it; reflex actions are not nodes in the goal tree and are not stacked
 as tasks. One registry lists the reflex behaviours (AIBot keeps two hand-written lists that
 disagree). Resume needs: no mob targeting the body, not hurt in the last N ticks, health above
-the retreat threshold. On resume, the active node's postcondition is checked first, then the
-task resumes. If the gate stays shut past a configured limit (total paused ticks, or repeated
+the retreat threshold. On resume, the active node's postcondition is checked first: if it holds,
+the task is aborted and the node marked SATISFIED; otherwise the task resumes. While the gate is
+shut the executor starts nothing: no replan, no new tree, no queued goal. Responses that arrive
+meanwhile (a `DIED` replan, the next queued goal) wait until the gate opens. If the gate stays shut past a configured limit (total paused ticks, or repeated
 preemptions within a window), the active node fails with `PREEMPT_STALLED`, so a spawner or an
 empty food supply cannot hold a goal paused forever without a result.
 
