@@ -31,8 +31,9 @@ function Get-NodeJvms {
             $processes = @(Get-CimInstance Win32_Process -Filter "Name='java.exe'" -Property ProcessId, CommandLine -ErrorAction Stop)
         }
         catch {
-            if ($try -ge 5) { throw "Could not list java processes after $try tries: $($_.Exception.Message)" }
-            Start-Sleep -Milliseconds (300 * $try)
+            # Seen failing for several seconds on end while other Gradle builds and servers run: be patient (about 30 s).
+            if ($try -ge 12) { throw "Could not list java processes after $try tries: $($_.Exception.Message)" }
+            Start-Sleep -Milliseconds ([Math]::Min(500 * $try, 3000))
         }
     }
     @($processes | Where-Object {
