@@ -74,7 +74,7 @@ pathfinding/ 1.7K, the rest brain, persistence, commands). What it has and what 
 | Executor | `GoalExecutor`: 6K-line singleton; `submit` alone is ~1.3K lines; 900 lines of checkpoint codec; builds ~15 task classes directly and names ~30. | **No.** Its replan budgets are worth keeping (§3.4). |
 | Tasks | 38 task classes, largest 5.2K lines (`OreDigTask`), helpers copy-pasted across 7 files, 377 `fail("…")` sites with ~270 distinct string reasons routed by `startsWith`. | **No.** Read individual tasks (fishing, trading, ore dig lava handling) as behaviour references when writing ours. |
 | Reflex | `DangerWatcher` (1.2K lines) + `SurvivalGuard` + `NavSafetyNet` + `StuckWatcher`, LIFO pause stack. Two hard-coded "survival task" lists that disagree. | **Ideas only**: the resume gate (§3.4, Preemption) and the hazard rules (§2.2). |
-| Body | `ServerPlayerEntity` subclass + fake `ClientConnection` + six mixins; no Carpet dependency. Movement: sets `forwardSpeed`/`sidewaysSpeed`, but every jump, drop, descent, swim step and sneak-edge shift is a bounded one-block `teleport`, and rescues teleport further (gated off in `strict_survival`). Its comments disagree on why: one says the server never runs `travel()` for its body (no passive gravity), another says gravity does pull it down. | **No.** Violates "never teleports" (§3.1). Carpet and Automatone fake players move through inputs, so plain-input movement is achievable; #6 must prove it. |
+| Body | `ServerPlayerEntity` subclass + fake `ClientConnection` + six mixins (two of them body-related); no Carpet dependency. Movement: sets `forwardSpeed`/`sidewaysSpeed`, but every jump, drop, descent, swim step and sneak-edge shift is a bounded one-block `teleport`, and rescues teleport further (gated off in `strict_survival`). Its comments disagree on why: one says the server never runs `travel()` for its body (no passive gravity), another says gravity does pull it down. Checked 2026-11-26 against 1.21.1 bytecode: the second is right. `ServerPlayer.doTick()` runs `Player.tick` → `aiStep` → `travel`; AIBot calls it, but applies its inputs after it, one tick late. | **No.** Violates "never teleports" (§3.1). Carpet's fake player walks on plain inputs written before `doTick()` (docs/handoff/body-reference.md); #6 proves ours does. |
 | Navigation | See §2.2. | **No.** |
 | LLM | One OpenAI-compatible client (`DeepSeekApiClient`), 63 tools, async off-thread, never per-tick; terminal goal result injected into the next model turn. | Pattern only. Our tool set is deliberately smaller (§3.3). |
 | Persistence | Gson `runtime.json` per world, schema-versioned, atomic writes, read-only on schema mismatch; saves mission spec + checkpoint map, re-plans on restore. | **Pattern, yes** (§3.4), stored in player data instead. |
@@ -108,8 +108,8 @@ one, drop up to the safe-fall limit, dig through, pillar up). Against the M1(b) 
   distance) is 0/4, status BLOCKED.
 
 Rules to carry into our navigation (#7), whatever engine it uses: never open a dig cell whose
-sides or top touch lava, except the target cell itself, which a task seals first (AIBot's
-`ore_dig_lava_seal`); never dig a cell with a falling block (sand, gravel) above its head cell;
+sides or top touch lava, except the target cell itself, where a task first seals the lava source
+beside it (AIBot logs this as `ore_dig_fluid_seal`); never dig a cell with a falling block (sand, gravel) above its head cell;
 treat the blocks in AIBot's `Standability.isDangerous` (lava, fire, soul fire, cactus, magma,
 campfires, sweet berry bush, wither rose, powder snow, pointed dripstone) as never-stand cells.
 
@@ -126,16 +126,23 @@ separate LGPL-3.0 module.** Facts checked 2026-11-24 against PlayerEngine branch
   also exist, so two of our six versions (1.21.1 and 1.21.10, §5) have an upstream to diff
   against.
 - Movement is input-driven: `InputOverrideHandler` writes the entity's `xxa`/`zza` (strafe and
-  forward input), jumping and sneaking each tick. No teleports. Automatone's own
-  `FakeServerPlayerEntity extends ServerPlayerEntity` on a dummy connection is the same body
-  shape as §3.1. Which entity class PlayerEngine itself drives is unconfirmed; the engine takes a
-  `LivingEntity`, so pointing it at our player body is part of the port.
-- Automatone has what AIBot lacks, per its feature list (not yet checked in code): segmented long
-  paths with the next segment precomputed, path search off the server thread, a chunk cache,
-  parkour, sneak-back-place bridging, pillaring, tool-aware breaking, ladders, doors and gates.
-- Swimming is the open risk. It is not a listed Automatone feature; its `feature/swimming` branch
-  was last touched 2021-04-30. PlayerEngine's copy has 17 references to swimming, unread. The
-  first check after the port is crossing a lake and a river.
+  forward input), jumping and sneaking each tick. No teleports. The entity PlayerEngine drives is
+  not a player: it is `AutomatoneEntity extends LivingEntity`, shipped only as a binary jar in
+  `libs/` (its old `FakeServerPlayerEntity` was deleted in `2fad4d3`). The engine takes a
+  `LivingEntity` plus three provider interfaces (inventory, interaction manager, hunger); the port
+  points it at our `ServerPlayer` body and replaces `LivingEntityInteractionManager`'s hand-rolled
+  block breaking with the player's own `ServerPlayerGameMode`, so breaking fires the normal
+  events and tool rules (docs/handoff/automatone-port.md).
+- Checked in code 2026-11-26: segmented long paths with the next segment precomputed, path search
+  off the server thread (time-budgeted, 500 ms first plan), parkour, sneak-back-place bridging,
+  pillaring, tool-aware breaking. Not as listed: this copy has no working chunk cache, and the
+  off-thread search reads live chunks through an accessor with no snapshot or lock. Its
+  enchantment helper returns the Efficiency level for every enchantment; the port does not carry
+  it over.
+- Swimming is the open risk. `allowSwimming` is off by default: with defaults the engine paths
+  along a lake's top layer holding jump and treats deep and flowing water as blocked. With the
+  setting on, deep water opens. Neither is tested upstream. The first check after the port is
+  crossing a lake and a river.
 - Upstream Automatone is stale (Fabric only; `main` last committed 2021-05, newest activity on
   its version branches 2022), and upstream Baritone
   steers the local client player, so neither is a better base than PlayerEngine's copy.
@@ -172,13 +179,14 @@ chat ──► Language layer (LLM, tool calls) ──► typed Goal
   ignores damage and can't die, and every one of those would have to be overridden back.
   Reference implementation: Carpet's `EntityPlayerMPFake` (fake connection, spawn/respawn,
   player-list handling).
-- **Movement is simulated server-side.** A normal `ServerPlayer` never moves itself; its position
-  comes from the client's movement packets. The body must set its own movement input (forward
-  and strafe, jumping, sneaking, look direction) and run the living-entity movement step each
-  tick, as Carpet does. Navigation outputs those inputs, never teleports. AIBot's `ServerPlayer`
-  subclass (`super.tick()` + `playerTick()`) moves its jumps, drops and descents by teleport,
-  and one of its comments blames a missing `travel()` step (§2.1). #6's first check is that our body falls,
-  walks, jumps and swims under plain inputs on 1.21.1, in a GameTest.
+- **Movement is simulated server-side.** A real player's entity tick (`ServerPlayer.doTick()`,
+  which runs `aiStep` and `travel`) is called only from its connection's tick, and its position
+  is then overwritten from the client's movement packets. A body's stub connection is never
+  ticked, so the body's own `tick()` writes its movement input (`xxa`/`zza`, jumping, sneaking,
+  sprinting, look direction) and then calls `doTick()` itself, as Carpet does. Inputs go in before
+  `doTick()`, or they act a tick late. `ServerPlayer.setPlayerInput` is not the way in: it only
+  writes for a passenger. Navigation outputs those inputs, never teleports. #6's first check is
+  that our body falls, walks, jumps and swims under plain inputs on 1.21.1, in a GameTest.
 - It has a real inventory, real interaction distance, and real tool-tier rules.
 - A client-less player is visible to the rest of the game. Decide each case in M1: the tab list
   entry, sleep-percentage counting, advancements and stats, and mods that send packets to "all
@@ -462,12 +470,16 @@ bot server; every solver fix would wait on a SprawlCrafting release across all i
 SprawlCrafting would carry a feature-gate for every future feature. Its Minecraft→solver
 adapters are version-specific code the bot needs on its own versions anyway (§4.2).
 
-Current state the extraction has to replace: solver-core is not a Gradle module today. Every
-SprawlCrafting node build adds `solver-core/src/main/java` (and its tests) as an extra source
-directory, and the separate `forge-1.12.2/` RetroFuturaGradle build does the same. Extraction
-has to change all of them. The same change renames the package from
-`com.legoj15.sprawlcrafting.craft.solver` to `com.legoj15.solver` (decided in #1), before
-the first published version, because renaming it afterwards breaks every consumer.
+Current state (2026-11-26): the extraction is done (#2). solver-core is a standalone Gradle
+build publishing `com.legoj15:solver`, package `com.legoj15.solver` (#1); every SprawlCrafting
+build pulls it in as a composite and nests it. This mod does the same from the sibling checkout
+(`settings.gradle.kts` looks for it; docs/platform-layer.md). The changes in the table above are
+#13 (station, per-slot quantity, cost model) and #19 (byproducts, memoization).
+
+How the cost model works (#13): it does not search plan space. The solver derives a unit cost per
+item (the cheaper of gathering it and its cheapest producer) and uses it to order producers and
+slot alternatives; an item cheaper to gather than to craft becomes a leaf. Stock is still used
+first. The greedy engine is unchanged, so SprawlCrafting's behaviour without a cost model is.
 
 ### 4.2 Producer adapters
 
@@ -516,7 +528,10 @@ Known traps when building the index:
 
 - Loot tables are trees, not lists: nested `loot_table` references, `alternatives`/`group`
   entries, tag entries, and conditions (silk touch, tool match, random chance) all have to be
-  evaluated or kept as conditions on the source.
+  evaluated or kept as conditions on the source. The tree's fields are private in 1.21.1 with no
+  getters; the resolver encodes each table through its codec and walks the JSON, which is the
+  stable datapack format, instead of opening the classes with an access transformer. Ore height
+  ranges are read the same way from the placed feature's codec.
 - NeoForge global loot modifiers add or replace drops without appearing in the tables. Run the
   modifiers over a test context per block/entity, or accept that the lint misses them and say
   so in its output.
@@ -534,7 +549,8 @@ registry that has no recipe and no source. That's milestone M0.
 Some goals are multi-stage plans no generic planner should invent. They are written by hand
 and registered with a precondition, an expected yield, and a cost:
 
-- Librarian reroll (enchanted books)
+- Librarian reroll (enchanted books). Designed here: AIBot has no reroll, lectern or village
+  code, only a single trade with a villager already beside it.
 - Fishing (manual), and auto-fisher build (blueprint)
 - Branch mine at Y, cave exploration, travel until biome/structure found
 - Blueprint build from structure NBT (farms, shelters, auto-fisher)
