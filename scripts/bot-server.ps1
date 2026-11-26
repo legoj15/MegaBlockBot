@@ -541,8 +541,10 @@ try {
         # Comma-separated pairs split only where a new key= begins, so a value may contain commas.
         foreach ($part in ($text -split ',(?=[A-Za-z0-9_.\-]+=)')) {
             if ($part -notmatch '^([A-Za-z0-9_.\-]+)=(.*)$') { throw "-Property '$part' is not key=value." }
-            if ($Matches[2] -match '[^\x20-\x7E]') { throw "-Property $($Matches[1]): the value must be printable ASCII." }
-            $script:PropertyPairs += [pscustomobject]@{ Key = $Matches[1]; Value = $Matches[2] }
+            # Copy the groups first: a successful -match below replaces $Matches.
+            $key = $Matches[1]; $value = $Matches[2]
+            if ($value -match '[^\x20-\x7E]') { throw "-Property ${key}: the value must be printable ASCII." }
+            $script:PropertyPairs += [pscustomobject]@{ Key = $key; Value = $value }
         }
     }
 

@@ -7,6 +7,7 @@ import net.neoforged.bus.api.IEventBus;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.Locale;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -55,8 +56,9 @@ final class NeoForgeGameTests {
         String namespace = test.templateNamespace().isEmpty() ? MegaBlockBot.MOD_ID : test.templateNamespace();
         if (!namespaces.isEmpty() && !namespaces.contains(namespace)) return;
 
-        // Same names as vanilla: "<class>.<method>" lower-cased, unique across holders.
-        String name = holder.getSimpleName().toLowerCase() + "." + method.getName().toLowerCase();
+        // Same names as vanilla: "<class>.<method>" lower-cased, unique across holders. Locale.ROOT, unlike vanilla:
+        // the name ends up in a resource location, and a Turkish default locale lower-cases I to a dotless i.
+        String name = holder.getSimpleName().toLowerCase(Locale.ROOT) + "." + method.getName().toLowerCase(Locale.ROOT);
         String structure = namespace + ":" + (test.template().isEmpty() ? name : test.template());
         // GameTestRegistry hands out its live lists: this is what its own register(Method) ends up doing.
         GameTestRegistry.getAllTestFunctions().add(new TestFunction(
