@@ -23,7 +23,19 @@ function Get-NodeJvms {
     $serverMark = "$rootN\versions\$Node\"
     $clientMark = "$rootN\gradle\wrapper\gradle-wrapper.jar"
     $tasks = ":${Node}:runserver", ":${Node}:rungametestserver"
-    @(Get-CimInstance Win32_Process -Filter "Name='java.exe'" -Property ProcessId, CommandLine | Where-Object {
+    # WMI fails now and then on a loaded machine ("A general error occurred"). An empty answer would read as "nothing is
+    # running", so retry, and fail loudly rather than report no processes when it keeps failing.
+    $processes = $null
+    for ($try = 1; $null -eq $processes; $try++) {
+        try {
+            $processes = @(Get-CimInstance Win32_Process -Filter "Name='java.exe'" -Property ProcessId, CommandLine -ErrorAction Stop)
+        }
+        catch {
+            if ($try -ge 5) { throw "Could not list java processes after $try tries: $($_.Exception.Message)" }
+            Start-Sleep -Milliseconds (300 * $try)
+        }
+    }
+    @($processes | Where-Object {
         $c = & $norm "$($_.CommandLine)"
         $c.Contains($serverMark) -or ($c.Contains($clientMark) -and ($tasks | Where-Object { $c.Contains($_) }))
     } | ForEach-Object { [int]$_.ProcessId })
