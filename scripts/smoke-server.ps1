@@ -5,9 +5,11 @@
   Proves "a dev server starts with the mod loaded" per Stonecutter node. For each node it accepts the EULA in
   versions/<node>/run, runs :<node>:runServer and watches the output for "MegaBlockBot ready (NeoForge on Minecraft
   <node>)". Afterwards it kills Gradle's process tree, then any java.exe whose command line names this repo's
-  versions/<node>/ folder or runs :<node>:runServer through this repo's wrapper. Matching by command line, not by a
+  versions/<node>/ folder or runs :<node>:runServer (or :runGameTestServer) through this repo's wrapper. Matching by command line, not by a
   remembered PID, finds a server JVM orphaned by an early Gradle exit and never touches a process that reused a PID.
-  The same sweep runs before each node starts, so a server left by an interrupted run cannot hold the port. The smoke runs classes from build/classes, not the shipped jar.
+  The same sweep runs before each node starts, so a server left by an interrupted run cannot hold the port. The sweep
+  lives in scripts/lib/MbbNodes.psm1, shared with gametest.ps1. The smoke runs classes from build/classes, not the
+  shipped jar.
   Logs go to build/smoke/<node>.log. Exit code is the number of failed nodes.
 .EXAMPLE
   ./scripts/smoke-server.ps1
@@ -21,7 +23,8 @@ param(
 )
 
 $root = Split-Path $PSScriptRoot -Parent
-$known = Get-ChildItem (Join-Path $root 'versions') -Directory | ForEach-Object Name
+Import-Module (Join-Path $PSScriptRoot 'lib/MbbNodes.psm1') -Force
+$known = Get-KnownNodes $root
 if (-not $PSBoundParameters.ContainsKey('Nodes')) { $Nodes = $known }
 $Nodes = @($Nodes | ForEach-Object { $_ -split ',' } | ForEach-Object Trim | Where-Object { $_ } | Select-Object -Unique)
 if (-not $Nodes) { throw "No nodes selected. Known: $($known -join ', ')" }
@@ -32,29 +35,6 @@ $logDir = Join-Path $root 'build/smoke'
 New-Item -ItemType Directory -Force $logDir | Out-Null
 $failed = @()
 
-function Get-NodeJvms([string]$Node) {
-    # Normalise slashes and doubled separators: Gradle writes both into command lines.
-    $norm = { param($t) ($t -replace '/', '\' -replace '\+', '\').ToLowerInvariant() }
-    $rootN = & $norm $root
-    $serverMark = "$rootN\versions\$Node\"
-    $clientMark = "$rootN\gradle\wrapper\gradle-wrapper.jar"
-    $task = ":${Node}:runserver"
-    @(Get-CimInstance Win32_Process -Filter "Name='java.exe'" -Property ProcessId, CommandLine | Where-Object {
-        $c = & $norm "$($_.CommandLine)"
-        $c.Contains($serverMark) -or ($c.Contains($clientMark) -and $c.Contains($task))
-    } | ForEach-Object { [int]$_.ProcessId })
-}
-
-function Stop-NodeJvms([string]$Node) {
-    foreach ($id in Get-NodeJvms $Node) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
-    for ($i = 0; $i -lt 10; $i++) {
-        $left = Get-NodeJvms $Node
-        if (-not $left) { return @() }
-        Start-Sleep -Seconds 1
-    }
-    return $left
-}
-
 foreach ($node in $Nodes) {
     $runDir = Join-Path $root "versions/$node/run"
     New-Item -ItemType Directory -Force $runDir | Out-Null
@@ -62,7 +42,7 @@ foreach ($node in $Nodes) {
 
     $log = Join-Path $logDir "$node.log"
     $err = Join-Path $logDir "$node.err.log"
-    $stale = Stop-NodeJvms $node
+    $stale = Stop-NodeJvms -Root $root -Node $node
     if ($stale) { Write-Host "[$node] could not stop a leftover server JVM: $($stale -join ', ')"; $failed += $node; continue }
     Remove-Item $log, $err -ErrorAction SilentlyContinue
     Write-Host "[$node] starting dev server"
@@ -94,9 +74,7 @@ foreach ($node in $Nodes) {
             if ($exited) { $result = 'exited early'; break }
         }
     } finally {
-        if (-not $proc.HasExited) { & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null }
-        $proc.WaitForExit(30000) | Out-Null
-        $survivors = Stop-NodeJvms $node
+        $survivors = Stop-GradleRun -Process $proc -Root $root -Node $node
         if ($survivors) { $result = "$result; server JVMs survived the kill: $($survivors -join ', ')" }
     }
 

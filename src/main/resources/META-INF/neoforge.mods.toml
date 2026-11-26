@@ -3,6 +3,13 @@ loaderVersion="[1,]"
 license="MIT"
 issueTrackerURL="https://github.com/legoj15/MegaBlockBot/issues"
 
+# This file is a Groovy template (build.gradle.kts, processResources): properties are substituted, and the sections
+# in bot scriptlets are kept only on a node whose bot_enabled is true. Do not write the template syntax in a comment.
+<% if (bot) { %>
+[[mixins]]
+config = "${mod_id}.mixins.json"
+<% } %>
+
 [[mods]]
 modId="${mod_id}"
 version="${mod_version}"
@@ -24,3 +31,13 @@ A server-side AI player that takes natural-language goals and achieves them thro
     versionRange="${mc_dep_range}"
     ordering="NONE"
     side="BOTH"
+<% if (bot) { %>
+
+# The navigation module is a separate mod and jar (its own licence), nested in this jar. Loaded first: this mod calls it.
+[[dependencies.${mod_id}]]
+    modId="${mod_id}_nav"
+    type="required"
+    versionRange="[${mod_version},)"
+    ordering="AFTER"
+    side="BOTH"
+<% } %>

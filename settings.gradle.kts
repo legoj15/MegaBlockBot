@@ -13,6 +13,40 @@ plugins {
     id("dev.kikugie.stonecutter") version "0.9.8"
 }
 
+// solver-core is the shared planner, a standalone Gradle build in the sibling SprawlCrafting repo. Consumed as a
+// composite build so dev needs no publish step; the shipped jar nests it (jarJar in build.gradle.kts), never shades it.
+// Looked up in this order. The third form is what a git worktree under <parent>/MegaBlockBot-wt/<name> needs.
+run {
+    val override = providers.gradleProperty("MBB_SOLVER_CORE_DIR")
+        .orElse(providers.environmentVariable("MBB_SOLVER_CORE_DIR")).orNull
+    val candidates = listOf(
+        "MBB_SOLVER_CORE_DIR (Gradle property or environment variable)" to override?.let { file(it) },
+        "../SprawlCrafting/solver-core" to file("../SprawlCrafting/solver-core"),
+        "../../SprawlCrafting/solver-core" to file("../../SprawlCrafting/solver-core"),
+    )
+    fun isSolverCore(dir: File?) = dir != null && File(dir, "settings.gradle.kts").isFile && File(dir, "gradle.properties").isFile
+
+    // An override that points nowhere is skipped, not fatal, but said out loud: a typo must not silently pick a sibling.
+    if (override != null && !isSolverCore(file(override))) {
+        logger.warn("MBB_SOLVER_CORE_DIR=$override is not a solver-core directory; trying the sibling checkouts")
+    }
+    val solverCore = candidates.firstNotNullOfOrNull { (_, dir) -> dir?.takeIf(::isSolverCore) }
+        ?: throw GradleException(
+            "solver-core (SprawlCrafting/solver-core) not found. Looked for it, in order, at:\n" +
+                candidates.joinToString("\n") { (name, dir) -> "  - $name" + (dir?.let { " = ${it.canonicalPath}" } ?: " (not set)") } +
+                "\nCheck out SprawlCrafting next to this repo, or point MBB_SOLVER_CORE_DIR at its solver-core directory."
+        )
+    logger.lifecycle("solver-core: ${solverCore.canonicalPath}")
+
+    includeBuild(solverCore) {
+        // Named so build.gradle.kts can find its directory and read solver_version from it.
+        name = "solver-core"
+        dependencySubstitution {
+            substitute(module("com.legoj15:solver")).using(project(":"))
+        }
+    }
+}
+
 stonecutter {
     create(rootProject) {
         // BuildCraft's NeoForge version set (also McDevBridge's). Fabric nodes, when they come, follow

@@ -1,0 +1,31 @@
+modLoader="javafml"
+loaderVersion="[1,]"
+# The navigation module is a port of LGPL-3.0 code and ships as its own jar under its own licence (LICENSE and
+# COPYING, at the jar root). The rest of MegaBlockBot is MIT.
+license="LGPL-3.0-or-later"
+issueTrackerURL="https://github.com/legoj15/MegaBlockBot/issues"
+
+[[mixins]]
+config = "${mod_id}_nav.mixins.json"
+
+[[mods]]
+modId="${mod_id}_nav"
+version="${mod_version}"
+displayName="MegaBlockBot Navigation"
+description='''
+Pathfinding and movement for MegaBlockBot. A separate mod and jar so that its licence stays separate.
+'''
+
+[[dependencies.${mod_id}_nav]]
+    modId="neoforge"
+    type="required"
+    versionRange="${neo_dep_range}"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}_nav]]
+    modId="minecraft"
+    type="required"
+    versionRange="${mc_dep_range}"
+    ordering="NONE"
+    side="BOTH"
