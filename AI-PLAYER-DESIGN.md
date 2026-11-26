@@ -477,9 +477,19 @@ build pulls it in as a composite and nests it. This mod does the same from the s
 #13 (station, per-slot quantity, cost model) and #19 (byproducts, memoization).
 
 How the cost model works (#13): it does not search plan space. The solver derives a unit cost per
-item (the cheaper of gathering it and its cheapest producer) and uses it to order producers and
-slot alternatives; an item cheaper to gather than to craft becomes a leaf. Stock is still used
-first. The greedy engine is unchanged, so SprawlCrafting's behaviour without a cost model is.
+item (the cheaper of gathering it and its cheapest producer, bounded by `maxDepth`, the same answer
+whatever was asked before) and uses it to order producers and slot alternatives. The greedy engine
+is unchanged, so SprawlCrafting's behaviour without a cost model is. Two rules keep it honest:
+
+- Planning from stock (`solve`): cost only reorders. Nothing is dropped for being dear or
+  unobtainable, so a target the inventory can make is always found.
+- Reporting what is missing (`shortfall`, the gather list): what stock can make is credited first.
+  Only the remainder is costed: an item no dearer to gather than to craft becomes a leaf, a slot's
+  remainder goes to its cheapest alternative, and an unobtainable option is picked only when every
+  option is unobtainable, so the planner still gets a demand it can report as having no source.
+
+A station is an item that must be in stock while its step runs and is not consumed. The bot keeps
+its crafting table as an inventory item: it places it, uses it and picks it up again (§4.2).
 
 ### 4.2 Producer adapters
 
