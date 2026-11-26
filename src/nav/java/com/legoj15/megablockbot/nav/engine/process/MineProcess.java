@@ -19,7 +19,7 @@ package com.legoj15.megablockbot.nav.engine.process;
 
 import com.legoj15.megablockbot.nav.NavRuntime;
 import com.legoj15.megablockbot.nav.engine.Baritone;
-import com.legoj15.megablockbot.nav.engine.api.entity.LivingEntityInventory;
+import com.legoj15.megablockbot.nav.engine.api.entity.IEntityInventory;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.Goal;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.GoalBlock;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.GoalComposite;
@@ -84,8 +84,8 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
    @Override
    public PathingCommand onTick(boolean calcFailed, boolean isSafeToCancel) {
       if (this.desiredQuantity > 0) {
-         LivingEntityInventory inventory = this.ctx.inventory();
-         int curr = inventory == null ? -1 : inventory.main.stream().filter(stack -> this.filter.has(stack)).mapToInt(ItemStack::getCount).sum();
+         IEntityInventory inventory = this.ctx.inventory();
+         int curr = inventory == null ? -1 : inventory.main().stream().filter(stack -> this.filter.has(stack)).mapToInt(ItemStack::getCount).sum();
          NavRuntime.LOGGER.debug("Currently have " + curr + " valid items");
          if (curr >= this.desiredQuantity) {
             this.logDirect("Have " + curr + " valid items");

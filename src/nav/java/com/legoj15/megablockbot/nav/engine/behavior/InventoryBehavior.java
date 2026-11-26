@@ -19,7 +19,7 @@ package com.legoj15.megablockbot.nav.engine.behavior;
 
 import com.legoj15.megablockbot.nav.engine.Baritone;
 import com.legoj15.megablockbot.nav.engine.api.entity.IInventoryProvider;
-import com.legoj15.megablockbot.nav.engine.api.entity.LivingEntityInventory;
+import com.legoj15.megablockbot.nav.engine.api.entity.IEntityInventory;
 import com.legoj15.megablockbot.nav.engine.utils.ToolSet;
 import java.util.ArrayList;
 import java.util.OptionalInt;
@@ -69,7 +69,7 @@ public final class InventoryBehavior extends Behavior {
       }
    }
 
-   public void attemptToPutOnHotbar(int inMainInvy, Predicate<Integer> disallowedHotbar, LivingEntityInventory inventory) {
+   public void attemptToPutOnHotbar(int inMainInvy, Predicate<Integer> disallowedHotbar, IEntityInventory inventory) {
       OptionalInt destination = this.getTempHotbarSlot(disallowedHotbar);
       if (destination.isPresent()) {
          this.swapWithHotBar(inMainInvy, destination.getAsInt(), inventory);
@@ -77,14 +77,14 @@ public final class InventoryBehavior extends Behavior {
    }
 
    public OptionalInt getTempHotbarSlot(Predicate<Integer> disallowedHotbar) {
-      LivingEntityInventory inventory = this.ctx.inventory();
+      IEntityInventory inventory = this.ctx.inventory();
       if (inventory == null) {
          return OptionalInt.empty();
       } else {
          ArrayList<Integer> candidates = new ArrayList<>();
 
          for (int i = 1; i < 8; i++) {
-            if (((ItemStack)inventory.main.get(i)).isEmpty() && !disallowedHotbar.test(i)) {
+            if (((ItemStack)inventory.main().get(i)).isEmpty() && !disallowedHotbar.test(i)) {
                candidates.add(i);
             }
          }
@@ -101,14 +101,14 @@ public final class InventoryBehavior extends Behavior {
       }
    }
 
-   private void swapWithHotBar(int inInventory, int inHotbar, LivingEntityInventory inventory) {
+   private void swapWithHotBar(int inInventory, int inHotbar, IEntityInventory inventory) {
       ItemStack h = inventory.getItem(inHotbar);
       inventory.setItem(inHotbar, inventory.getItem(inInventory));
       inventory.setItem(inInventory, h);
    }
 
-   private int firstValidThrowaway(LivingEntityInventory inventory) {
-      NonNullList<ItemStack> invy = inventory.main;
+   private int firstValidThrowaway(IEntityInventory inventory) {
+      NonNullList<ItemStack> invy = inventory.main();
 
       for (int i = 0; i < invy.size(); i++) {
          if (this.baritone.settings().acceptableThrowawayItems.get().contains(((ItemStack)invy.get(i)).getItem())) {
@@ -120,7 +120,7 @@ public final class InventoryBehavior extends Behavior {
    }
 
    private int bestToolAgainst(Block against, Class<? extends TieredItem> cla$$) {
-      NonNullList<ItemStack> invy = this.ctx.inventory().main;
+      NonNullList<ItemStack> invy = this.ctx.inventory().main();
       int bestInd = -1;
       double bestSpeed = -1.0;
 
@@ -188,25 +188,25 @@ public final class InventoryBehavior extends Behavior {
       if (!(this.ctx.entity() instanceof IInventoryProvider p)) {
          return false;
       } else {
-         NonNullList var7 = p.getLivingInventory().main;
+         NonNullList var7 = p.getLivingInventory().main();
 
          for (int i = 0; i < 9; i++) {
             ItemStack item = (ItemStack)var7.get(i);
             if (desired.test(item)) {
                if (select) {
-                  p.getLivingInventory().selectedSlot = i;
+                  p.getLivingInventory().setSelectedSlot(i);
                }
 
                return true;
             }
          }
 
-         if (desired.test((ItemStack)p.getLivingInventory().offHand.get(0))) {
+         if (desired.test((ItemStack)p.getLivingInventory().offHand().get(0))) {
             for (int ix = 0; ix < 9; ix++) {
                ItemStack item = (ItemStack)var7.get(ix);
                if (item.isEmpty() || item.getItem() instanceof PickaxeItem) {
                   if (select) {
-                     p.getLivingInventory().selectedSlot = ix;
+                     p.getLivingInventory().setSelectedSlot(ix);
                   }
 
                   return true;
@@ -218,9 +218,9 @@ public final class InventoryBehavior extends Behavior {
       }
    }
 
-   public static int getSlotWithStack(LivingEntityInventory inv, TagKey<Item> tag) {
-      for (int i = 0; i < inv.main.size(); i++) {
-         if (!((ItemStack)inv.main.get(i)).isEmpty() && ((ItemStack)inv.main.get(i)).is(tag)) {
+   public static int getSlotWithStack(IEntityInventory inv, TagKey<Item> tag) {
+      for (int i = 0; i < inv.main().size(); i++) {
+         if (!((ItemStack)inv.main().get(i)).isEmpty() && ((ItemStack)inv.main().get(i)).is(tag)) {
             return i;
          }
       }

@@ -47,7 +47,20 @@ public final class NavRuntime {
                         Thread thread = new Thread(r, "MegaBlockBot nav " + THREAD_COUNTER.incrementAndGet());
                         thread.setDaemon(true);
                         return thread;
-                    });
+                    }) {
+                    // Every task is guarded: a throw from a search or a scan is logged here and ends that task only.
+                    // Unguarded, it would kill the worker thread and print to stderr with no module context.
+                    @Override
+                    public void execute(Runnable task) {
+                        super.execute(() -> {
+                            try {
+                                task.run();
+                            } catch (Throwable t) {
+                                LOGGER.error("Navigation task failed", t);
+                            }
+                        });
+                    }
+                };
                 pool.allowCoreThreadTimeOut(true);
                 executor = pool;
             }

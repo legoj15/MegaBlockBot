@@ -449,6 +449,9 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior 
             NavRuntime.getExecutor()
                .execute(
                   () -> {
+                     // MegaBlockBot: try/finally so a throw anywhere below still clears inProgress (upstream left it
+                     // set, and no search ever started again for this entity).
+                     try {
                      if (talkAboutIt) {
                         this.logDebug("Starting to search for path from " + start + " to " + goal);
                      }
@@ -465,8 +468,9 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior 
                               } else {
                                  this.logDebug("Warning: discarding orphan path segment with incorrect start");
                               }
-                           } else if (calcResult.getType() != PathCalculationResult.Type.CANCELLATION
-                              && calcResult.getType() != PathCalculationResult.Type.EXCEPTION) {
+                           } else if (calcResult.getType() != PathCalculationResult.Type.CANCELLATION) {
+                              // MegaBlockBot: an EXCEPTION result fails the calculation too (upstream queued nothing
+                              // and the process re-requested the same failing search every tick).
                               this.queuePathEvent(PathEvent.CALC_FAILED);
                            }
                         } else if (this.next == null) {
@@ -510,6 +514,17 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior 
 
                         synchronized (this.pathCalcLock) {
                            this.inProgress = null;
+                        }
+                     }
+                     } catch (Throwable t) {
+                        this.baritone.setLastFailure("path search failed: " + t);
+                        NavRuntime.LOGGER.error("Path search task failed", t);
+                        this.queuePathEvent(PathEvent.CALC_FAILED);
+                     } finally {
+                        synchronized (this.pathCalcLock) {
+                           if (this.inProgress == pathfinder) {
+                              this.inProgress = null;
+                           }
                         }
                      }
                   }

@@ -17,6 +17,8 @@
 
 package com.legoj15.megablockbot.nav.engine.pathing.movement;
 
+import com.legoj15.megablockbot.nav.engine.api.entity.IInteractionManagerProvider;
+import com.legoj15.megablockbot.nav.engine.utils.player.EntityInteractionController;
 import com.legoj15.megablockbot.nav.engine.api.IBaritone;
 import com.legoj15.megablockbot.nav.engine.api.pathing.movement.IMovement;
 import com.legoj15.megablockbot.nav.engine.api.pathing.movement.MovementStatus;
@@ -154,6 +156,14 @@ public abstract class Movement implements IMovement, MovementHelper {
 
             if (!MovementHelper.canWalkThrough(this.ctx, blockPos)) {
                somethingInTheWay = true;
+               // MegaBlockBot: an entity that cannot break (no interaction manager), or a block the owner's filter
+               // forbids (it may have changed since the search), fails the movement instead of clicking at it.
+               if (!(this.ctx.entity() instanceof IInteractionManagerProvider provider && provider.getInteractionManager() != null)
+                  || !EntityInteractionController.mayBreak(this.ctx.entity(), blockPos, BlockStateInterface.get(this.ctx, blockPos))) {
+                  state.setStatus(MovementStatus.UNREACHABLE);
+                  return true;
+               }
+
                MovementHelper.switchToBestToolFor(this.ctx, BlockStateInterface.get(this.ctx, blockPos));
                Optional<Rotation> reachable = RotationUtils.reachable(this.ctx.entity(), blockPos, this.ctx.playerController().getBlockReachDistance());
                if (!reachable.isPresent()) {

@@ -18,5 +18,5 @@
 package com.legoj15.megablockbot.nav.engine.api.entity;
 
 public interface IInteractionManagerProvider {
-   LivingEntityInteractionManager getInteractionManager();
+   IInteractionManager getInteractionManager();
 }

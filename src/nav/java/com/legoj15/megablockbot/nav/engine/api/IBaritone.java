@@ -17,6 +17,7 @@
 
 package com.legoj15.megablockbot.nav.engine.api;
 
+import com.legoj15.megablockbot.nav.NavRuntime;
 import com.legoj15.megablockbot.nav.engine.Baritone;
 import com.legoj15.megablockbot.nav.engine.api.behavior.ILookBehavior;
 import com.legoj15.megablockbot.nav.engine.api.behavior.IPathingBehavior;
@@ -38,9 +39,6 @@ import java.util.stream.Stream;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
-import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.player.Player;
 
 public interface IBaritone {
    EntityComponentKey<IBaritone> KEY = new EntityComponentKey<>(Baritone::new);
@@ -75,26 +73,12 @@ public interface IBaritone {
 
    void logDebug(String var1);
 
+   // MegaBlockBot: never to chat (upstream messaged the player, or every creative player for a non-player entity);
+   // the module logger at debug. Baritone overrides this to also keep the last message.
    default void logDirect(Component... components) {
-      IEntityContext playerContext = this.getEntityContext();
-      LivingEntity entity = playerContext.entity();
-      if (entity instanceof Player) {
-         MutableComponent component = Component.literal("");
-         component.append(BaritoneAPI.getPrefix());
-         component.append(Component.literal(" "));
-         Arrays.asList(components).forEach(component::append);
-         ((Player)entity).displayClientMessage(component, false);
-      } else {
-         for (ServerPlayer p : entity.level().getServer().getPlayerList().getPlayers()) {
-            if (p.isCreative()) {
-               MutableComponent component = Component.literal("");
-               component.append(BaritoneAPI.getPrefix());
-               component.append(Component.literal(" "));
-               Arrays.asList(components).forEach(component::append);
-               p.displayClientMessage(component, false);
-            }
-         }
-      }
+      StringBuilder text = new StringBuilder();
+      Arrays.asList(components).forEach(c -> text.append(c.getString()));
+      NavRuntime.LOGGER.debug(text.toString());
    }
 
    default void logDirect(String message, ChatFormatting color) {

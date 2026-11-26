@@ -18,6 +18,7 @@
 package com.legoj15.megablockbot.nav.engine.behavior;
 
 import com.legoj15.megablockbot.nav.engine.Baritone;
+import com.legoj15.megablockbot.nav.engine.api.entity.IMovementInputReceiver;
 import com.legoj15.megablockbot.nav.engine.api.behavior.ILookBehavior;
 import com.legoj15.megablockbot.nav.engine.api.utils.Rotation;
 import com.legoj15.megablockbot.nav.engine.api.utils.input.Input;
@@ -86,7 +87,27 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
       LivingEntity entity = this.ctx.entity();
       double lookScrambleFactor = this.baritone.settings().randomLooking.get();
-      updateLook(entity, actualTarget, lookScrambleFactor, !this.baritone.settings().freeLook.get());
+      if (entity instanceof IMovementInputReceiver receiver) {
+         lookAsInput(receiver, entity, actualTarget, lookScrambleFactor, !this.baritone.settings().freeLook.get());
+      } else {
+         updateLook(entity, actualTarget, lookScrambleFactor, !this.baritone.settings().freeLook.get());
+      }
+   }
+
+   // MegaBlockBot: the same rotation as updateLook below, handed to an input-driven entity as its look input instead
+   // of written into it. It takes effect when the entity applies its inputs, as a client's mouse would.
+   private static void lookAsInput(IMovementInputReceiver receiver, LivingEntity entity, Rotation target, double lookScrambleFactor, boolean nudgePitch) {
+      float yaw = (float)(target.getYaw() + (Math.random() - 0.5) * lookScrambleFactor);
+      float pitch = (float)(target.getPitch() + (Math.random() - 0.5) * lookScrambleFactor);
+      if (target.getPitch() == entity.getXRot() && nudgePitch) {
+         if (pitch < -20.0F) {
+            pitch++;
+         } else if (pitch > 10.0F) {
+            pitch--;
+         }
+      }
+
+      receiver.setLook(yaw, pitch);
    }
 
    private static void updateLook(LivingEntity entity, Rotation target, double lookScrambleFactor, boolean nudgePitch) {

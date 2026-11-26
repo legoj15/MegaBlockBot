@@ -19,6 +19,7 @@ package com.legoj15.megablockbot.nav.engine.pathing.movement.movements;
 
 import com.legoj15.megablockbot.nav.NavTags;
 import com.legoj15.megablockbot.nav.engine.api.IBaritone;
+import com.legoj15.megablockbot.nav.engine.api.entity.IEntityInventory;
 import com.legoj15.megablockbot.nav.engine.api.entity.LivingEntityInventory;
 import com.legoj15.megablockbot.nav.engine.api.pathing.movement.MovementStatus;
 import com.legoj15.megablockbot.nav.engine.api.utils.BetterBlockPos;
@@ -88,7 +89,7 @@ public class MovementFall extends Movement {
          BlockState destState = this.ctx.world().getBlockState(this.dest);
          boolean isWater = destState.getFluidState().getType() instanceof WaterFluid;
          if (!isWater && this.willPlaceBucket() && !playerFeet.equals(this.dest)) {
-            LivingEntityInventory inventory = this.ctx.inventory();
+            IEntityInventory inventory = this.ctx.inventory();
             if (inventory == null
                || !LivingEntityInventory.isValidHotbarIndex(InventoryBehavior.getSlotWithStack(inventory, NavTags.WATER_BUCKETS))
                || this.ctx.world().dimensionType().ultraWarm()) {
@@ -96,7 +97,7 @@ public class MovementFall extends Movement {
             }
 
             if (this.ctx.entity().getY() - this.dest.getY() < this.ctx.playerController().getBlockReachDistance() && !this.ctx.entity().onGround()) {
-               inventory.selectedSlot = InventoryBehavior.getSlotWithStack(inventory, NavTags.WATER_BUCKETS);
+               inventory.setSelectedSlot(InventoryBehavior.getSlotWithStack(inventory, NavTags.WATER_BUCKETS));
                targetRotation = new Rotation(toDest.getYaw(), 90.0F);
                if (this.ctx.isLookingAt(this.dest) || this.ctx.isLookingAt(this.dest.down())) {
                   state.setInput(Input.CLICK_RIGHT, true);
@@ -116,9 +117,9 @@ public class MovementFall extends Movement {
             }
 
             state.setInput(Input.JUMP, true);
-            LivingEntityInventory inventoryx = this.ctx.inventory();
+            IEntityInventory inventoryx = this.ctx.inventory();
             if (inventoryx != null && LivingEntityInventory.isValidHotbarIndex(InventoryBehavior.getSlotWithStack(inventoryx, NavTags.EMPTY_BUCKETS))) {
-               inventoryx.selectedSlot = InventoryBehavior.getSlotWithStack(inventoryx, NavTags.EMPTY_BUCKETS);
+               inventoryx.setSelectedSlot(InventoryBehavior.getSlotWithStack(inventoryx, NavTags.EMPTY_BUCKETS));
                if (this.ctx.entity().getDeltaMovement().y >= 0.0) {
                   return state.setInput(Input.CLICK_RIGHT, true);
                }

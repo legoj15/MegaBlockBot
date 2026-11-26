@@ -99,8 +99,13 @@ public abstract class AbstractNodeCostSearch implements IPathFinder {
             }
 
             var8 = new PathCalculationResult(PathCalculationResult.Type.SUCCESS_TO_GOAL, var15);
-         } catch (Exception var12) {
-            this.context.baritone.logDirect("Pathing exception: " + var12);
+         } catch (Throwable var12) {
+            // MegaBlockBot: Throwable, not Exception (a StackOverflowError or a mod's LinkageError must not kill the
+            // search thread silently), and the reason is kept so the engine's owner can report why the search failed.
+            if (this.context.baritone instanceof com.legoj15.megablockbot.nav.engine.Baritone b) {
+               b.setLastFailure("path search failed: " + var12);
+            }
+
             NavRuntime.LOGGER.error("Pathing exception: ", var12);
             return new PathCalculationResult(PathCalculationResult.Type.EXCEPTION);
          } finally {

@@ -54,6 +54,9 @@ public final class Settings {
    public final Settings.Setting<Double> walkOnWaterOnePenalty = new Settings.Setting<>(3.0);
    public final Settings.Setting<Boolean> allowWaterBucketFall = new Settings.Setting<>(true);
    public final Settings.Setting<Boolean> allowSwimming = new Settings.Setting<>(false);
+   // MegaBlockBot: lets a path enter flowing water whose cell above is free (a stream, a river's edge), which
+   // canWalkThrough otherwise excludes. Off by default, as upstream.
+   public final Settings.Setting<Boolean> allowFlowingWater = new Settings.Setting<>(false);
    public final Settings.Setting<Boolean> ignoreBreath = new Settings.Setting<>(true);
    public final Settings.Setting<Boolean> assumeWalkOnWater = new Settings.Setting<>(false);
    public final Settings.Setting<Boolean> assumeWalkOnLava = new Settings.Setting<>(false);
@@ -122,6 +125,9 @@ public final class Settings {
    public final Settings.Setting<Float> pathingMapLoadFactor = new Settings.Setting<>(0.75F);
    public final Settings.Setting<Integer> maxFallHeightNoWater = new Settings.Setting<>(3);
    public final Settings.Setting<Integer> maxFallHeightBucket = new Settings.Setting<>(20);
+   // MegaBlockBot: path cost added per point of fall damage a landing deals (falls longer than 3 blocks, without
+   // water). 0 keeps upstream's behaviour, where a damaging fall costs only its time.
+   public final Settings.Setting<Double> fallDamagePenalty = new Settings.Setting<>(0.0);
    public final Settings.Setting<Boolean> allowOvershootDiagonalDescend = new Settings.Setting<>(true);
    public final Settings.Setting<Boolean> simplifyUnloadedYCoord = new Settings.Setting<>(true);
    public final Settings.Setting<Boolean> repackOnAnyBlockChange = new Settings.Setting<>(true);

@@ -20,7 +20,7 @@ package com.legoj15.megablockbot.nav.engine.process;
 import com.legoj15.megablockbot.nav.NavRuntime;
 import com.legoj15.megablockbot.nav.engine.Baritone;
 import com.legoj15.megablockbot.nav.engine.api.entity.IInventoryProvider;
-import com.legoj15.megablockbot.nav.engine.api.entity.LivingEntityInventory;
+import com.legoj15.megablockbot.nav.engine.api.entity.IEntityInventory;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.Goal;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.GoalBlock;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.GoalComposite;
@@ -302,7 +302,7 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
          LivingEntity var12 = this.ctx.entity();
 
          for (int i = 0; i < 9; i++) {
-            ItemStack stack = (ItemStack)provider.getLivingInventory().main.get(i);
+            ItemStack stack = (ItemStack)provider.getLivingInventory().main().get(i);
             if (!stack.isEmpty() && stack.getItem() instanceof BlockItem) {
                float originalYaw = var12.getYRot();
                float originalPitch = var12.getXRot();
@@ -357,7 +357,7 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
       if (recursions > 1000) {
          return new PathingCommand(null, PathingCommandType.SET_GOAL_AND_PATH);
       } else {
-         LivingEntityInventory inventory = this.ctx.inventory();
+         IEntityInventory inventory = this.ctx.inventory();
          if (inventory == null) {
             this.schematic = null;
             return null;
@@ -475,7 +475,7 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
                      if (toPlace.isPresent() && isSafeToCancel && this.ctx.entity().onGround() && this.ticks <= 0) {
                         Rotation rotx = toPlace.get().rot;
                         this.baritone.getLookBehavior().updateTarget(rotx, true);
-                        inventory.selectedSlot = toPlace.get().hotbarSelection;
+                        inventory.setSelectedSlot(toPlace.get().hotbarSelection);
                         this.baritone.getInputOverrideHandler().setInputForceState(Input.SNEAK, true);
                         if (this.ctx.isLookingAt(toPlace.get().placeAgainst)
                               && ((BlockHitResult)this.ctx.objectMouseOver()).getDirection().equals(toPlace.get().side)
@@ -731,7 +731,7 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
       List<BlockState> result = new ArrayList<>();
 
       for (int i = 0; i < size; i++) {
-         ItemStack stack = (ItemStack)((IInventoryProvider)this.ctx.entity()).getLivingInventory().main.get(i);
+         ItemStack stack = (ItemStack)((IInventoryProvider)this.ctx.entity()).getLivingInventory().main().get(i);
          if (!stack.isEmpty() && stack.getItem() instanceof BlockItem) {
             BlockState placementState = null;
             try {

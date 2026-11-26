@@ -21,7 +21,7 @@ import com.legoj15.megablockbot.nav.engine.Baritone;
 import com.legoj15.megablockbot.nav.engine.api.IBaritone;
 import com.legoj15.megablockbot.nav.engine.api.Settings;
 import com.legoj15.megablockbot.nav.engine.api.entity.IInventoryProvider;
-import com.legoj15.megablockbot.nav.engine.api.entity.LivingEntityInventory;
+import com.legoj15.megablockbot.nav.engine.api.entity.IEntityInventory;
 import com.legoj15.megablockbot.nav.engine.api.pathing.movement.ActionCosts;
 import com.legoj15.megablockbot.nav.engine.api.pathing.movement.MovementStatus;
 import com.legoj15.megablockbot.nav.engine.api.utils.BetterBlockPos;
@@ -98,6 +98,25 @@ public interface MovementHelper extends ActionCosts {
          : !state.getFluidState().isEmpty();
    }
 
+   /**
+    * MegaBlockBot (design 2.2): blocks the body must never stand on or move through: they burn, hurt, slow it into
+    * danger or bury it. Lava, fire, cactus, magma, campfires and pointed dripstone were already excluded upstream by
+    * other checks; powder snow, sweet berry bushes and wither roses were walkable. Kept as one list so the rule is
+    * stated once.
+    */
+   static boolean isNeverStand(BlockState state) {
+      Block block = state.getBlock();
+      return state.getFluidState().is(FluidTags.LAVA)
+         || block instanceof BaseFireBlock
+         || block == Blocks.CACTUS
+         || block == Blocks.MAGMA_BLOCK
+         || state.is(BlockTags.CAMPFIRES)
+         || block == Blocks.SWEET_BERRY_BUSH
+         || block == Blocks.WITHER_ROSE
+         || block == Blocks.POWDER_SNOW
+         || block == Blocks.POINTED_DRIPSTONE;
+   }
+
    static boolean canWalkThrough(IEntityContext ctx, BetterBlockPos pos) {
       return canWalkThrough(new BlockStateInterface(ctx), pos.x, pos.y, pos.z, ctx.baritone().settings());
    }
@@ -110,6 +129,8 @@ public interface MovementHelper extends ActionCosts {
       Block block = state.getBlock();
       if (block instanceof AirBlock) {
          return true;
+      } else if (isNeverStand(state)) {
+         return false;
       } else if (!(block instanceof BaseFireBlock)
          && block != Blocks.TRIPWIRE
          && block != Blocks.COBWEB
@@ -139,7 +160,7 @@ public interface MovementHelper extends ActionCosts {
             } else {
                return state.getValue(SnowLayerBlock.LAYERS) >= 3 ? false : canWalkOn(bsi, x, y - 1, z, settings);
             }
-         } else if (isFlowing(x, y, z, state, bsi)) {
+         } else if (isFlowing(x, y, z, state, bsi) && !(settings.allowFlowingWater.get() && isWater(state))) {
             return false;
          } else {
             FluidState fluidState = state.getFluidState();
@@ -169,6 +190,8 @@ public interface MovementHelper extends ActionCosts {
       Block block = state.getBlock();
       if (block instanceof AirBlock) {
          return true;
+      } else if (isNeverStand(state)) {
+         return false;
       } else {
          return !(block instanceof BaseFireBlock)
                && block != Blocks.TRIPWIRE
@@ -257,7 +280,7 @@ public interface MovementHelper extends ActionCosts {
 
    static boolean canWalkOn(BlockStateInterface bsi, int x, int y, int z, BlockState state, Settings settings) {
       Block block = state.getBlock();
-      if (block instanceof AirBlock || block == Blocks.MAGMA_BLOCK || block == Blocks.BUBBLE_COLUMN || block == Blocks.HONEY_BLOCK) {
+      if (block instanceof AirBlock || isNeverStand(state) || block == Blocks.BUBBLE_COLUMN || block == Blocks.HONEY_BLOCK) {
          return false;
       } else if (isBlockNormalCube(state)) {
          return true;
@@ -347,7 +370,9 @@ public interface MovementHelper extends ActionCosts {
                   if (includeFalling) {
                      BlockState above = context.get(x, y + 1, z);
                      if (above.getBlock() instanceof FallingBlock) {
-                        result += getMiningDurationTicks(context, x, y + 1, z, above, true);
+                        // MegaBlockBot (design 2.2): never dig the top cell of a move out from under sand or gravel;
+                        // it falls into the space the body is about to stand in. Upstream added its mining time.
+                        return 1000000.0;
                      }
                   }
 
@@ -372,9 +397,9 @@ public interface MovementHelper extends ActionCosts {
    }
 
    static void switchToBestToolFor(IEntityContext ctx, BlockState b, ToolSet ts, boolean preferSilkTouch) {
-      LivingEntityInventory inventory = ctx.inventory();
+      IEntityInventory inventory = ctx.inventory();
       if (inventory != null && !ctx.baritone().settings().disableAutoTool.get() && !ctx.baritone().settings().assumeExternalAutoTool.get()) {
-         inventory.selectedSlot = ts.getBestSlot(b.getBlock(), preferSilkTouch);
+         inventory.setSelectedSlot(ts.getBestSlot(b.getBlock(), preferSilkTouch));
       }
    }
 

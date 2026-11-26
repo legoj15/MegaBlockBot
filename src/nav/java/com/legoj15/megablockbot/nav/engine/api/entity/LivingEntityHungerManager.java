@@ -26,7 +26,7 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.GameRules;
 
-public class LivingEntityHungerManager {
+public class LivingEntityHungerManager implements IHungerManager {
    private int foodLevel = 20;
    private float foodSaturationLevel = 20.0F;
    private float exhaustion;

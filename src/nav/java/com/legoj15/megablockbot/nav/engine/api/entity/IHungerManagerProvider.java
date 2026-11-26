@@ -18,5 +18,5 @@
 package com.legoj15.megablockbot.nav.engine.api.entity;
 
 public interface IHungerManagerProvider {
-   LivingEntityHungerManager getHungerManager();
+   IHungerManager getHungerManager();
 }

@@ -72,9 +72,9 @@ public class ToolSet {
 
    public int getBestSlot(Block b, boolean preferSilkTouch, boolean pathingCalculation) {
       if (b.defaultBlockState().getBlock().defaultDestroyTime() == 0.0F) {
-         return ((IInventoryProvider)this.player).getLivingInventory().selectedSlot;
+         return ((IInventoryProvider)this.player).getLivingInventory().getSelectedSlot();
       } else if (this.baritone.settings().disableAutoTool.get() && pathingCalculation) {
-         return ((IInventoryProvider)this.player).getLivingInventory().selectedSlot;
+         return ((IInventoryProvider)this.player).getLivingInventory().getSelectedSlot();
       } else {
          int best = 0;
          double highestSpeed = Double.NEGATIVE_INFINITY;

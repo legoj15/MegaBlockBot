@@ -21,8 +21,8 @@ import com.legoj15.megablockbot.nav.engine.api.BaritoneAPI;
 import com.legoj15.megablockbot.nav.engine.api.cache.IWorldData;
 import com.legoj15.megablockbot.nav.engine.api.entity.IHungerManagerProvider;
 import com.legoj15.megablockbot.nav.engine.api.entity.IInventoryProvider;
-import com.legoj15.megablockbot.nav.engine.api.entity.LivingEntityHungerManager;
-import com.legoj15.megablockbot.nav.engine.api.entity.LivingEntityInventory;
+import com.legoj15.megablockbot.nav.engine.api.entity.IHungerManager;
+import com.legoj15.megablockbot.nav.engine.api.entity.IEntityInventory;
 import com.legoj15.megablockbot.nav.engine.api.pathing.calc.Avoidance;
 import com.legoj15.megablockbot.nav.engine.api.utils.BetterBlockPos;
 import com.legoj15.megablockbot.nav.engine.api.utils.IEntityContext;
@@ -63,13 +63,13 @@ public class EntityContext implements IEntityContext {
 
    @Nullable
    @Override
-   public LivingEntityInventory inventory() {
+   public IEntityInventory inventory() {
       return this.entity instanceof IInventoryProvider ? ((IInventoryProvider)this.entity).getLivingInventory() : null;
    }
 
    @Nullable
    @Override
-   public LivingEntityHungerManager hungerManager() {
+   public IHungerManager hungerManager() {
       return this.entity instanceof IHungerManagerProvider ? ((IHungerManagerProvider)this.entity).getHungerManager() : null;
    }
 

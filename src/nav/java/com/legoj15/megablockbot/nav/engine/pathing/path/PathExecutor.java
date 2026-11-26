@@ -219,7 +219,8 @@ public class PathExecutor implements IPathExecutor {
                   this.onTick();
                   return true;
                } else {
-                  this.ctx.entity().setSprinting(this.shouldSprintNextTick());
+                  // MegaBlockBot: through the input handler, so an input-driven entity receives sprint as an input.
+                  baritone.getInputOverrideHandler().setSprinting(this.shouldSprintNextTick());
                   this.ticksOnCurrent++;
                   if (this.ticksOnCurrent > this.currentMovementOriginalCostEstimate + baritone.settings().movementTimeoutTicks.get().intValue()) {
                      this.logDebug(

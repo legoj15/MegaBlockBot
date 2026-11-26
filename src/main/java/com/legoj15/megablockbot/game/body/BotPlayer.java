@@ -1,6 +1,16 @@
 package com.legoj15.megablockbot.game.body;
 
 import com.legoj15.megablockbot.MegaBlockBot;
+import com.legoj15.megablockbot.game.nav.BodyHunger;
+import com.legoj15.megablockbot.game.nav.BodyInteractionManager;
+import com.legoj15.megablockbot.game.nav.BodyInventory;
+import com.legoj15.megablockbot.nav.engine.api.entity.IEntityInventory;
+import com.legoj15.megablockbot.nav.engine.api.entity.IHungerManager;
+import com.legoj15.megablockbot.nav.engine.api.entity.IHungerManagerProvider;
+import com.legoj15.megablockbot.nav.engine.api.entity.IInteractionManager;
+import com.legoj15.megablockbot.nav.engine.api.entity.IInteractionManagerProvider;
+import com.legoj15.megablockbot.nav.engine.api.entity.IInventoryProvider;
+import com.legoj15.megablockbot.nav.engine.api.entity.IMovementInputReceiver;
 import com.mojang.authlib.GameProfile;
 import java.util.ArrayList;
 import java.util.List;
@@ -33,7 +43,8 @@ import net.minecraft.world.level.portal.DimensionTransition;
  * connection is never ticked, so {@link #tick()} (which the level calls once per server tick for every player in it)
  * writes the input and calls {@code doTick()} itself.
  */
-public class BotPlayer extends ServerPlayer {
+public class BotPlayer extends ServerPlayer
+    implements IMovementInputReceiver, IInventoryProvider, IInteractionManagerProvider, IHungerManagerProvider {
     /** The compound inside the body's player data that holds everything of ours. */
     static final String SAVE_KEY = "megablockbot";
     private static final int SAVE_SCHEMA = 1;
@@ -50,6 +61,10 @@ public class BotPlayer extends ServerPlayer {
     // Non-null only while die() runs: the item entities the death creates, in the order they were made.
     @Nullable
     private List<ItemEntity> deathDrops;
+    // The navigation engine's views of this instance's own inventory, food and game mode (see the nav section below).
+    private final BodyInventory navInventory = new BodyInventory(getInventory());
+    private final BodyHunger navHunger = new BodyHunger(getFoodData());
+    private final BodyInteractionManager navInteraction = new BodyInteractionManager(this);
 
     /** The constructor {@code PlayerList.respawn} is redirected to; bodies spawned by the manager use the other one. */
     public BotPlayer(MinecraftServer server, ServerLevel level, GameProfile profile, ClientInformation info) {
@@ -122,6 +137,40 @@ public class BotPlayer extends ServerPlayer {
             input.applyTo(this);
         }
         doTick();
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Navigation engine (game.nav.BotNavigator drives it): what the engine reads and how it moves the body
+    // ---------------------------------------------------------------------------------------------------------
+
+    /** The engine's movement keys become this body's input, the only way a body moves. */
+    @Override
+    public void setMovementInput(float forward, float strafe, boolean jump, boolean sneak, boolean sprint) {
+        input.forward = forward;
+        input.strafe = strafe;
+        input.jump = jump;
+        input.sneak = sneak;
+        input.sprint = sprint;
+    }
+
+    @Override
+    public void setLook(float yaw, float pitch) {
+        input.lookAngles(yaw, pitch);
+    }
+
+    @Override
+    public IEntityInventory getLivingInventory() {
+        return navInventory;
+    }
+
+    @Override
+    public IInteractionManager getInteractionManager() {
+        return navInteraction;
+    }
+
+    @Override
+    public IHungerManager getHungerManager() {
+        return navHunger;
     }
 
     // ---------------------------------------------------------------------------------------------------------

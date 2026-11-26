@@ -50,7 +50,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-public class LivingEntityInventory implements Container, Nameable {
+public class LivingEntityInventory implements Container, Nameable, IEntityInventory {
    public static final Logger LOGGER = LogManager.getLogger(NavRuntime.MOD_NAME);
    public static final int ITEM_USAGE_COOLDOWN = 5;
    public static final int MAIN_SIZE = 36;
@@ -69,6 +69,26 @@ public class LivingEntityInventory implements Container, Nameable {
 
    public LivingEntityInventory(LivingEntity player) {
       this.player = player;
+   }
+
+   @Override
+   public NonNullList<ItemStack> main() {
+      return this.main;
+   }
+
+   @Override
+   public NonNullList<ItemStack> offHand() {
+      return this.offHand;
+   }
+
+   @Override
+   public int getSelectedSlot() {
+      return this.selectedSlot;
+   }
+
+   @Override
+   public void setSelectedSlot(int slot) {
+      this.selectedSlot = slot;
    }
 
    public ItemStack getMainHandStack() {

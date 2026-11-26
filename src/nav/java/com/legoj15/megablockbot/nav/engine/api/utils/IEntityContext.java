@@ -17,11 +17,12 @@
 
 package com.legoj15.megablockbot.nav.engine.api.utils;
 
+import com.legoj15.megablockbot.nav.NavRuntime;
 import com.legoj15.megablockbot.nav.engine.api.BaritoneAPI;
 import com.legoj15.megablockbot.nav.engine.api.IBaritone;
 import com.legoj15.megablockbot.nav.engine.api.cache.IWorldData;
-import com.legoj15.megablockbot.nav.engine.api.entity.LivingEntityHungerManager;
-import com.legoj15.megablockbot.nav.engine.api.entity.LivingEntityInventory;
+import com.legoj15.megablockbot.nav.engine.api.entity.IHungerManager;
+import com.legoj15.megablockbot.nav.engine.api.entity.IEntityInventory;
 import com.legoj15.megablockbot.nav.engine.api.pathing.calc.Avoidance;
 import java.util.List;
 import java.util.Optional;
@@ -51,10 +52,10 @@ public interface IEntityContext {
    }
 
    @Nullable
-   LivingEntityInventory inventory();
+   IEntityInventory inventory();
 
    @Nullable
-   LivingEntityHungerManager hungerManager();
+   IHungerManager hungerManager();
 
    IInteractionController playerController();
 
@@ -99,22 +100,9 @@ public interface IEntityContext {
       return this.getSelectedBlock().equals(Optional.of(pos));
    }
 
+   // MegaBlockBot: debug output goes to the module logger only, never to chat (upstream sent it to the driven player
+   // and, with syncWithOps, to every operator when chatDebug was on).
    default void logDebug(String message) {
-      if (BaritoneAPI.getGlobalSettings().chatDebug.get()) {
-         LivingEntity entity = this.entity();
-         if (entity instanceof Player) {
-            ((Player)entity).displayClientMessage(Component.literal(message).withStyle(ChatFormatting.GRAY), false);
-         }
-
-         if (BaritoneAPI.getGlobalSettings().syncWithOps.get()) {
-            MinecraftServer server = this.world().getServer();
-
-            for (ServerPlayer p : server.getPlayerList().getPlayers()) {
-               if (server.getPlayerList().isOp(p.getGameProfile())) {
-                  IBaritone.KEY.get(p).logDirect(message);
-               }
-            }
-         }
-      }
+      NavRuntime.LOGGER.debug(message);
    }
 }

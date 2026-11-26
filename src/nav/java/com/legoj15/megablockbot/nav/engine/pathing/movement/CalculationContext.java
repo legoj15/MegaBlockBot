@@ -20,6 +20,7 @@ package com.legoj15.megablockbot.nav.engine.pathing.movement;
 import com.legoj15.megablockbot.nav.NavTags;
 import com.legoj15.megablockbot.nav.engine.Baritone;
 import com.legoj15.megablockbot.nav.engine.api.IBaritone;
+import com.legoj15.megablockbot.nav.engine.api.entity.IHungerManagerProvider;
 import com.legoj15.megablockbot.nav.engine.api.entity.IInventoryProvider;
 import com.legoj15.megablockbot.nav.engine.api.entity.LivingEntityInventory;
 import com.legoj15.megablockbot.nav.engine.behavior.InventoryBehavior;
@@ -70,6 +71,8 @@ public class CalculationContext {
    public final boolean allowDownward;
    public final int maxFallHeightNoWater;
    public final int maxFallHeightBucket;
+   // MegaBlockBot: extra cost per point of fall damage a landing would deal (see Settings.fallDamagePenalty).
+   public final double fallDamagePenalty;
    public final double waterWalkSpeed;
    public final double breakBlockAdditionalCost;
    public double backtrackCostFavoringCoefficient;
@@ -106,7 +109,10 @@ public class CalculationContext {
          && baritone.settings().allowWaterBucketFall.get()
          && LivingEntityInventory.isValidHotbarIndex(InventoryBehavior.getSlotWithStack(this.player.getLivingInventory(), NavTags.WATER_BUCKETS))
          && !this.world.dimensionType().ultraWarm();
-      this.canSprint = this.player != null && baritone.settings().allowSprint.get();
+      // MegaBlockBot: a player cannot sprint at food 6 or below, so neither plans the engine for one that is that hungry.
+      this.canSprint = this.player != null
+         && baritone.settings().allowSprint.get()
+         && !(entity instanceof IHungerManagerProvider hunger && hunger.getHungerManager() != null && hunger.getHungerManager().getFoodLevel() <= 6);
       this.placeBlockCost = baritone.settings().blockPlacementPenalty.get();
       this.allowBreak = baritone.settings().allowBreak.get();
       this.allowParkour = baritone.settings().allowParkour.get();
@@ -119,6 +125,7 @@ public class CalculationContext {
       this.allowDownward = baritone.settings().allowDownward.get();
       this.maxFallHeightNoWater = baritone.settings().maxFallHeightNoWater.get();
       this.maxFallHeightBucket = baritone.settings().maxFallHeightBucket.get();
+      this.fallDamagePenalty = baritone.settings().fallDamagePenalty.get();
       int depth = EnchantmentUtils.getEnchantmentLevel(entity.getItemBySlot(EquipmentSlot.FEET), Enchantments.DEPTH_STRIDER);
       if (depth > 3) {
          depth = 3;
@@ -179,8 +186,11 @@ public class CalculationContext {
    public double breakCostMultiplierAt(int x, int y, int z, BlockState current) {
       if (!this.allowBreak) {
          return 1000000.0;
+      } else if (this.isProtected(x, y, z)) {
+         return 1000000.0;
       } else {
-         return this.isProtected(x, y, z) ? 1000000.0 : 1.0;
+         // MegaBlockBot: the owner's break filter makes a forbidden block unbreakable for the search.
+         return this.baritone instanceof Baritone b && !b.mayBreak(this.world, new BlockPos(x, y, z), current) ? 1000000.0 : 1.0;
       }
    }
 

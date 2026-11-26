@@ -96,6 +96,11 @@ runs wherever the command tree is built (a worker thread while data loads).
   pool down on server stop, and registers no tick event: whoever owns a driven entity calls `IBaritone.serverTick()`
   once per server tick. Entry: `IBaritone.KEY.get(entity).getCustomGoalProcess().setGoalAndPath(goal)`.
   `game.gametest.NavEngineGameTests` drives an armor stand with it (why not a zombie: the class comment).
+- Bot side: `game.nav.BotNavigator.of(body)` is the only main-mod class that drives the engine (plain commands, a
+  state to poll, ticked from the body's brain). The body implements the engine's input receiver and its inventory,
+  interaction and hunger providers (`game.nav.Body*` adapters); breaking and placing go through the player's own
+  `ServerPlayerGameMode`. `/aiplayer nav <name> goto|gotoxz|mine|stop|status` is the debugging command;
+  `game.gametest.BotNavGameTests` is the acceptance check.
 - Evidence the nested jars are in: `unzip -l versions/1.21.1/build/libs/*.jar` lists `META-INF/jarjar/` with the
   solver jar and `megablockbot-nav-<version>.jar`; a non-bot node's jar has the solver only.
 

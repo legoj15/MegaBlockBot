@@ -93,17 +93,72 @@ keeps its original licence header.
   sneaking.
 - `api/entity/LivingEntityInventory` logged at INFO for every item on NBT read and write; now DEBUG.
 - `pathing/path/PathExecutor` logged a WARN every tick while off the path; now DEBUG.
+- `api/utils/BlockOptionalMeta.drops` passed `null` to `LootContext.Builder.create(Optional)`, which 1.21.1
+  dereferences: every `mine` command threw a `NullPointerException`. It passes `Optional.empty()`.
+
+## Driving a player body (MegaBlockBot issue 7)
+
+The engine drives the bot's `ServerPlayer` body as well as plain `LivingEntity`s. What changed for that:
+
+- **Entity interfaces extracted.** Upstream's providers returned its own concrete classes; a player has vanilla
+  equivalents, so the engine now reads them through interfaces in `api/entity`:
+  - `IEntityInventory` (new): `main()`, `offHand()`, `getSelectedSlot()` / `setSelectedSlot()`, `getItem`, `setItem`,
+    `insertStack`. `LivingEntityInventory` implements it (accessor methods added). `IInventoryProvider` returns it.
+    Callers moved from the public fields to the methods: `behavior/InventoryBehavior`,
+    `pathing/movement/MovementHelper`, `pathing/movement/movements/MovementFall`, `process/BuilderProcess`,
+    `process/MineProcess`, `utils/ToolSet`, `api/utils/IEntityContext`, `utils/player/EntityContext`.
+  - `IHungerManager` (new): `getFoodLevel`, `getSaturationLevel`. `LivingEntityHungerManager` implements it;
+    `IHungerManagerProvider` and `IEntityContext.hungerManager()` return it.
+  - `IInteractionManager` (new): the break actions, mining state, progress, `interactBlock`, `interactItem`, and a
+    default `continueBreaking(pos, side)` called each held tick (a client counts break progress there).
+    `LivingEntityInteractionManager` implements it unchanged; `IInteractionManagerProvider` returns it.
+  - `IMovementInputReceiver` (new): an entity that implements it receives the movement keys (player scale, -1 to 1)
+    and the look as inputs, and the engine writes nothing into it.
+- `utils/InputOverrideHandler`: for an input receiver, pushes the keys every tick at full strength (1, not
+  upstream's 0.3) and ticks the break and place helpers every tick; keeps the path executor's sprint decision
+  (`setSprinting`) instead of setting the entity's flag, and `clearAllKeys` resets that instead. Other entities: as
+  upstream.
+- `behavior/LookBehavior`: for an input receiver, the same rotation (scramble and pitch nudge included) is handed over
+  as the look input instead of written into the entity.
+- `pathing/path/PathExecutor`: the per-tick sprint decision goes through `InputOverrideHandler.setSprinting`.
+- `utils/player/EntityInteractionController`: defined behaviour without an interaction manager (no break, no place:
+  `clickBlock` false, right clicks `FAIL`) instead of a `NullPointerException`; calls `continueBreaking` before reading
+  the progress; `clickBlock` refuses a block the owning engine's break filter forbids (`mayBreak`).
+- `pathing/movement/Movement`: `prepared` fails the movement (`UNREACHABLE`) when a block is in the way and the entity
+  has no interaction manager, or the break filter forbids it.
+- `Baritone`: a break filter (`api/utils/IBlockBreakFilter`, new; `setBreakFilter`, `mayBreak`, a throwing filter
+  counts as no), the last failure reason and the last `logDirect` message, for the engine's owner to report.
+- `api/Settings.allowFlowingWater` (new, default false: upstream's rule) and `pathing/movement/MovementHelper.canWalkThrough`:
+  with the setting on, a flowing water cell is entered under the same rule as still water (cell above free unless
+  `allowSwimming`), so a stream or a river's current is crossed instead of being a wall. Landing a fall in flowing water
+  (`MovementDescend`) stays excluded.
+- `pathing/movement/CalculationContext`: `breakCostMultiplierAt` asks the break filter (on the search thread);
+  `canSprint` is false at food 6 or below when the entity has a hunger manager; reads `fallDamagePenalty`.
+
+## Chat, failures and threads
+
+- `api/IBaritone.logDirect` and `api/utils/IEntityContext.logDebug` never write to chat; both log through
+  `NavRuntime.LOGGER` at debug (`Baritone.logDirect` also keeps the text as the last message).
+- `pathing/calc/AbstractNodeCostSearch.calculate` catches `Throwable` (was `Exception`) and records the reason.
+- `behavior/PathingBehavior.findPathInNewThread`: an `EXCEPTION` result queues `CALC_FAILED` (upstream queued nothing
+  and the process re-requested the same failing search every tick); the search task runs in try/finally, so a throw
+  anywhere still clears `inProgress` and fails the calculation with a reason.
+- `NavRuntime` (module code): every pool task is wrapped, so a throw is logged and ends only that task.
+
+## Hazards (design 2.2)
+
+- `pathing/movement/MovementHelper.isNeverStand` (new): lava, fire and soul fire, cactus, magma, campfires, sweet
+  berry bush, wither rose, powder snow, pointed dripstone. `canWalkThrough`, `canWalkOn` and `fullyPassable` reject
+  them. Upstream already rejected lava, fire, cactus, magma, campfires and dripstone through other checks; powder snow,
+  sweet berry bushes and wither roses were walkable.
+- `MovementHelper.getMiningDurationTicks`: with `includeFalling` (the top cell of a move), a falling block above makes
+  the cell unbreakable for the search. Upstream added the falling block's own mining time. `process/MineProcess`'s
+  plausibility check calls it with `includeFalling` too, so a block with sand or gravel on top is not a mining target.
+- `api/Settings.fallDamagePenalty` (new, default 0: upstream's costs) and
+  `pathing/movement/movements/MovementDescend.dynamicFallCost`: a landing that deals damage (a fall over 3 blocks
+  without water) costs that much more per point of damage.
 
 ## Default settings changed
 
 - `randomLooking` 0.01 to 0.0 and `randomLooking113` 2.0 to 0.0. `allowParkour` and `allowSwimming` stay false, as
-  upstream.
-
-## What the driven entity must provide
-
-As ported, the engine only walks. Upstream drives its own entity type, which implements
-`IInventoryProvider`, `IInteractionManagerProvider` and `IHungerManagerProvider`; nothing in this tree does yet.
-Without them `CalculationContext` plans with no tools, no sprinting, no water bucket and no throwaway blocks, and
-`EntityInteractionController` dereferences a null interaction manager on the first forced click (any mining,
-placing or farming process, or an entity stuck inside a block). The bot's player body supplies all three, and its
-block breaking goes through the player's own game mode, in the change that makes the engine drive it.
+  upstream. The bot's navigator sets its own per-engine values over these (see `BotNavigator.configure`).

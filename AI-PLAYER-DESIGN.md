@@ -141,8 +141,12 @@ separate LGPL-3.0 module.** Facts checked 2026-11-24 against PlayerEngine branch
   it over.
 - Swimming is the open risk. `allowSwimming` is off by default: with defaults the engine paths
   along a lake's top layer holding jump and treats deep and flowing water as blocked. With the
-  setting on, deep water opens. Neither is tested upstream. The first check after the port is
-  crossing a lake and a river.
+  setting on, deep water opens. Neither is tested upstream. Measured in #7 (`BotNavGameTests`):
+  with `allowSwimming` off a body crosses a 3-deep pool at the surface holding jump (96 ticks for
+  8 blocks); on, it was faster (65) and still at the surface, but it stops the jump-holding and,
+  with `ignoreBreath` on, opens underwater paths nothing keeps from drowning the body, so a body
+  keeps it off. Flowing water was a wall ("no path"); a new `allowFlowingWater` setting, on for a
+  body, lets it wade a current.
 - Upstream Automatone is stale (Fabric only; `main` last committed 2021-05, newest activity on
   its version branches 2022), and upstream Baritone
   steers the local client player, so neither is a better base than PlayerEngine's copy.

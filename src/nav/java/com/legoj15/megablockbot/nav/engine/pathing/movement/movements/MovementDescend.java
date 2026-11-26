@@ -175,7 +175,8 @@ public class MovementDescend extends Movement {
                      res.x = destX;
                      res.y = newY + 1;
                      res.z = destZ;
-                     res.cost = tentativeCost;
+                     // MegaBlockBot: a fall of d blocks deals d - 3 damage; the penalty makes the search weigh it.
+                     res.cost = tentativeCost + Math.max(0, unprotectedFallHeight - 1 - 3) * context.fallDamagePenalty;
                      res.oxygenCost = context.oxygenCost(fallCost, Blocks.AIR.defaultBlockState());
                      return false;
                   }

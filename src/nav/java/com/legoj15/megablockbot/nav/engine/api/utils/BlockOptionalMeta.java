@@ -139,7 +139,8 @@ public final class BlockOptionalMeta {
                               .create(LootContextParamSets.BLOCK)
                         )
                         .withOptionalRandomSeed(world.getSeed())
-                        .create(null),
+                        // MegaBlockBot: Optional.empty(), not null; 1.21.1's create(Optional) dereferences it.
+                        .create(java.util.Optional.empty()),
                      stack -> items.add(stack.getItem())
                   );
                return items;

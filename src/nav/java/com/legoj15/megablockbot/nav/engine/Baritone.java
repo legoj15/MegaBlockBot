@@ -23,6 +23,7 @@ import com.legoj15.megablockbot.nav.engine.api.Settings;
 import com.legoj15.megablockbot.nav.engine.api.cache.IWorldProvider;
 import com.legoj15.megablockbot.nav.engine.api.event.listener.IEventBus;
 import com.legoj15.megablockbot.nav.engine.api.process.IBaritoneProcess;
+import com.legoj15.megablockbot.nav.engine.api.utils.IBlockBreakFilter;
 import com.legoj15.megablockbot.nav.engine.api.utils.IEntityContext;
 import com.legoj15.megablockbot.nav.engine.behavior.Behavior;
 import com.legoj15.megablockbot.nav.engine.behavior.InventoryBehavior;
@@ -44,7 +45,14 @@ import com.legoj15.megablockbot.nav.engine.utils.BlockStateInterface;
 import com.legoj15.megablockbot.nav.engine.utils.InputOverrideHandler;
 import com.legoj15.megablockbot.nav.engine.utils.PathingControlManager;
 import com.legoj15.megablockbot.nav.engine.utils.player.EntityContext;
+import java.util.Arrays;
+import java.util.stream.Collectors;
+import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
+import org.jetbrains.annotations.Nullable;
 
 public class Baritone implements IBaritone {
    private final Settings settings;
@@ -67,6 +75,14 @@ public class Baritone implements IBaritone {
    private final IEntityContext playerContext;
    public BlockStateInterface bsi;
    public AdditionalBaritoneSettings additionalBaritoneSettings = new AdditionalBaritoneSettings();
+   // MegaBlockBot: the owner's break veto (null allows everything) and the last failure or message, so the owner can
+   // report why a command stopped. Volatile: path-search threads read the filter and write the failure.
+   @Nullable
+   private volatile IBlockBreakFilter breakFilter;
+   @Nullable
+   private volatile String lastFailure;
+   @Nullable
+   private volatile String lastMessage;
 
    public Baritone(LivingEntity player) {
       this.settings = new Settings();
@@ -180,6 +196,54 @@ public class Baritone implements IBaritone {
    @Override
    public void logDebug(String message) {
       NavRuntime.LOGGER.debug(message);
+   }
+
+   // MegaBlockBot: logDirect went to chat upstream. It goes to the module logger at debug and is kept as the last
+   // message, which is how processes such as MineProcess say why they gave up.
+   @Override
+   public void logDirect(Component... components) {
+      String text = Arrays.stream(components).map(Component::getString).collect(Collectors.joining());
+      this.lastMessage = text;
+      NavRuntime.LOGGER.debug(text);
+   }
+
+   public void setBreakFilter(@Nullable IBlockBreakFilter filter) {
+      this.breakFilter = filter;
+   }
+
+   /** Whether the owner's filter lets the engine break this block. A filter that throws is taken as a no. */
+   public boolean mayBreak(Level level, BlockPos pos, BlockState state) {
+      IBlockBreakFilter filter = this.breakFilter;
+      if (filter == null) {
+         return true;
+      }
+
+      try {
+         return filter.mayBreak(level, pos, state);
+      } catch (Throwable t) {
+         NavRuntime.LOGGER.error("Break filter threw at " + pos, t);
+         return false;
+      }
+   }
+
+   public void setLastFailure(@Nullable String reason) {
+      this.lastFailure = reason;
+   }
+
+   @Nullable
+   public String getLastFailure() {
+      return this.lastFailure;
+   }
+
+   @Nullable
+   public String getLastMessage() {
+      return this.lastMessage;
+   }
+
+   /** Forgets the last failure and message, for the start of a new command. */
+   public void clearLastFailure() {
+      this.lastFailure = null;
+      this.lastMessage = null;
    }
 
    @Override

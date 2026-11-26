@@ -64,7 +64,7 @@ import net.minecraft.world.phys.HitResult.Type;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 
-public class LivingEntityInteractionManager {
+public class LivingEntityInteractionManager implements IInteractionManager {
    private static final Logger LOGGER = LogUtils.getLogger();
    protected Level world;
    protected final LivingEntity livingEntity;
