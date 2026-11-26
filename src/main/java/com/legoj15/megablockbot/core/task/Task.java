@@ -16,8 +16,10 @@ import java.util.Map;
  *   <li>{@link #abort} from any non-terminal state: CANCELLED; releases inputs.</li>
  * </ul>
  * A task never moves the body directly: movement goes through navigation as inputs. A task that throws is
- * failed with {@link Failure.Internal} by the caller. {@code Completed} is a hint; the executor marks the node
- * SATISFIED only when its postcondition holds. Extend {@link AbstractTask} rather than implementing this.
+ * failed with {@link Failure.Internal} by the caller, and is let go of the way an aborted one is: whatever it
+ * held is released, because a FAILED task is never aborted afterwards ({@link AbstractTask} does this for a
+ * throwing hook). {@code Completed} is a hint; the executor marks the node SATISFIED only when its postcondition
+ * holds. Extend {@link AbstractTask} rather than implementing this.
  */
 public interface Task<B> {
     TaskState state();
@@ -38,10 +40,20 @@ public interface Task<B> {
     /**
      * The few facts worth keeping across a restart, as hints for where to look (a shaft's position and the Y it
      * reached, a village found). The task kind owns and validates its keys. Read by the executor when the task
-     * ends or the goal is saved.
+     * ends or the goal is saved. A null key or value is dropped (and logged) by the executor, and a throw is
+     * logged and the last stored checkpoint kept: releasing a task never fails on its bookkeeping.
      */
     default Map<String, String> checkpoint() {
         return Map.of();
+    }
+
+    /**
+     * The last exception any of this task's hooks threw, or null. A task can be failed with a typed failure and
+     * then have another hook throw; the failure wins the routing, and this keeps the exception so the executor
+     * can still log it with its stack trace when it retires the task (design 3.4: nothing swallows a throw).
+     */
+    default Throwable lastHookError() {
+        return null;
     }
 
     /**

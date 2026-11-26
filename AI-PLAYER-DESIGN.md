@@ -442,6 +442,36 @@ never crashes the server or blocks other bodies.
 **Threading.** Executor, tasks, reflexes and snapshot collection run on the server thread.
 Planning and path search run off-thread on immutable inputs.
 
+**Amendments made while the executor core was built (2026-11-26, #12). Where they differ from the text
+above, these hold; the code is `core/exec`.**
+
+- A group node is evaluated when execution first reaches it: satisfied, it and its unfinished
+  descendants are done (a prerequisite the bot was handed is not gathered again); unsatisfied or
+  unknown, its children decide. A non-leaf UNKNOWN no longer gives the goal up.
+- A task that completes with an UNKNOWN postcondition gets one reach node and a second look; only an
+  UNSATISFIED one is NO_PROGRESS. An executor-inserted node (reach, recover-drops) whose postcondition
+  cannot be known counts as done once its task completes.
+- A death is handled before the best-effort rule: it is always counted, its area excluded and its
+  drops queued for recovery. Deaths that arrive before the replan are all kept and applied together,
+  earliest first. The host reports a death through `onDeath`; a task does not also fail with DIED.
+- A drop in the goal's matched count after a node completes is a replan trigger (counted as a normal
+  replan). An UNKNOWN goal evaluation there waits until the tree runs out.
+- Planning has a deadline (`planTimeoutTicks`, 1200): past it the goal gives up TIMED_OUT.
+- A budget give-up publishes the failure behind the latest failure-driven replan, with the budget
+  named in its detail, and NO_PROGRESS only when there was none. That failure is not saved: right
+  after a load a budget give-up reports NO_PROGRESS.
+- Every way a goal ends retires its active task first, and evaluates the goal at that moment when a
+  live body exists, so a result says what the bot has (PARTIAL at 3 of 5, not FAILED at 0). Between
+  a death and the new body's first tick there is no body to look at: the last evaluation stands.
+- A task hook that throws still gets `onAbort` to let go of what it held. A task that is not RUNNING
+  under an active node ends the node (its failure is routed) instead of stalling the goal.
+- Persistence: only executor-inserted nodes are read back from a save; planner nodes are replanned,
+  and each node's postcondition is checked before it starts, not at load. The save holds the pending
+  deaths (a list, with detail), the counters, the queue and the checkpoints, the live task's
+  included, and never a null. Loading over a live goal cancels that goal first.
+- Owner pause with no goal does nothing. An owner resume while a reflex still holds the body waits
+  for the hold to end.
+
 ### 3.5 Block safety
 
 Griefing is a non-goal, but a mining bot breaks blocks by default. Rules, on in every profile:
