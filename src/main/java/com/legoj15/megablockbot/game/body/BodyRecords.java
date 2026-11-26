@@ -1,6 +1,7 @@
 package com.legoj15.megablockbot.game.body;
 
 import com.legoj15.megablockbot.MegaBlockBot;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -13,6 +14,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.level.saveddata.SavedData;
 
 /**
@@ -20,7 +22,9 @@ import net.minecraft.world.level.saveddata.SavedData;
  * overworld, saying which bodies exist, whose they are, where they were last and whether they want to stay loaded.
  * A body's inventory, health and brain state are NOT here: they are in the body's own player data, saved by vanilla.
  *
- * <p>Schema-versioned. A record that does not decode is skipped and logged; it never fails the whole file.
+ * <p>Schema-versioned. A record that does not decode is skipped and logged; it never fails the whole file. A file
+ * written under a schema this build does not know is not read and never overwritten: the record set is read-only
+ * for the session (see {@link #setDirty(boolean)}), so an older build cannot destroy what a newer one wrote.
  */
 final class BodyRecords extends SavedData {
     static final String ID = "megablockbot_bodies";
@@ -29,10 +33,12 @@ final class BodyRecords extends SavedData {
 
     /**
      * One body. {@code stayLoaded} is what its brain said last (an active or queued goal): bodies with it set are
-     * spawned again at server start, the others wait for their owner to ask.
+     * spawned again at server start, the others wait for their owner to ask. {@code dead} is set on a body that died
+     * in a hardcore world and was taken out of it: it is never spawned again (a field absent from the file reads as
+     * false, so the files written before it existed keep their schema).
      */
     record Entry(UUID uuid, String name, @Nullable UUID ownerUuid, @Nullable String ownerName, String dimension,
-                 double x, double y, double z, boolean stayLoaded) {
+                 double x, double y, double z, boolean stayLoaded, boolean dead) {
         CompoundTag toTag() {
             CompoundTag tag = new CompoundTag();
             tag.putUUID("uuid", uuid);
@@ -44,6 +50,7 @@ final class BodyRecords extends SavedData {
             tag.putDouble("y", y);
             tag.putDouble("z", z);
             tag.putBoolean("stayLoaded", stayLoaded);
+            if (dead) tag.putBoolean("dead", true);
             return tag;
         }
 
@@ -58,24 +65,38 @@ final class BodyRecords extends SavedData {
                 tag.hasUUID("ownerUuid") ? tag.getUUID("ownerUuid") : null,
                 tag.contains("ownerName", Tag.TAG_STRING) ? tag.getString("ownerName") : null,
                 tag.getString("dimension"), tag.getDouble("x"), tag.getDouble("y"), tag.getDouble("z"),
-                tag.getBoolean("stayLoaded"));
+                tag.getBoolean("stayLoaded"), tag.getBoolean("dead"));
         }
     }
 
     private final Map<UUID, Entry> entries = new LinkedHashMap<>();
+    // Set when the file on disk has a schema this build does not know; then nothing is ever written back.
+    private boolean readOnly;
+    private int foundSchema;
+    private boolean reported;
 
     BodyRecords() {}
 
     static BodyRecords of(MinecraftServer server) {
-        return server.overworld().getDataStorage().computeIfAbsent(FACTORY, ID);
+        BodyRecords records = server.overworld().getDataStorage().computeIfAbsent(FACTORY, ID);
+        if (records.readOnly && !records.reported) {
+            // Here and not in load(): the file's name is known here, and the storage loads it once per session.
+            records.reported = true;
+            Path file = server.getWorldPath(LevelResource.ROOT).resolve("data").resolve(ID + ".dat").normalize();
+            MegaBlockBot.LOGGER.error("Body record file {} has schema {}, but this build reads schema {}. It is left untouched: "
+                + "no bodies are restored from it and nothing is written back for the rest of this session", file, records.foundSchema, SCHEMA);
+        }
+        return records;
     }
 
     private static BodyRecords load(CompoundTag tag, HolderLookup.Provider registries) {
         BodyRecords records = new BodyRecords();
         int schema = tag.getInt("schema");
         if (schema != SCHEMA) {
-            // No other schema exists yet. Reading a newer one as if it were ours could misread it, so start empty and say so.
-            MegaBlockBot.LOGGER.error("Body record has schema {} but this version reads {}; ignoring it", schema, SCHEMA);
+            // Reading a schema we do not know as if it were ours could misread it, and saving our own over it would
+            // destroy it: start empty and keep the file as it is.
+            records.readOnly = true;
+            records.foundSchema = schema;
             return records;
         }
         ListTag list = tag.getList("bodies", Tag.TAG_COMPOUND);
@@ -88,6 +109,15 @@ final class BodyRecords extends SavedData {
             }
         }
         return records;
+    }
+
+    /**
+     * {@code SavedData} writes the file only while it is marked dirty, and every change goes through here, so a
+     * read-only record set is never written.
+     */
+    @Override
+    public void setDirty(boolean dirty) {
+        super.setDirty(dirty && !readOnly);
     }
 
     @Override

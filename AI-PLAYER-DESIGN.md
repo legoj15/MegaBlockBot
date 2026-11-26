@@ -212,13 +212,28 @@ chat ──► Language layer (LLM, tool calls) ──► typed Goal
     `mobsTargetBody` has an ordinary zombie pick the body as its target.
 - Bound to an owner; it only takes goals from its owner (or ops). The owner can pause, resume
   and cancel its goal by command (§3.4). The owner's UUID and name are saved with the body;
-  `mayCommand` is true for the owner and for any permission-level-2 source (the console runs at 4).
+  `mayCommand` is true for the owner's own player (not any entity that carries the owner's UUID)
+  and for any permission-level-2 source (the console runs at 4). Spawn rules, for a source below
+  permission level 2 (`BodyManager.checkMaySpawn`): only a player can spawn a body; at most
+  `MAX_BODIES_PER_OWNER` (2) bodies may be theirs, spawned or not; and a name the server's profile
+  cache knows as a player is refused, since that player is only offline (the cache's own entries
+  for bodies, under a body's UUID, do not count). Level 2 and the console are not limited.
+  `unprivilegedOwnerIsCappedAtTwoBodies`, `knownPlayerNameIsRefusedBelowLevelTwo` and
+  `mayCommandRules` measure these, the first two through the command.
 - Chunk loading: keeps a ticket around itself only while it has an active goal. A logged-in body
   loads chunks like any player (view distance 6), so the manager despawns a body whose brain does
   not want to stay loaded and whose owner is not online in the same dimension within 128 blocks,
-  after 600 ticks (`BodyConstants`).
+  after 600 ticks (`BodyConstants`). A body with no owner (spawned from the console) has no owner
+  to be near, so it gets a longer grace, 6000 ticks (`ownerlessBodyIsIdleLongerThanOwnedOne`).
 - Death: drops are recorded with coordinates; respawn re-enters the goal tree with a
-  "recover drops" prerequisite if they are still within reach and the despawn timer allows.
+  "recover drops" prerequisite if they are still within reach and the despawn timer allows. The
+  body respawns at the end of the tick; a respawn that throws is retried on the next ticks and
+  the body is despawned after three failures. A body that is dead when it is spawned from its
+  saved data (the server stopped between its death and its respawn) is respawned too
+  (`bodySpawnedDeadComesBackAlive`). In a hardcore world vanilla's respawn would make the body a
+  spectator, so a body that dies there is despawned instead, its record is marked dead, and
+  spawning that name again is refused with a message saying why (run on a hardcore dev server;
+  no GameTest can make the world hardcore).
 
 ### 3.2 Reflex layer
 
@@ -413,7 +428,10 @@ empty food supply cannot hold a goal paused forever without a result.
   re-created from this record (AIBot does the same from its `runtime.json`). Bodies without one
   respawn when their owner next asks for them. Built in #6: `megablockbot_bodies` in the
   overworld's saved data, schema 1, kept current on spawn, despawn, death and every 200 ticks;
-  an entry that does not decode is skipped and logged.
+  an entry that does not decode is skipped and logged; a file with a schema this build does not
+  know is left untouched, the record set is read-only for the session, and that is logged once as
+  an error naming the file (run on a dev server: the file's hash is the same after a session that
+  spawned a body).
 - **Goal state**, in the body's player data: the root goal, the goal tree's node specs and states,
   a small per-node checkpoint map, the replan counters, pending
   death records (drop positions and death time), the queued goals and the owner's paused flag.
@@ -425,8 +443,11 @@ empty food supply cannot hold a goal paused forever without a result.
   data, under one `megablockbot` compound (`BotBrain.save`/`load`), next to the owner; a brain
   that throws in `load` is replaced by a fresh one and one that throws in `save` is skipped,
   and the body is saved and loaded regardless (`badBrainDoesNotBlockSaveOrSpawn`;
-  `brainStateSurvivesDespawnAndSpawn` for the round trip). Server stop saves bodies through
-  `PlayerList.saveAll` like any player.
+  `brainStateSurvivesDespawnAndSpawn` for the round trip). Server stop: the stopping hook logs
+  every body out first, which saves it (`PlayerList.remove` saves the player), because
+  `PlayerList.removeAll` disconnects by index and a body's disconnect shrinks the list at once,
+  which would skip the player after it. A GameTest cannot stop the server; on a dev server both
+  bodies log out before "Saving players" in the log and come back where they were.
 
 The checkpoint map holds the few facts a task kind declares worth keeping across a restart,
 as hints for where to look (a mine shaft's position and the Y it reached, a village found, a

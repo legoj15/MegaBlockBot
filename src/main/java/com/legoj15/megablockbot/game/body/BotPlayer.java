@@ -155,6 +155,9 @@ public class BotPlayer extends ServerPlayer {
             drops = deathDrops;
             deathDrops = null;
         }
+        // A death listener may veto the death (and heal the body): ServerPlayer.die then returns early and nobody died,
+        // so there is nothing to record, nobody to tell and no respawn to queue.
+        if (!isDeadOrDying()) return;
 
         List<BlockPos> dropPositions = new ArrayList<>();
         for (ItemEntity drop : drops) {
@@ -177,13 +180,26 @@ public class BotPlayer extends ServerPlayer {
     }
 
     /**
+     * True while this body is dead (or has won the game, which takes it out of the world the same way) and nothing has
+     * replaced it yet. {@code isRemoved} covers a respawn that failed halfway: vanilla has by then taken the body out
+     * of the level and cleared {@code wonGame}, so the other two no longer say it is waiting.
+     */
+    boolean isAwaitingRespawn() {
+        return connection.player == this && (wonGame || getHealth() <= 0.0F || isRemoved());
+    }
+
+    /**
      * Respawns this body through the code path a client's respawn button takes, which also points the listener at the
      * replacement. Run by the manager at the end of a tick, never from inside the damage that caused the death.
+     *
+     * @return true when nothing is left to do: the body was replaced, or it was not waiting to be. False when the
+     *         respawn did not happen, which the manager counts as a failure (a throw from vanilla or a mod's event
+     *         handler is the other kind).
      */
-    void performRespawn() {
-        if (connection.player != this) return; // already replaced
-        if (!wonGame && getHealth() > 0.0F) return;
+    boolean performRespawn() {
+        if (!isAwaitingRespawn()) return true;
         connection.handleClientCommand(new ServerboundClientCommandPacket(ServerboundClientCommandPacket.Action.PERFORM_RESPAWN));
+        return connection.player != this;
     }
 
     /** The new instance inherits the old one's owner and brain; the brain hears about it on the new body's first tick. */

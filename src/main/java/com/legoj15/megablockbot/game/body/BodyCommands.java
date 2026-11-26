@@ -22,7 +22,8 @@ import net.minecraft.world.phys.Vec3;
 
 /**
  * {@code /aiplayer spawn|despawn|list|input}. Every one of them is allowed only to whoever may command the body
- * (its owner, a permission-level-2 source, the console); the root itself carries no permission requirement.
+ * (its owner, a permission-level-2 source, the console); the root itself carries no permission requirement. A new
+ * body also has to pass {@link BodyManager#checkMaySpawn}.
  */
 final class BodyCommands {
     private BodyCommands() {}
@@ -81,6 +82,7 @@ final class BodyCommands {
         float yaw = caller != null ? caller.getYRot() : 0.0F;
 
         try {
+            manager.checkMaySpawn(source, name);
             BotPlayer body = manager.spawn(name, owner, level, pos, yaw, null);
             source.sendSuccess(() -> Component.literal("Spawned " + body.getGameProfile().getName() + " at " + format(body.position())
                 + " in " + body.level().dimension().location() + (body.ownerName() != null ? ", owned by " + body.ownerName() : ", with no owner")), true);
@@ -115,7 +117,7 @@ final class BodyCommands {
         }
         for (BodyRecords.Entry entry : manager.recorded()) {
             if (manager.get(entry.uuid()) != null || !BodyManager.mayCommand(entry.ownerUuid(), source)) continue;
-            lines.add(entry.name() + " [not spawned] " + entry.dimension() + " " + format(new Vec3(entry.x(), entry.y(), entry.z()))
+            lines.add(entry.name() + (entry.dead() ? " [died in hardcore, gone for good] " : " [not spawned] ") + entry.dimension() + " " + format(new Vec3(entry.x(), entry.y(), entry.z()))
                 + ", owner " + (entry.ownerName() != null ? entry.ownerName() : "none"));
         }
         String text = lines.isEmpty() ? "No bodies." : lines.size() + " bod" + (lines.size() == 1 ? "y" : "ies") + ":\n" + String.join("\n", lines);

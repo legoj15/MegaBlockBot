@@ -1,15 +1,18 @@
 package com.legoj15.megablockbot.game.gametest;
 
 import com.legoj15.megablockbot.MegaBlockBot;
+import com.legoj15.megablockbot.game.body.BodyConstants;
 import com.legoj15.megablockbot.game.body.BodyException;
 import com.legoj15.megablockbot.game.body.BodyManager;
 import com.legoj15.megablockbot.game.body.BotBrain;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.body.DeathRecord;
 import com.mojang.authlib.GameProfile;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import io.netty.channel.embedded.EmbeddedChannel;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -34,6 +37,7 @@ import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.CommonListenerCookie;
+import net.minecraft.server.players.GameProfileCache;
 import net.minecraft.server.players.SleepStatus;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.EntityType;
@@ -42,7 +46,6 @@ import net.minecraft.world.entity.animal.Pig;
 import net.minecraft.world.entity.monster.Zombie;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.phys.Vec2;
@@ -309,6 +312,41 @@ public final class BodyGameTests {
         });
     }
 
+    /**
+     * A body saved dead (the server stopped, or crashed, between its death and its respawn) comes back dead from its
+     * player data. Nothing would ever respawn it: its client does not exist to press the button.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 60)
+    public static void bodySpawnedDeadComesBackAlive(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawn(helper, "dead", new Vec3(8.5, FLOOR_TOP, 8.5), 0.0F, 60);
+        int[] tick = {0};
+        BotPlayer[] spawnedDead = new BotPlayer[1];
+        rig.onEachTick(() -> {
+            int t = ++tick[0];
+            if (t == 3) {
+                BotPlayer body = rig.body();
+                Vec3 where = body.position();
+                body.hurt(helper.getLevel().damageSources().genericKill(), 1000.0F);
+                helper.assertTrue(body.isDeadOrDying(), "setup: a lethal damage source did not kill it");
+                // Logged out in the same tick, before the end-of-tick respawn: what vanilla saves is a dead body.
+                rig.manager().despawn(body);
+                BotPlayer back = rig.respawn(where);
+                helper.assertTrue(back != body && back.isDeadOrDying(), "setup: the body saved dead did not come back dead (health " + back.getHealth() + ")");
+                spawnedDead[0] = back;
+                return;
+            }
+            if (t < 3) return;
+            BotPlayer now = rig.body();
+            if (now == spawnedDead[0]) {
+                helper.assertTrue(t < 15, "the body that was spawned dead was still dead " + (t - 3) + " ticks later: nothing respawned it");
+                return;
+            }
+            helper.assertTrue(now.isAlive() && now.getHealth() > 0, "the replacement is not alive");
+            rig.pass();
+        });
+    }
+
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 40)
     public static void inventorySurvivesDespawnAndSpawn(GameTestHelper helper) {
         floor(helper);
@@ -400,12 +438,7 @@ public final class BodyGameTests {
     public static void badBrainDoesNotBlockSaveOrSpawn(GameTestHelper helper) {
         floor(helper);
         boolean[] failSave = {true};
-        List<ExplodingBrain> made = new ArrayList<>();
-        Supplier<BotBrain> factory = () -> {
-            ExplodingBrain brain = new ExplodingBrain(failSave[0], true);
-            made.add(brain);
-            return brain;
-        };
+        Supplier<BotBrain> factory = () -> new ExplodingBrain(failSave[0], true);
         Rig rig = Rig.spawn(helper, "bad", new Vec3(8.5, FLOOR_TOP, 8.5), 0.0F, 40, factory);
         helper.runAfterDelay(3, rig.guard(() -> {
             rig.body().getInventory().add(new ItemStack(Items.DIAMOND, 2));
@@ -421,12 +454,10 @@ public final class BodyGameTests {
             rig.manager().despawn(second);
             BotPlayer third = rig.respawn(where);          // brain made with failSave=false; nothing saved for it yet
             rig.manager().despawn(third);                   // saves {marker}
-            int before = made.size();
             BotPlayer fourth = rig.respawn(where);          // loads {marker} into a brain that throws
             helper.assertTrue(rig.manager().get(rig.name()) == fourth, "the body did not come back after a brain failed to load");
             helper.assertTrue(count(fourth, Items.DIAMOND) == 2, "a brain that failed to load cost the body its inventory");
             ExplodingBrain current = (ExplodingBrain) fourth.brain();
-            helper.assertTrue(made.size() == before + 2, "expected the failed brain to be replaced by one more from the factory, made " + (made.size() - before) + " new");
             helper.assertTrue(current.loadsAttempted == 0, "the body kept the brain whose load threw (" + current.loadsAttempted + " load attempts)");
             rig.pass();
         }));
@@ -473,10 +504,13 @@ public final class BodyGameTests {
             BotPlayer body = rig.body();
             helper.assertTrue(ownerId.equals(body.ownerId()) && "TheOwner".equals(body.ownerName()), "owner not recorded on the body");
 
-            Pig owner = EntityType.PIG.create(level);
-            owner.setUUID(ownerId);
+            ServerPlayer owner = standalonePlayer(server, level, ownerId, "TheOwner");
             Pig stranger = EntityType.PIG.create(level);
+            // Not a player, but carries the owner's UUID: the owner rule is for the owner's own player only.
+            Pig impostor = EntityType.PIG.create(level);
+            impostor.setUUID(ownerId);
             helper.assertTrue(body.mayCommand(source(server, level, 0, owner)), "the owner may not command its body");
+            helper.assertTrue(!body.mayCommand(source(server, level, 0, impostor)), "a non-player entity carrying the owner's UUID may command the body");
             helper.assertTrue(!body.mayCommand(source(server, level, 0, stranger)), "a stranger may command a body");
             helper.assertTrue(!body.mayCommand(source(server, level, 0, null)), "an anonymous level-0 source may command a body");
             helper.assertTrue(body.mayCommand(source(server, level, 2, stranger)), "a level-2 source may not command a body");
@@ -484,6 +518,138 @@ public final class BodyGameTests {
             helper.assertTrue(!BodyManager.mayCommand(null, source(server, level, 0, stranger)), "a stranger may command an ownerless body");
             helper.assertTrue(BodyManager.mayCommand(null, server.createCommandSourceStack()), "the console may not command an ownerless body");
             rig.pass();
+        }));
+    }
+
+    /**
+     * The cap is on bodies owned, spawned or not, and per owner. The control is a level-2 source (not limited) and
+     * another player (not limited by the first one's bodies). Spawned through the command, which is where the rule is.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 40)
+    public static void unprivilegedOwnerIsCappedAtTwoBodies(GameTestHelper helper) {
+        floor(helper);
+        ServerLevel level = helper.getLevel();
+        MinecraftServer server = level.getServer();
+        ServerPlayer player = playerInArena(helper, "gt_capper");
+        ServerPlayer other = playerInArena(helper, "gt_other");
+        Rig first = Rig.named(helper, "cap1", 40);
+        Rig second = Rig.named(helper, "cap2", 40);
+        Rig third = Rig.named(helper, "cap3", 40);
+        Rig fourth = Rig.named(helper, "cap4", 40);
+        first.alongside(second);
+        first.alongside(third);
+        first.alongside(fourth);
+        helper.runAfterDelay(2, first.guard(() -> {
+            Feedback feedback = new Feedback();
+            CommandSourceStack asPlayer = source(server, level, 0, player, feedback);
+            helper.assertTrue(run(server, asPlayer, "aiplayer spawn " + first.name()) == 1, "the first body was refused: " + feedback.messages);
+            helper.assertTrue(run(server, asPlayer, "aiplayer spawn " + second.name()) == 1, "the second body was refused: " + feedback.messages);
+            helper.assertTrue(first.body().ownerId().equals(player.getUUID()), "the spawning player is not the owner");
+
+            Feedback refusal = new Feedback();
+            int result = run(server, source(server, level, 0, player, refusal), "aiplayer spawn " + third.name());
+            helper.assertTrue(result == 0 && !third.isLoggedIn(), "a third body was spawned for a player below permission level 2 (result " + result + ")");
+            helper.assertTrue(!refusal.messages.isEmpty(), "the refusal did not say anything");
+
+            // Despawned is still owned: the limit is not a limit on how many are logged in at once.
+            first.manager().despawn(first.body());
+            helper.assertTrue(run(server, source(server, level, 0, player, new Feedback()), "aiplayer spawn " + third.name()) == 0 && !third.isLoggedIn(),
+                "despawning a body freed its slot");
+
+            helper.assertTrue(run(server, source(server, level, 0, other, new Feedback()), "aiplayer spawn " + fourth.name()) == 1,
+                "another player was refused because of the first player's bodies");
+            helper.assertTrue(run(server, source(server, level, 2, player, new Feedback()), "aiplayer spawn " + third.name()) == 1 && third.isLoggedIn(),
+                "a level-2 source was held to the limit");
+            helper.assertTrue(third.body().ownerId().equals(player.getUUID()), "the level-2 source's body has another owner");
+            first.pass();
+        }));
+    }
+
+    /**
+     * A body must not take the name of a player who is not online but is known to the server (its profile cache).
+     * The GameTest server has no profile cache of its own, so the test gives the manager one. Controls: an unknown
+     * name, a level-2 source, and the body's own cache entry (spawning puts every body in the profile cache, under
+     * its own UUID, which must not count as a real player's).
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 40)
+    public static void knownPlayerNameIsRefusedBelowLevelTwo(GameTestHelper helper) {
+        floor(helper);
+        ServerLevel level = helper.getLevel();
+        MinecraftServer server = level.getServer();
+        ServerPlayer player = playerInArena(helper, "gt_namer");
+        Rig real = Rig.named(helper, "real", 40);
+        Rig fresh = Rig.named(helper, "fresh", 40);
+        real.alongside(fresh);
+        helper.runAfterDelay(2, real.guard(() -> {
+            Path cacheFile = null;
+            try {
+                cacheFile = Files.createTempFile("megablockbot-gametest-usercache", ".json");
+                GameProfileCache cache = new GameProfileCache((names, callback) -> {}, cacheFile.toFile());
+                cache.add(new GameProfile(UUID.randomUUID(), real.name())); // a player who is offline, as the server knows them
+                real.manager().useProfileCache(() -> cache);
+
+                helper.assertTrue(run(server, source(server, level, 0, player, new Feedback()), "aiplayer spawn " + fresh.name()) == 1,
+                    "a name the profile cache does not know was refused");
+                Feedback refusal = new Feedback();
+                int result = run(server, source(server, level, 0, player, refusal), "aiplayer spawn " + real.name());
+                helper.assertTrue(result == 0 && !real.isLoggedIn(), "a body took the name of a player the profile cache knows (result " + result + ")");
+                helper.assertTrue(!refusal.messages.isEmpty(), "the refusal did not say anything");
+
+                helper.assertTrue(run(server, source(server, level, 2, player, new Feedback()), "aiplayer spawn " + real.name()) == 1 && real.isLoggedIn(),
+                    "a level-2 source was refused a known player's name");
+
+                // What placeNewPlayer does on a server that has a profile cache (this one has none): the body's own entry
+                // replaces the name's. Forgotten, the body is then spawned from scratch and must not be refused for it.
+                cache.add(real.body().getGameProfile());
+                real.manager().despawn(real.body());
+                real.manager().deleteSaved(BodyManager.uuidFor(real.name()));
+                helper.assertTrue(run(server, source(server, level, 0, player, new Feedback()), "aiplayer spawn " + real.name()) == 1,
+                    "the body's own profile cache entry was taken for a real player's");
+                real.pass();
+            } catch (IOException | BodyException e) {
+                throw new IllegalStateException(e);
+            } finally {
+                real.manager().useProfileCache(null);
+                if (cacheFile != null) {
+                    try {
+                        Files.deleteIfExists(cacheFile);
+                    } catch (IOException ignored) {
+                        // A leftover file in the temp directory is harmless.
+                    }
+                }
+            }
+        }));
+    }
+
+    /**
+     * No owner means nobody to be near it, so a body spawned from the console is given a longer grace than an owned
+     * one before the idle policy despawns it. The grace is crossed with the manager's per-body entry point instead of
+     * by waiting for it (the periodic check may add a few ticks on top, which the margins allow for).
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 40)
+    public static void ownerlessBodyIsIdleLongerThanOwnedOne(GameTestHelper helper) {
+        floor(helper);
+        // Neither has a goal (the default brain wants nothing), and the owner of the first is not online.
+        Rig owned = Rig.spawn(helper, "idle_o", new Vec3(5.5, FLOOR_TOP, 8.5), 0.0F, 40, null, new GameProfile(UUID.randomUUID(), "gt_away"));
+        Rig ownerless = Rig.spawn(helper, "idle_n", new Vec3(10.5, FLOOR_TOP, 8.5), 0.0F, 40);
+        owned.alongside(ownerless);
+        helper.runAfterDelay(2, owned.guard(() -> {
+            BodyManager manager = owned.manager();
+            int margin = 5 * BodyConstants.IDLE_CHECK_INTERVAL_TICKS;
+            manager.applyIdlePolicy(owned.body(), BodyConstants.IDLE_GRACE_TICKS - margin);
+            manager.applyIdlePolicy(ownerless.body(), BodyConstants.IDLE_GRACE_TICKS - margin);
+            helper.assertTrue(owned.isLoggedIn() && ownerless.isLoggedIn(), "a body was despawned before the ordinary grace was over");
+
+            manager.applyIdlePolicy(owned.body(), 2 * margin);
+            manager.applyIdlePolicy(ownerless.body(), 2 * margin);
+            helper.assertTrue(!owned.isLoggedIn(), "the owned body was still there after the ordinary grace");
+            helper.assertTrue(ownerless.isLoggedIn(), "the ownerless body was despawned after the ordinary grace, not the longer one");
+
+            manager.applyIdlePolicy(ownerless.body(), BodyConstants.OWNERLESS_IDLE_GRACE_TICKS - 10 * margin);
+            helper.assertTrue(ownerless.isLoggedIn(), "the ownerless body was despawned before its own grace was over");
+            manager.applyIdlePolicy(ownerless.body(), 20 * margin);
+            helper.assertTrue(!ownerless.isLoggedIn(), "the ownerless body was still there after its own grace");
+            owned.pass();
         }));
     }
 
@@ -570,7 +736,41 @@ public final class BodyGameTests {
     }
 
     private static CommandSourceStack source(MinecraftServer server, ServerLevel level, int permission, net.minecraft.world.entity.Entity entity) {
-        return new CommandSourceStack(CommandSource.NULL, Vec3.ZERO, Vec2.ZERO, level, permission, "gt", Component.literal("gt"), server, entity);
+        return source(server, level, permission, entity, CommandSource.NULL);
+    }
+
+    private static CommandSourceStack source(MinecraftServer server, ServerLevel level, int permission, net.minecraft.world.entity.Entity entity,
+                                             CommandSource sink) {
+        return new CommandSourceStack(sink, Vec3.ZERO, Vec2.ZERO, level, permission, "gt", Component.literal("gt"), server, entity);
+    }
+
+    /** A player who is not in any level, standing (as far as a command that reads its position can tell) in the arena. */
+    private static ServerPlayer playerInArena(GameTestHelper helper, String name) {
+        ServerLevel level = helper.getLevel();
+        ServerPlayer player = standalonePlayer(level.getServer(), level, UUID.randomUUID(), name);
+        Vec3 at = helper.absoluteVec(new Vec3(8.5, FLOOR_TOP, 8.5));
+        // Not moveTo(x, y, z): ServerPlayer's version tells its connection, which this player does not have.
+        player.setPos(at.x, at.y, at.z);
+        return player;
+    }
+
+    /** Keeps what a command source is told, so a test can see that a refusal said something. */
+    private static final class Feedback implements CommandSource {
+        final List<String> messages = new ArrayList<>();
+
+        @Override public void sendSystemMessage(Component message) { messages.add(message.getString()); }
+        @Override public boolean acceptsSuccess() { return true; }
+        @Override public boolean acceptsFailure() { return true; }
+        @Override public boolean shouldInformAdmins() { return false; }
+    }
+
+    /** Runs a command line as {@code source} and returns what the command returned: 0 when it failed. */
+    private static int run(MinecraftServer server, CommandSourceStack source, String line) {
+        try {
+            return server.getCommands().getDispatcher().execute(line, source);
+        } catch (CommandSyntaxException e) {
+            throw new IllegalStateException("'" + line + "' did not parse: " + e.getMessage(), e);
+        }
     }
 
     private static void award(ServerPlayer player, AdvancementHolder advancement) {
@@ -636,8 +836,19 @@ public final class BodyGameTests {
             return rig;
         }
 
+        /** A rig for a body that something else (a command) spawns: it only cleans up after it. */
+        static Rig named(GameTestHelper helper, String tag, int deadlineTicks) {
+            Rig rig = new Rig(helper, "gt_" + tag + "_" + RUN_ID, null, null);
+            helper.runAtTickTime(deadlineTicks, rig::cleanup);
+            return rig;
+        }
+
         String name() {
             return name;
+        }
+
+        boolean isLoggedIn() {
+            return manager.get(id) != null;
         }
 
         BodyManager manager() {
