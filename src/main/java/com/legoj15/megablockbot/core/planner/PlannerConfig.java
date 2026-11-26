@@ -19,7 +19,8 @@ import java.util.TreeMap;
  * @param harvest         cost of one harvest attempt, before yield
  * @param kill            cost of one kill attempt, before yield
  * @param fish            cost of one cast, before yield
- * @param trade           cost of one villager trade (a trade has no yield to divide by)
+ * @param trade           cost of one villager trade attempt: divided by the offer's chance, and added to the
+ *                        unit cost of what the trade charges (a trade gives one item, so there is no yield)
  * @param maxTotalReplans the replan total a plan carries when no strategy declares a higher one (design 3.4)
  * @param toolItems       tool item per class and tier, keyed by {@link #toolKey}; see {@link #toolItem}
  */

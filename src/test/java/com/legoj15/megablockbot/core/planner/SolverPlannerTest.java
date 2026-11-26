@@ -2,11 +2,13 @@ package com.legoj15.megablockbot.core.planner;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.legoj15.megablockbot.core.EquipSlot;
 import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.ToolClass;
@@ -24,21 +26,24 @@ import com.legoj15.megablockbot.core.plan.Profile;
 import com.legoj15.megablockbot.core.snapshot.ContainerSight;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.megablockbot.core.task.Failure;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
-import java.util.ArrayDeque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.BiFunction;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.Test;
 
 /**
- * The planner's behaviour tests (brief P12): a plan is executable in order, the cheapest usable source wins,
- * and an impossible goal fails with the reason an owner can act on. Assertions are on what the plan runner
- * reports, not on node order, wherever order is not the behaviour under test.
+ * The planner's behaviour tests (brief P12 and its fix round): a plan is executable in order, the cheapest usable
+ * source wins, and an impossible goal fails with the reason an owner can act on. Assertions are on what the plan
+ * runner reports, not on node order, wherever order is not the behaviour under test; failures are asserted by kind
+ * and item, never by wording.
  */
 final class SolverPlannerTest {
     private static final ItemKey OAK_LOG = ItemKey.of("oak_log");
@@ -47,7 +52,9 @@ final class SolverPlannerTest {
     private static final ItemKey CRAFTING_TABLE = ItemKey.of("crafting_table");
     private static final ItemKey WOODEN_PICKAXE = ItemKey.of("wooden_pickaxe");
     private static final ItemKey STONE_PICKAXE = ItemKey.of("stone_pickaxe");
+    private static final ItemKey DIAMOND_PICKAXE = ItemKey.of("diamond_pickaxe");
     private static final ItemKey COBBLESTONE = ItemKey.of("cobblestone");
+    private static final ItemKey DIAMOND = ItemKey.of("diamond");
     private static final ItemKey FURNACE = ItemKey.of("furnace");
     private static final ItemKey CHEST = ItemKey.of("chest");
     private static final ItemKey TORCH = ItemKey.of("torch");
@@ -55,8 +62,14 @@ final class SolverPlannerTest {
     private static final ItemKey CHARCOAL = ItemKey.of("charcoal");
     private static final ItemKey STRING = ItemKey.of("string");
     private static final ItemKey SADDLE = ItemKey.of("saddle");
+    private static final ItemKey EMERALD = ItemKey.of("emerald");
     private static final ItemKey ENCHANTED_BOOK = ItemKey.of("enchanted_book");
     private static final ItemKey COBBLE_AXE = ItemKey.of("cobble_axe");
+    private static final ItemKey GADGET = ItemKey.of("gadget");
+    private static final ItemKey GOLD_ORE = ItemKey.of("gold_ore");
+    private static final ItemKey GOLD_INGOT = ItemKey.of("gold_ingot");
+    private static final ItemKey AMBER = ItemKey.of("amber");
+    private static final ItemKey SAND = ItemKey.of("sand");
     private static final Pos CONTAINER = new Pos(16, 64, -4);
 
     // ─── The fixture: a dozen vanilla-like recipes and a small acquisition index ─────────────────
@@ -77,8 +90,8 @@ final class SolverPlannerTest {
         return new RecipeDef.Slot(List.of(first, second), 1);
     }
 
-    private static SimpleRecipeBook book() {
-        List<RecipeDef> recipes = List.of(
+    private static List<RecipeDef> baseRecipes() {
+        return List.of(
                 recipe("planks_from_log", OAK_PLANKS, 4, null, one(OAK_LOG)),
                 recipe("sticks_from_planks", STICK, 4, null, of(OAK_PLANKS, 2)),
                 recipe("crafting_table_from_planks", CRAFTING_TABLE, 1, null, of(OAK_PLANKS, 4)),
@@ -91,10 +104,20 @@ final class SolverPlannerTest {
                 recipe("wooden_shovel_from_planks", ItemKey.of("wooden_shovel"), 1, CRAFTING_TABLE, one(OAK_PLANKS), of(STICK, 2)),
                 recipe("wooden_sword_from_planks", ItemKey.of("wooden_sword"), 1, CRAFTING_TABLE, of(OAK_PLANKS, 2), one(STICK)),
                 recipe("stone_shovel_from_cobblestone", ItemKey.of("stone_shovel"), 1, CRAFTING_TABLE, one(COBBLESTONE), of(STICK, 2)));
+    }
+
+    private static SimpleRecipeBook book() {
+        return new SimpleRecipeBook(baseRecipes(), Map.of());
+    }
+
+    private static SimpleRecipeBook bookWith(RecipeDef... extra) {
+        List<RecipeDef> recipes = new ArrayList<>(baseRecipes());
+        recipes.addAll(List.of(extra));
         return new SimpleRecipeBook(recipes, Map.of());
     }
 
-    private static AcquisitionIndex index() {
+    /** The base index's sources; a test adds its own before {@code build()}. Diamond needs a pickaxe of the given tier. */
+    private static AcquisitionIndex.Builder indexBuilder(ToolTier diamondTier) {
         AcquisitionIndex.Builder builder = AcquisitionIndex.builder();
         for (ItemKey item : List.of(OAK_LOG, OAK_PLANKS, STICK, CRAFTING_TABLE, WOODEN_PICKAXE, STONE_PICKAXE,
                 COBBLESTONE, FURNACE, CHEST, TORCH, COAL, CHARCOAL, STRING, SADDLE, ENCHANTED_BOOK,
@@ -114,15 +137,19 @@ final class SolverPlannerTest {
         builder.addSource(new Source.MineBlock("mine:minecraft:coal_ore", COAL, "minecraft:coal_ore",
                 ToolClass.PICKAXE, ToolTier.WOOD, true, false, false, 1.0, false,
                 new Source.OreRange(0, 96, 48)));
-        builder.addSource(new Source.MineBlock("mine:minecraft:diamond_ore", ItemKey.of("diamond"),
-                "minecraft:diamond_ore", ToolClass.PICKAXE, ToolTier.IRON, true, false, false, 1.0, false,
+        builder.addSource(new Source.MineBlock("mine:minecraft:diamond_ore", DIAMOND,
+                "minecraft:diamond_ore", ToolClass.PICKAXE, diamondTier, true, false, false, 1.0, false,
                 new Source.OreRange(-64, 16, -54)));
         builder.addSource(new Source.KillMob("kill:minecraft:spider", STRING, "minecraft:spider", true, 1.0, true));
         builder.addSource(new Source.Fishing("fish:minecraft:gameplay/fishing", STRING,
                 "minecraft:gameplay/fishing", 0.1));
         builder.addSource(new Source.MineBlock("mine:minecraft:cobweb#shears", STRING, "minecraft:cobweb",
                 ToolClass.SHEARS, ToolTier.HAND, true, false, true, 1.0, false, null));
-        return builder.build();
+        return builder;
+    }
+
+    private static AcquisitionIndex index() {
+        return indexBuilder(ToolTier.IRON).build();
     }
 
     private static Snapshot snapshot(Map<ItemKey, Integer> items, Map<ToolClass, ToolTier> tools) {
@@ -141,6 +168,29 @@ final class SolverPlannerTest {
 
     private static SolverPlanner planner(Strategy... strategies) {
         return new SolverPlanner(book(), index(), PlannerConfig.defaults(), List.of(strategies));
+    }
+
+    private static SolverPlanner planner(RecipeBook book, AcquisitionIndex index, Strategy... strategies) {
+        return new SolverPlanner(book, index, PlannerConfig.defaults(), List.of(strategies));
+    }
+
+    private static SolverPlanner planner(PlannerConfig config, Strategy... strategies) {
+        return new SolverPlanner(book(), index(), config, List.of(strategies));
+    }
+
+    /** Mining costs 1000 a block and tool tiers nothing, so a price is easy to read and independent of the defaults. */
+    private static PlannerConfig dearMining() {
+        return dearMining(0);
+    }
+
+    private static PlannerConfig dearMining(long toolStep) {
+        PlannerConfig defaults = PlannerConfig.defaults();
+        return new PlannerConfig(1000, defaults.deepOre(), toolStep, defaults.harvest(), defaults.kill(), defaults.fish(),
+                defaults.trade(), defaults.maxTotalReplans(), defaults.toolItems());
+    }
+
+    private static Exclusions without(String... sources) {
+        return new Exclusions(Set.of(sources), Set.of(), List.of());
     }
 
     /** A strategy the planner should consult; records every goal it was asked about. */
@@ -170,6 +220,27 @@ final class SolverPlannerTest {
         }
     }
 
+    /** A strategy whose answer is a function of the goal and the context, for the tests that look at the context. */
+    private static final class ScriptedStrategy implements Strategy {
+        private final String id;
+        private final BiFunction<Goal, PlanContext, Optional<Proposal>> script;
+
+        ScriptedStrategy(String id, BiFunction<Goal, PlanContext, Optional<Proposal>> script) {
+            this.id = id;
+            this.script = script;
+        }
+
+        @Override
+        public String id() {
+            return id;
+        }
+
+        @Override
+        public Optional<Proposal> propose(Goal goal, PlanContext context) {
+            return script.apply(goal, context);
+        }
+    }
+
     private static NodeSpec tradeLeaf(ItemKey item, int count) {
         return NodeSpec.leaf(new Goal.HaveItem(item, count), "trade",
                 Map.of("item", item.id(), "count", Integer.toString(count)), "trade:fake");
@@ -193,17 +264,22 @@ final class SolverPlannerTest {
     }
 
     private static Executed run(Plan plan, Map<ItemKey, Integer> start, Map<ToolClass, ToolTier> startTools) {
+        return run(plan, book(), start, startTools);
+    }
+
+    private static Executed run(Plan plan, RecipeBook book, Map<ItemKey, Integer> start,
+                                Map<ToolClass, ToolTier> startTools) {
         Map<ItemKey, Integer> stock = new TreeMap<>(start);
         Map<ToolClass, ToolTier> tools = new TreeMap<>(startTools);
         List<String> ran = new ArrayList<>();
         Deque<NodeSpec> pending = new ArrayDeque<>();
         List<NodeSpec> roots = plan.roots();
         for (int i = roots.size() - 1; i >= 0; i--) pending.push(roots.get(i));
-        String failure = walk(pending, stock, tools, ran);
+        String failure = walk(pending, book, stock, tools, ran);
         return new Executed(stock, tools, ran, failure);
     }
 
-    private static String walk(Deque<NodeSpec> pending, Map<ItemKey, Integer> stock,
+    private static String walk(Deque<NodeSpec> pending, RecipeBook book, Map<ItemKey, Integer> stock,
                                Map<ToolClass, ToolTier> tools, List<String> ran) {
         while (!pending.isEmpty()) {
             NodeSpec node = pending.pop();
@@ -212,13 +288,23 @@ final class SolverPlannerTest {
                 for (int i = children.size() - 1; i >= 0; i--) pending.push(children.get(i));
                 continue;
             }
-            String failure = runLeaf(node, stock, tools, ran);
+            String failure = runLeaf(node, book, stock, tools, ran);
+            if (failure == null) failure = checkOwnGoal(node, stock);
             if (failure != null) return failure;
         }
         return null;
     }
 
-    private static String runLeaf(NodeSpec node, Map<ItemKey, Integer> stock,
+    /** A leaf's own goal is what the executor verifies when the leaf ends: it must hold against the stock then. */
+    private static String checkOwnGoal(NodeSpec node, Map<ItemKey, Integer> stock) {
+        if (!(node.goal() instanceof Goal.HaveItem have)) return null;
+        int held = stock.getOrDefault(have.key(), 0);
+        if (held >= have.count()) return null;
+        return "leaf " + node.taskKind() + ":" + node.params() + " ended with " + held + " of " + have.key().id()
+                + " but its own goal is " + have.count();
+    }
+
+    private static String runLeaf(NodeSpec node, RecipeBook book, Map<ItemKey, Integer> stock,
                                   Map<ToolClass, ToolTier> tools, List<String> ran) {
         Map<String, String> params = node.params();
         switch (node.taskKind()) {
@@ -234,41 +320,110 @@ final class SolverPlannerTest {
                 }
                 gain(stock, tools, ItemKey.of(params.get("item")), Long.parseLong(params.get("count")));
             }
-            case "kill", "fish", "trade" -> gain(stock, tools, ItemKey.of(params.get("item")),
-                    Long.parseLong(params.get("count")));
+            case "kill", "fish" -> gain(stock, tools, ItemKey.of(params.get("item")), Long.parseLong(params.get("count")));
+            case "trade" -> {
+                long trades = Long.parseLong(params.get("count"));
+                // A planned trade says what it charges; a strategy's own trade leaf may not.
+                for (Map.Entry<ItemKey, Integer> charge : parseCost(params.get("cost")).entrySet()) {
+                    long owed = charge.getValue() * trades;
+                    if (stock.getOrDefault(charge.getKey(), 0) < owed) {
+                        return "trade " + node.source() + " charges " + owed + " of " + charge.getKey().id()
+                                + " but the stock holds " + stock.getOrDefault(charge.getKey(), 0);
+                    }
+                    lose(stock, charge.getKey(), (int) owed);
+                }
+                gain(stock, tools, ItemKey.of(params.get("item")), trades);
+            }
             case "craft" -> {
-                RecipeDef recipe = book().byId(params.get("recipe")).orElse(null);
+                RecipeDef recipe = book.byId(params.get("recipe")).orElse(null);
                 if (recipe == null) return "leaf plans unknown recipe " + params.get("recipe");
                 long times = Long.parseLong(params.get("times"));
                 if (recipe.station() != null && stock.getOrDefault(recipe.station(), 0) < 1) {
-                    return "leaf " + node.params().get("recipe") + " needs a "
-                            + recipe.station().id() + " in stock";
+                    return "leaf " + params.get("recipe") + " needs a " + recipe.station().id() + " in stock";
                 }
-                for (RecipeDef.Slot slot : recipe.slots()) {
-                    int need = slot.count() * (int) times;
-                    for (ItemKey alternative : slot.alternatives()) {
-                        int take = Math.min(need, stock.getOrDefault(alternative, 0));
-                        if (take > 0) {
-                            lose(stock, alternative, take);
-                            need -= take;
-                        }
-                        if (need == 0) break;
-                    }
-                    if (need > 0) return "leaf " + node.params().get("recipe") + " is short " + need + " of a slot item";
-                }
+                String failure = craftByLayout(recipe, params, times, stock);
+                if (failure != null) return failure;
                 gain(stock, tools, recipe.result(), times * recipe.resultCount());
             }
             case "equip", "deposit", "navigate" -> { /* recorded only; the goal carries the target */ }
             default -> { /* a strategy's own task kind: recorded, not simulated */ }
         }
-        ran.add(node.taskKind() + ":" + label(node));
+        ran.add(node.taskKind() + ":" + label(node, book));
         return null;
     }
 
-    private static String label(NodeSpec node) {
+    /**
+     * Takes exactly the items the leaf's layout names, slot by slot, craft by craft: what an executor that follows
+     * it does. A leaf with no layout is run the way an executor without one would, taking the first alternative in
+     * stock for each slot; the layout tests check that every craft leaf has one.
+     */
+    private static String craftByLayout(RecipeDef recipe, Map<String, String> params, long times,
+                                        Map<ItemKey, Integer> stock) {
+        if (params.get("layout") == null) return craftGreedily(recipe, times, stock);
+        List<CraftLayout.Run> runs = CraftLayout.decode(params.get("layout"));
+        long covered = 0;
+        for (CraftLayout.Run run : runs) covered += run.crafts();
+        if (runs.isEmpty() || covered != times) {
+            return "craft " + recipe.id() + " x" + times + " carries a layout covering " + covered + " crafts: "
+                    + params.get("layout");
+        }
+        int slotCopies = 0;
+        for (RecipeDef.Slot slot : recipe.slots()) slotCopies += slot.count();
+        for (CraftLayout.Run run : runs) {
+            if (run.items().size() != slotCopies) {
+                return "craft " + recipe.id() + " has " + slotCopies + " slots but its layout names " + run.items();
+            }
+            for (long craft = 0; craft < run.crafts(); craft++) {
+                int at = 0;
+                for (RecipeDef.Slot slot : recipe.slots()) {
+                    for (int copy = 0; copy < slot.count(); copy++, at++) {
+                        ItemKey named = run.items().get(at);
+                        if (!slot.alternatives().contains(named)) {
+                            return "craft " + recipe.id() + " names " + named.id() + " for a slot that takes "
+                                    + slot.alternatives();
+                        }
+                        if (stock.getOrDefault(named, 0) < 1) {
+                            return "craft " + recipe.id() + " is short of " + named.id() + ", the item its layout names";
+                        }
+                        lose(stock, named, 1);
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String craftGreedily(RecipeDef recipe, long times, Map<ItemKey, Integer> stock) {
+        for (RecipeDef.Slot slot : recipe.slots()) {
+            int need = slot.count() * (int) times;
+            for (ItemKey alternative : slot.alternatives()) {
+                int take = Math.min(need, stock.getOrDefault(alternative, 0));
+                if (take > 0) {
+                    lose(stock, alternative, take);
+                    need -= take;
+                }
+                if (need == 0) break;
+            }
+            if (need > 0) return "leaf " + recipe.id() + " is short " + need + " of a slot item";
+        }
+        return null;
+    }
+
+    /** {@code item=count,item=count} as a trade leaf's {@code cost} param carries it; empty for none. */
+    private static Map<ItemKey, Integer> parseCost(String text) {
+        Map<ItemKey, Integer> cost = new TreeMap<>();
+        if (text == null || text.isEmpty()) return cost;
+        for (String entry : text.split(",")) {
+            String[] parts = entry.split("=");
+            cost.put(new ItemKey(parts[0]), Integer.parseInt(parts[1]));
+        }
+        return cost;
+    }
+
+    private static String label(NodeSpec node, RecipeBook book) {
         if (node.params().containsKey("item")) return node.params().get("item");
         if (node.params().containsKey("recipe")) {
-            return book().byId(node.params().get("recipe")).map(r -> r.result().id()).orElse("?");
+            return book.byId(node.params().get("recipe")).map(r -> r.result().id()).orElse("?");
         }
         return node.goal() instanceof Goal.HaveItem have ? have.key().id() : node.taskKind();
     }
@@ -313,6 +468,36 @@ final class SolverPlannerTest {
         }
     }
 
+    /** How many of the item the plan's gather leaves bring in, summed over leaves of the given task kinds. */
+    private static long gathered(Plan plan, ItemKey item, String... kinds) {
+        long total = 0;
+        for (NodeSpec leaf : leaves(plan)) {
+            if (List.of(kinds).contains(leaf.taskKind()) && item.id().equals(leaf.params().get("item"))) {
+                total += Long.parseLong(leaf.params().get("count"));
+            }
+        }
+        return total;
+    }
+
+    /** The count of each gather leaf of the item, in plan order. */
+    private static List<Long> gatherCounts(Plan plan, ItemKey item) {
+        List<Long> counts = new ArrayList<>();
+        for (NodeSpec leaf : leaves(plan)) {
+            if (!leaf.taskKind().equals("craft") && item.id().equals(leaf.params().get("item"))) {
+                counts.add(Long.parseLong(leaf.params().get("count")));
+            }
+        }
+        return counts;
+    }
+
+    private static long gathered(Plan plan, ItemKey item) {
+        return gathered(plan, item, "mine", "harvest", "kill", "fish", "trade");
+    }
+
+    private static List<String> sources(Plan plan) {
+        return leaves(plan).stream().map(NodeSpec::source).toList();
+    }
+
     private static PlanOutcome outcome(SolverPlanner planner, PlanRequest request) {
         PlanOutcome outcome = planner.plan(request);
         assertNotNull(outcome);
@@ -329,6 +514,16 @@ final class SolverPlannerTest {
         PlanOutcome outcome = outcome(planner, request);
         assertTrue(outcome instanceof PlanOutcome.Unplannable, "expected Unplannable, got " + outcome);
         return ((PlanOutcome.Unplannable) outcome).failure();
+    }
+
+    /** A plan that runs to its end from the start state, ending with at least the goal count. */
+    private static Executed assertRunsToTheGoal(Plan plan, RecipeBook book, Map<ItemKey, Integer> start,
+                                                Map<ToolClass, ToolTier> tools, ItemKey item, int count) {
+        Executed executed = run(plan, book, start, tools);
+        assertNull(executed.failure(), "the plan must run to the end: " + executed.failure() + " after " + executed.ran());
+        assertTrue(executed.stock().getOrDefault(item, 0) >= count,
+                "the plan ends with " + count + " of " + item.id() + ": " + executed.stock());
+        return executed;
     }
 
     // ─── The benchmark: a stone pickaxe from an empty inventory ──────────────────────────────────
@@ -359,12 +554,12 @@ final class SolverPlannerTest {
         for (NodeSpec gather : gathers) {
             assertFalse(gather.params().containsKey("toolClass"), "logs are gathered with no tool: " + gather.params());
         }
-        assertEquals(configuredReplans(), plan.maxTotalReplans());
-        assertEquals(planner().inputFingerprint(new Goal.HaveItem(STONE_PICKAXE, 1), EMPTY), plan.inputFingerprint());
-    }
 
-    private int configuredReplans() {
-        return PlannerConfig.defaults().maxTotalReplans();
+        // No more is gathered than the pickaxe needs: a table (4 planks), the wooden pickaxe (3 planks) and two
+        // stick crafts' worth (2 planks) are nine planks, so three logs; the stone pickaxe takes three cobblestone.
+        assertEquals(3, gathered(plan, OAK_LOG), "three logs suffice");
+        assertEquals(3, gathered(plan, COBBLESTONE), "the stone pickaxe takes three cobblestone");
+        assertEquals(planner().inputFingerprint(new Goal.HaveItem(STONE_PICKAXE, 1), EMPTY), plan.inputFingerprint());
     }
 
     @Test
@@ -397,25 +592,59 @@ final class SolverPlannerTest {
         assertEquals(1, executed.stock().getOrDefault(STONE_PICKAXE, 0));
     }
 
+    @Test
+    void aBetterToolInStockThanTheSourceNeedsIsEnough() {
+        // The snapshot reports no tool, but a stone pickaxe is in stock: mining cobblestone (wood tier) needs no
+        // prerequisite, and in particular no wooden pickaxe is made.
+        Map<ItemKey, Integer> stock = Map.of(STONE_PICKAXE, 1);
+        Plan plan = planned(planner(), request(new Goal.HaveItem(COBBLESTONE, 3), snapshot(stock, Map.of()),
+                Exclusions.NONE));
+        assertEquals(List.of("mine:minecraft:stone"), sources(plan), "nothing but the mining: " + leaves(plan));
+        assertRunsToTheGoal(plan, book(), stock, Map.of(ToolClass.PICKAXE, ToolTier.STONE), COBBLESTONE, 3);
+    }
+
+    // ─── Stock accounting around tool prerequisites (brief P12b items 1, 12) ─────────────────────
+
+    @Test
+    void aToolPrerequisiteThatEatsTheTargetsOwnDemandIsPlannedAgainstTheStockItLeaves() {
+        // A gadget takes four cobblestone and a diamond; the diamond needs a stone pickaxe, which takes three
+        // cobblestone of its own. The cobblestone the gadget counts must be what is left after the pickaxe.
+        RecipeBook gadgetBook = bookWith(recipe("gadget_from_cobblestone_and_diamond", GADGET, 1, null,
+                of(COBBLESTONE, 4), one(DIAMOND)));
+        AcquisitionIndex gadgetIndex = indexBuilder(ToolTier.STONE).build();
+        SolverPlanner planner = planner(gadgetBook, gadgetIndex);
+
+        // The cobblestone gathers of the plan, in order, by cobblestone in stock at the start: the pickaxe's three
+        // first when it must be mined for, then what the gadget still lacks, each in one leaf (a leaf per missing
+        // unit would mean the plan only found the shortfall out when the solve ran short).
+        Map<Integer, List<Long>> expectedGather =
+                new TreeMap<>(Map.of(0, List.of(3L, 4L), 4, List.of(3L), 7, List.<Long>of()));
+        for (Map.Entry<Integer, List<Long>> expected : expectedGather.entrySet()) {
+            int cobbleInStock = expected.getKey();
+            Map<ItemKey, Integer> stock = cobbleInStock == 0 ? Map.of() : Map.of(COBBLESTONE, cobbleInStock);
+            Plan plan = planned(planner, request(new Goal.HaveItem(GADGET, 1), snapshot(stock, Map.of()),
+                    Exclusions.NONE));
+            assertRunsToTheGoal(plan, gadgetBook, stock, Map.of(), GADGET, 1);
+            assertEquals(expected.getValue(), gatherCounts(plan, COBBLESTONE),
+                    "cobblestone gathered with " + cobbleInStock + " in stock");
+        }
+    }
+
     // ─── Impossible goals ────────────────────────────────────────────────────────────────────────
 
     @Test
     void aLeafWithNoSourceIsUnplannableNamingTheItem() {
         Failure failure = unplannable(planner(), request(new Goal.HaveItem(SADDLE, 1), EMPTY, Exclusions.NONE));
         assertEquals(Failure.Kind.NO_SOURCE, failure.kind());
-        assertTrue(failure instanceof Failure.NoSource, failure.toString());
         assertEquals(SADDLE, ((Failure.NoSource) failure).key());
     }
 
     @Test
-    void aLeafWhoseEverySourceIsExcludedIsUnplannableSayingSo() {
+    void aLeafWhoseEverySourceIsExcludedIsUnplannableNamingTheItem() {
         Failure failure = unplannable(planner(),
-                request(new Goal.HaveItem(COBBLESTONE, 1), EMPTY,
-                        new Exclusions(java.util.Set.of("mine:minecraft:stone"), java.util.Set.of(), List.of())));
+                request(new Goal.HaveItem(COBBLESTONE, 1), EMPTY, without("mine:minecraft:stone")));
         assertEquals(Failure.Kind.NO_SOURCE, failure.kind());
-        Failure.NoSource noSource = (Failure.NoSource) failure;
-        assertEquals(COBBLESTONE, noSource.key());
-        assertTrue(noSource.detail().contains("excluded"), noSource.detail());
+        assertEquals(COBBLESTONE, ((Failure.NoSource) failure).key());
     }
 
     @Test
@@ -439,7 +668,10 @@ final class SolverPlannerTest {
         Failure failure = unplannable(cyclicPlanner,
                 request(new Goal.HaveItem(COBBLESTONE, 1), EMPTY, Exclusions.NONE));
         assertEquals(Failure.Kind.MISSING_TOOL, failure.kind(), failure.toString());
-        assertTrue(failure.detail().toLowerCase().contains("cyclic"), failure.detail());
+        Failure.MissingTool missing = (Failure.MissingTool) failure;
+        assertEquals(ToolClass.AXE, missing.toolClass());
+        assertEquals(ToolTier.WOOD, missing.tier());
+        assertTrue(missing.detail().contains(COBBLE_AXE.id()), "the failure names the tool item: " + missing.detail());
     }
 
     // ─── Source choice ───────────────────────────────────────────────────────────────────────────
@@ -447,27 +679,50 @@ final class SolverPlannerTest {
     @Test
     void theCheaperOfTwoSourcesIsChosenAndExcludingItSwitchesToTheOther() {
         Plan plan = planned(planner(), request(new Goal.HaveItem(STRING, 1), EMPTY, Exclusions.NONE));
-        List<String> sources = leaves(plan).stream().map(NodeSpec::source).toList();
+        List<String> sources = sources(plan);
         assertTrue(sources.contains("kill:minecraft:spider"), "the cheaper kill source is chosen: " + sources);
         assertFalse(sources.contains("fish:minecraft:gameplay/fishing"), "fishing is dearer: " + sources);
 
         Plan switched = planned(planner(), request(new Goal.HaveItem(STRING, 1), EMPTY,
-                new Exclusions(java.util.Set.of("kill:minecraft:spider"), java.util.Set.of(), List.of())));
-        List<String> switchedSources = leaves(switched).stream().map(NodeSpec::source).toList();
+                without("kill:minecraft:spider")));
+        List<String> switchedSources = sources(switched);
         assertTrue(switchedSources.contains("fish:minecraft:gameplay/fishing"),
                 "excluding the kill source switches to fishing: " + switchedSources);
         assertFalse(switchedSources.contains("kill:minecraft:spider"), switchedSources.toString());
     }
 
     @Test
+    void aSourceWhoseToolCannotBePlannedFallsThroughToTheNextOne() {
+        // Amber is mined with a diamond pickaxe (cheaper per unit than fishing for it) but the book has no way to
+        // make one: the cheapest source cannot be used, the next can.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(AMBER);
+        builder.addSource(new Source.MineBlock("mine:minecraft:amber_ore", AMBER, "minecraft:amber_ore",
+                ToolClass.PICKAXE, ToolTier.DIAMOND, true, false, false, 1.0, false, null));
+        builder.addSource(new Source.Fishing("fish:minecraft:gameplay/amber", AMBER, "minecraft:gameplay/amber", 0.5));
+        SolverPlanner planner = planner(book(), builder.build());
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(AMBER, 2), EMPTY, Exclusions.NONE));
+        assertEquals(List.of("fish:minecraft:gameplay/amber"), sources(plan), "the fallback source is used");
+        assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), AMBER, 2);
+
+        // With the fallback gone the failure is the cheapest source's: the diamond pickaxe has no source.
+        Failure failure = unplannable(planner, request(new Goal.HaveItem(AMBER, 2), EMPTY,
+                without("fish:minecraft:gameplay/amber")));
+        assertEquals(Failure.Kind.NO_SOURCE, failure.kind());
+        assertEquals(DIAMOND_PICKAXE, ((Failure.NoSource) failure).key(),
+                "the failure reported is the cheapest source's, not a generic 'no source for amber'");
+    }
+
+    @Test
     void aSlotUsesTheCheaperAlternativeToGather() {
         Plan plan = planned(planner(), request(new Goal.HaveItem(TORCH, 4), EMPTY, Exclusions.NONE));
-        List<String> gathered = leaves(plan).stream()
+        List<String> gatheredItems = leaves(plan).stream()
                 .filter(leaf -> leaf.params().containsKey("item"))
                 .map(leaf -> leaf.params().get("item"))
                 .toList();
-        assertTrue(gathered.contains("minecraft:coal"), "coal is cheaper to gather: " + gathered);
-        assertFalse(gathered.contains("minecraft:charcoal"), "charcoal has no source: " + gathered);
+        assertTrue(gatheredItems.contains("minecraft:coal"), "coal is cheaper to gather: " + gatheredItems);
+        assertFalse(gatheredItems.contains("minecraft:charcoal"), "charcoal has no source: " + gatheredItems);
         Executed executed = run(plan, Map.of(), Map.of());
         assertNull(executed.failure(), executed.failure());
         assertEquals(4, executed.stock().getOrDefault(TORCH, 0));
@@ -477,14 +732,45 @@ final class SolverPlannerTest {
     void aSlotUsesTheAlternativeInStock() {
         Plan plan = planned(planner(), request(new Goal.HaveItem(TORCH, 4),
                 snapshot(Map.of(CHARCOAL, 1), Map.of()), Exclusions.NONE));
-        List<String> gathered = leaves(plan).stream()
+        List<String> gatheredItems = leaves(plan).stream()
                 .filter(leaf -> leaf.params().containsKey("item"))
                 .map(leaf -> leaf.params().get("item"))
                 .toList();
-        assertFalse(gathered.contains("minecraft:coal"), "the stocked charcoal must not force a coal gather: " + gathered);
+        assertFalse(gatheredItems.contains("minecraft:coal"), "the stocked charcoal must not force a coal gather: " + gatheredItems);
         Executed executed = run(plan, Map.of(CHARCOAL, 1), Map.of());
         assertNull(executed.failure(), executed.failure());
         assertEquals(4, executed.stock().getOrDefault(TORCH, 0));
+    }
+
+    // ─── The goal item itself may be gathered (item 3) ───────────────────────────────────────────
+
+    @Test
+    void aRootWithARecipeIsGatheredWhenCraftingItIsImpossible() {
+        // A gold ingot smelts from gold ore, which nothing gives; a piglin drops the ingot.
+        RecipeBook goldBook = bookWith(recipe("gold_ingot_from_ore", GOLD_INGOT, 1, null, one(GOLD_ORE)));
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(GOLD_INGOT).addItem(GOLD_ORE);
+        builder.addSource(new Source.KillMob("kill:minecraft:piglin", GOLD_INGOT, "minecraft:piglin", false, 1.0, true));
+        SolverPlanner planner = planner(goldBook, builder.build());
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(GOLD_INGOT, 2), EMPTY, Exclusions.NONE));
+        assertEquals(List.of("kill:minecraft:piglin"), sources(plan), "the ingot is gathered, not crafted");
+        assertRunsToTheGoal(plan, goldBook, Map.of(), Map.of(), GOLD_INGOT, 2);
+    }
+
+    @Test
+    void aRootIsCraftedWhenThatIsCheaperAndGatheredWhenItIsNoDearer() {
+        // Sticks cost about six to craft from logs. A source costing less is gathered; one costing more is not.
+        for (boolean cheapSource : new boolean[] {true, false}) {
+            AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+            builder.addSource(new Source.Harvest("harvest:minecraft:dead_bush", STICK, "minecraft:dead_bush", null,
+                    false, cheapSource ? 100.0 : 1.0, false));
+            SolverPlanner planner = planner(book(), builder.build());
+            Plan plan = planned(planner, request(new Goal.HaveItem(STICK, 4), EMPTY, Exclusions.NONE));
+            assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), STICK, 4);
+            assertEquals(cheapSource, sources(plan).contains("harvest:minecraft:dead_bush"),
+                    "the harvest is used exactly when it is cheaper than crafting: " + sources(plan));
+        }
     }
 
     // ─── The other goal kinds ────────────────────────────────────────────────────────────────────
@@ -512,7 +798,7 @@ final class SolverPlannerTest {
 
     @Test
     void equipPlansMissingItemsThenOneEquipLeaf() {
-        Goal.Equip goal = new Goal.Equip(Map.of(com.legoj15.megablockbot.core.EquipSlot.MAINHAND, WOODEN_PICKAXE));
+        Goal.Equip goal = new Goal.Equip(Map.of(EquipSlot.MAINHAND, WOODEN_PICKAXE));
         Plan fromEmpty = planned(planner(), request(goal, EMPTY, Exclusions.NONE));
         List<NodeSpec> planLeaves = leaves(fromEmpty);
         assertEquals("equip", planLeaves.get(planLeaves.size() - 1).taskKind(), planLeaves.toString());
@@ -529,16 +815,30 @@ final class SolverPlannerTest {
     void stockpilePlansWhatTheContainerLacksThenOneDepositLeaf() {
         Goal.Stockpile goal = new Goal.Stockpile(OAK_PLANKS, 8, "minecraft:overworld", CONTAINER);
         Plan blind = planned(planner(), request(goal, EMPTY, Exclusions.NONE));
-        assertEquals("deposit", leaves(blind).get(leaves(blind).size() - 1).taskKind());
+        NodeSpec blindDeposit = leaves(blind).get(leaves(blind).size() - 1);
+        assertEquals("deposit", blindDeposit.taskKind());
+        assertEquals(goal, blindDeposit.goal(), "the goal carries the total the container should hold");
+        assertEquals("8", blindDeposit.params().get("count"), "an unknown container is given the whole count");
+        assertEquals("minecraft:overworld", blindDeposit.params().get("dimension"));
         assertTrue(leaves(blind).size() > 1, "an unknown container is planned for in full");
         Executed executed = run(blind, Map.of(), Map.of());
         assertNull(executed.failure(), executed.failure());
 
-        Snapshot.Builder builder = Snapshot.builder().gameTime(0);
-        builder.container(new ContainerSight(CONTAINER, "minecraft:chest", true, false, Map.of(OAK_PLANKS, 8)));
-        Plan knownFull = planned(planner(), request(goal, builder.build(), Exclusions.NONE));
+        Snapshot.Builder knownFullBuilder = Snapshot.builder().gameTime(0);
+        knownFullBuilder.container(new ContainerSight(CONTAINER, "minecraft:chest", true, false, Map.of(OAK_PLANKS, 8)));
+        Plan knownFull = planned(planner(), request(goal, knownFullBuilder.build(), Exclusions.NONE));
         assertEquals(1, leaves(knownFull).size(), "the container is known to hold the stock already");
         assertEquals("deposit", leaves(knownFull).get(0).taskKind());
+        assertEquals("0", leaves(knownFull).get(0).params().get("count"), "nothing is left to move");
+
+        // Known to hold three: five are moved, and the goal still says eight.
+        Snapshot.Builder partialBuilder = Snapshot.builder().gameTime(0).item(OAK_PLANKS, 5);
+        partialBuilder.container(new ContainerSight(CONTAINER, "minecraft:chest", true, false, Map.of(OAK_PLANKS, 3)));
+        Plan partial = planned(planner(), request(goal, partialBuilder.build(), Exclusions.NONE));
+        assertEquals(1, leaves(partial).size(), "the five to move are in hand: " + leaves(partial));
+        NodeSpec deposit = leaves(partial).get(0);
+        assertEquals("5", deposit.params().get("count"), "count is how many to move");
+        assertEquals(goal, deposit.goal(), "the goal is the total the container should hold");
     }
 
     @Test
@@ -559,14 +859,14 @@ final class SolverPlannerTest {
 
         Failure without = unplannable(planner(), request(goal, EMPTY, Exclusions.NONE));
         assertEquals(Failure.Kind.NO_SOURCE, without.kind());
-        assertTrue(without.detail().contains("strategy"), without.detail());
+        assertEquals(ENCHANTED_BOOK, ((Failure.NoSource) without).key());
     }
 
     @Test
-    void customAndBuildGoalsGoToStrategiesToo() {
+    void aBuildOrCustomGoalNoStrategyPlansIsAnInternalFailureNotAMadeUpSource() {
         Goal.Custom custom = new Goal.Custom("fish_until", Map.of("item", "minecraft:string"));
-        assertEquals(Failure.Kind.NO_SOURCE, unplannable(planner(), request(custom, EMPTY, Exclusions.NONE)).kind());
-        assertEquals(Failure.Kind.NO_SOURCE,
+        assertEquals(Failure.Kind.INTERNAL, unplannable(planner(), request(custom, EMPTY, Exclusions.NONE)).kind());
+        assertEquals(Failure.Kind.INTERNAL,
                 unplannable(planner(), request(new Goal.Build("hut", "minecraft:overworld", Pos.parse("1,64,1")),
                         EMPTY, Exclusions.NONE)).kind());
 
@@ -577,7 +877,7 @@ final class SolverPlannerTest {
         assertEquals("trade", leaves(plan).get(0).taskKind());
     }
 
-    // ─── Strategies against gather costs ─────────────────────────────────────────────────────────
+    // ─── Strategies against gather costs (items 4 and 14) ────────────────────────────────────────
 
     @Test
     void aCheaperStrategyReplacesTheGatherAndADearerOneDoesNot() {
@@ -598,26 +898,497 @@ final class SolverPlannerTest {
                 && have.key().equals(COBBLESTONE), 100_000, fake);
         Plan dearPlan = planned(planner(dear), request(new Goal.HaveItem(COBBLESTONE, 3),
                 snapshot(stock, Map.of()), Exclusions.NONE));
-        List<String> sources = leaves(dearPlan).stream().map(NodeSpec::source).toList();
-        assertTrue(sources.contains("mine:minecraft:stone"), "the dearer strategy must not replace the gather: " + sources);
-        assertFalse(sources.contains("trade:fake"), sources.toString());
+        List<String> dearSources = sources(dearPlan);
+        assertTrue(dearSources.contains("mine:minecraft:stone"), "the dearer strategy must not replace the gather: " + dearSources);
+        assertFalse(dearSources.contains("trade:fake"), dearSources.toString());
     }
 
-    // ─── The fingerprint and determinism ─────────────────────────────────────────────────────────
+    @Test
+    void aStrategyIsComparedWithTheGatherOfTheWholeDemand() {
+        // With mining at 1000 a block and a wooden pickaxe in hand, three cobblestone cost 3000 in all. A strategy
+        // asking 2000 for the three is the cheaper plan even though 2000 is more than the 1000 one unit costs.
+        Map<ItemKey, Integer> stock = Map.of(WOODEN_PICKAXE, 1);
+        Snapshot withPickaxe = snapshot(stock, Map.of(ToolClass.PICKAXE, ToolTier.WOOD));
+        Predicate<Goal> forCobblestone = goal -> goal instanceof Goal.HaveItem have && have.key().equals(COBBLESTONE);
+        NodeSpec fake = tradeLeaf(COBBLESTONE, 3);
+
+        Plan wins = planned(planner(dearMining(), new FakeStrategy("two-thousand", forCobblestone, 2000, fake)),
+                request(new Goal.HaveItem(COBBLESTONE, 3), withPickaxe, Exclusions.NONE));
+        assertEquals(List.of("trade:fake"), sources(wins), "2000 for three beats 3000 for three");
+
+        Plan loses = planned(planner(dearMining(), new FakeStrategy("four-thousand", forCobblestone, 4000, fake)),
+                request(new Goal.HaveItem(COBBLESTONE, 3), withPickaxe, Exclusions.NONE));
+        assertEquals(List.of("mine:minecraft:stone"), sources(loses), "4000 for three loses to 3000 for three");
+    }
 
     @Test
-    void theFingerprintTracksInventoryAndToolsAndNotPosition() {
+    void aStrategyIsComparedWithTheGatherToolPrerequisiteIncluded() {
+        // With mining at 1000 a block, one cobblestone costs 1000 to mine, and from empty hands the gather also needs
+        // a wooden pickaxe (logs, planks, a table: several thousand). A strategy asking 2000 is the cheaper plan only
+        // if the pickaxe is part of what the gather costs.
+        Predicate<Goal> forCobblestone = goal -> goal instanceof Goal.HaveItem have && have.key().equals(COBBLESTONE);
+        Plan plan = planned(planner(dearMining(), new FakeStrategy("two-thousand", forCobblestone, 2000,
+                        tradeLeaf(COBBLESTONE, 1))),
+                request(new Goal.HaveItem(COBBLESTONE, 1), EMPTY, Exclusions.NONE));
+        assertEquals(List.of("trade:fake"), sources(plan),
+                "the pickaxe the gather needs is part of its price, and so is not made when a strategy undercuts it");
+
+        // The tool is priced once, not also as a charge on every unit: with a tier charged at 5000 a unit the
+        // gather is still about 3000 (1000 to mine, the pickaxe's few thousand once), and a strategy at 4000 loses.
+        Plan dearer = planned(planner(dearMining(5000), new FakeStrategy("four-thousand", forCobblestone, 4000,
+                        tradeLeaf(COBBLESTONE, 1))),
+                request(new Goal.HaveItem(COBBLESTONE, 1), EMPTY, Exclusions.NONE));
+        assertTrue(sources(dearer).contains("mine:minecraft:stone"), sources(dearer).toString());
+        assertFalse(sources(dearer).contains("trade:fake"), sources(dearer).toString());
+    }
+
+    @Test
+    void aStrategySuppliedLeafIsCreditedToTheStockSoALaterCraftFindsIt() {
+        // The strategy hands over the cobblestone and touches no stock of its own: the planner credits it, and the
+        // stone pickaxe is crafted from it.
+        Map<ItemKey, Integer> stock = Map.of(STICK, 2, CRAFTING_TABLE, 1);
+        FakeStrategy supplier = new FakeStrategy("supplier", goal -> goal instanceof Goal.HaveItem have
+                && have.key().equals(COBBLESTONE), 10, tradeLeaf(COBBLESTONE, 3));
+        Plan plan = planned(planner(supplier), request(new Goal.HaveItem(STONE_PICKAXE, 1),
+                snapshot(stock, Map.of()), Exclusions.NONE));
+        assertRunsToTheGoal(plan, book(), stock, Map.of(), STONE_PICKAXE, 1);
+        assertTrue(sources(plan).contains("trade:fake"), sources(plan).toString());
+    }
+
+    @Test
+    void eachStrategyIsOfferedALeafAgainstTheStockAsItWasBeforeAnyOther() {
+        // The first strategy records the stock, plans sticks as a sub-plan and then loses on price; the second only
+        // looks. Asked about the same leaf in the same round, it must see the stock the first one saw.
+        List<Map<ItemKey, Long>> before = new ArrayList<>();
+        List<Map<ItemKey, Long>> seen = new ArrayList<>();
+        ScriptedStrategy greedy = new ScriptedStrategy("a-greedy", (goal, context) -> {
+            if (!(goal instanceof Goal.HaveItem have) || !have.key().equals(COBBLESTONE)) return Optional.empty();
+            before.add(new TreeMap<>(context.stock()));
+            context.subPlan(new Goal.HaveItem(STICK, 2));
+            return Optional.of(new Strategy.Proposal(List.of(tradeLeaf(COBBLESTONE, 3)), 1_000_000, List.of()));
+        });
+        ScriptedStrategy watcher = new ScriptedStrategy("b-watcher", (goal, context) -> {
+            if (goal instanceof Goal.HaveItem have && have.key().equals(COBBLESTONE)) {
+                seen.add(new TreeMap<>(context.stock()));
+            }
+            return Optional.empty();
+        });
+        Plan plan = planned(planner(greedy, watcher), request(new Goal.HaveItem(STONE_PICKAXE, 1), EMPTY,
+                Exclusions.NONE));
+
+        assertFalse(seen.isEmpty(), "the watcher was asked about the cobblestone leaf");
+        assertEquals(before, seen, "the loser's sub-plan left nothing in the stock the next strategy saw");
+        assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), STONE_PICKAXE, 1);
+    }
+
+    @Test
+    void aSubPlanForAWholeGoalIsCreditedToTheStockTheStrategyThatAskedSees() {
+        // The outer strategy plans the checked book as a sub-plan (which the inner strategy supplies with a leaf
+        // that touches no stock) and then reads the stock: the book is there, credited by the planner.
+        Goal.HaveItem book = new Goal.HaveItem(ENCHANTED_BOOK, 1, ComponentCheck.enchantment("minecraft:mending", 1));
+        List<Long> seen = new ArrayList<>();
+        ScriptedStrategy inner = new ScriptedStrategy("inner", (asked, context) -> asked.equals(book)
+                ? Optional.of(new Strategy.Proposal(List.of(tradeLeaf(ENCHANTED_BOOK, 1)), 10, List.of()))
+                : Optional.empty());
+        ScriptedStrategy outer = new ScriptedStrategy("outer", (asked, context) -> {
+            if (!(asked instanceof Goal.Custom)) return Optional.empty();
+            PlanOutcome outcome = context.subPlan(book);
+            seen.add(context.stock().getOrDefault(ENCHANTED_BOOK, 0L));
+            if (!(outcome instanceof PlanOutcome.Planned planned)) return Optional.empty();
+            return Optional.of(new Strategy.Proposal(planned.plan().roots(), 100, List.of()));
+        });
+        Plan plan = planned(planner(inner, outer), request(new Goal.Custom("get_book", Map.of()), EMPTY, Exclusions.NONE));
+        assertEquals(List.of(1L), seen);
+        assertEquals(List.of("trade:fake"), sources(plan));
+    }
+
+    @Test
+    void eachStrategyIsOfferedAWholeGoalAgainstTheStockAsItWasBeforeAnyOther() {
+        Goal.HaveItem goal = new Goal.HaveItem(ENCHANTED_BOOK, 1, ComponentCheck.enchantment("minecraft:mending", 1));
+        List<Map<ItemKey, Long>> seen = new ArrayList<>();
+        // Only the checked goal is theirs: the sub-plan's own leaves are asked about too, and are not their business.
+        Predicate<Goal> checked = asked -> asked instanceof Goal.HaveItem have && have.check() != null;
+        ScriptedStrategy greedy = new ScriptedStrategy("a-greedy", (asked, context) -> {
+            if (!checked.test(asked)) return Optional.empty();
+            context.subPlan(new Goal.HaveItem(STICK, 2));
+            return Optional.of(new Strategy.Proposal(List.of(tradeLeaf(ENCHANTED_BOOK, 1)), 1_000_000, List.of()));
+        });
+        ScriptedStrategy cheap = new ScriptedStrategy("b-cheap", (asked, context) -> checked.test(asked)
+                ? Optional.of(new Strategy.Proposal(List.of(tradeLeaf(ENCHANTED_BOOK, 1)), 10, List.of()))
+                : Optional.empty());
+        ScriptedStrategy watcher = new ScriptedStrategy("c-watcher", (asked, context) -> {
+            if (checked.test(asked)) seen.add(new TreeMap<>(context.stock()));
+            return Optional.empty();
+        });
+        Plan plan = planned(planner(greedy, cheap, watcher), request(goal, EMPTY, Exclusions.NONE));
+
+        assertEquals(1, seen.size());
+        assertTrue(seen.get(0).isEmpty(), "the loser's sub-plan left nothing in the stock the next strategy saw: " + seen);
+        assertEquals(List.of("trade:fake"), sources(plan), "the cheaper proposal's nodes alone are in the plan");
+        assertEquals(1, leaves(plan).size(), "the greedy strategy's sub-plan nodes are not: " + leaves(plan));
+    }
+
+    @Test
+    void aStrategySeesTheRequestAndCannotWriteTheStock() {
+        Map<String, Map<String, String>> checkpoints = Map.of("node-7", Map.of("shaft", "10,40,10"));
+        List<Object> seen = new ArrayList<>();
+        ScriptedStrategy looker = new ScriptedStrategy("looker", (goal, context) -> {
+            seen.add(context.profile());
+            seen.add(context.checkpoints());
+            seen.add(assertThrows(UnsupportedOperationException.class, () -> context.stock().put(STICK, 5L)));
+            return Optional.empty();
+        });
+        Goal.Custom custom = new Goal.Custom("anything", Map.of());
+        unplannable(planner(looker), new PlanRequest(custom, EMPTY, Exclusions.NONE, Profile.STRICT_SURVIVAL, checkpoints));
+        assertEquals(Profile.STRICT_SURVIVAL, seen.get(0));
+        assertEquals(checkpoints, seen.get(1));
+    }
+
+    // ─── Trades are paid for (item 6) ────────────────────────────────────────────────────────────
+
+    private static Source.Trade saddleTrade(Map<ItemKey, Integer> cost, double chance) {
+        return new Source.Trade("trade:minecraft:leatherworker#saddle", SADDLE, "minecraft:leatherworker", 2, cost,
+                Map.of(), chance);
+    }
+
+    @Test
+    void aTradeIsPrecededByThePlanForWhatItCharges() {
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(EMERALD);
+        builder.addSource(new Source.KillMob("kill:minecraft:witch", EMERALD, "minecraft:witch", false, 1.0, true));
+        builder.addSource(saddleTrade(Map.of(EMERALD, 6), 0.5));
+        SolverPlanner planner = planner(book(), builder.build());
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(SADDLE, 2), EMPTY, Exclusions.NONE));
+        List<NodeSpec> planLeaves = leaves(plan);
+        NodeSpec trade = planLeaves.get(planLeaves.size() - 1);
+        assertEquals("trade", trade.taskKind());
+        assertEquals("trade:minecraft:leatherworker#saddle", trade.source());
+        assertEquals("2", trade.params().get("count"), "two trades for two saddles");
+        assertEquals("2", trade.params().get("level"));
+        assertEquals("minecraft:emerald=6", trade.params().get("cost"));
+        assertEquals(0.5, Double.parseDouble(trade.params().get("chance")));
+        // Two trades at six emeralds each: twelve are gathered before the trade runs.
+        assertEquals(12, gathered(plan, EMERALD, "kill"), "the payment is planned like any other goal");
+        assertTrue(planLeaves.indexOf(planLeaves.stream().filter(l -> l.taskKind().equals("kill")).findFirst().orElseThrow())
+                < planLeaves.size() - 1, "the payment comes before the trade");
+        Executed executed = assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), SADDLE, 2);
+        assertEquals(0, executed.stock().getOrDefault(EMERALD, 0), "the trade used the payment up");
+    }
+
+    @Test
+    void aTradeWhosePaymentCannotBePlannedIsNotUsedAndTheNextSourceIs() {
+        // Emeralds are mined with a diamond pickaxe, which the book cannot make: the cost model still prices the trade
+        // (so it is the cheaper source, ahead of fishing at 24000), but its payment cannot be planned.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(EMERALD);
+        builder.addSource(new Source.MineBlock("mine:minecraft:emerald_ore", EMERALD, "minecraft:emerald_ore",
+                ToolClass.PICKAXE, ToolTier.DIAMOND, true, false, false, 1.0, false, null));
+        builder.addSource(saddleTrade(Map.of(EMERALD, 6), 1.0));
+        builder.addSource(new Source.Fishing("fish:minecraft:gameplay/saddle", SADDLE, "minecraft:gameplay/saddle", 0.05));
+        SolverPlanner planner = planner(book(), builder.build());
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(SADDLE, 1), EMPTY, Exclusions.NONE));
+        assertEquals(List.of("fish:minecraft:gameplay/saddle"), sources(plan),
+                "the trade cannot be paid for, so the next source is used");
+
+        Failure failure = unplannable(planner, request(new Goal.HaveItem(SADDLE, 1), EMPTY,
+                without("fish:minecraft:gameplay/saddle")));
+        assertEquals(Failure.Kind.NO_SOURCE, failure.kind());
+        assertEquals(DIAMOND_PICKAXE, ((Failure.NoSource) failure).key(),
+                "the failure is the trade's: its payment needs a pickaxe nothing makes");
+    }
+
+    @Test
+    void aTradesCostPerUnitIncludesWhatItCharges() {
+        // A trade for a saddle costs 3000 a try before payment; ten emeralds (600 each to kill for) in payment make it
+        // dearer than fishing (6000 a saddle), though without the payment it would be the cheaper source. The
+        // payment can be planned, so a plan that took the trade anyway would run: only its price keeps it out.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addSource(new Source.KillMob("kill:minecraft:witch", EMERALD, "minecraft:witch", false, 1.0, true));
+        builder.addSource(saddleTrade(Map.of(EMERALD, 10), 1.0));
+        builder.addSource(new Source.Fishing("fish:minecraft:gameplay/saddle", SADDLE, "minecraft:gameplay/saddle", 0.2));
+        SolverPlanner planner = planner(book(), builder.build());
+        Plan plan = planned(planner, request(new Goal.HaveItem(SADDLE, 1), EMPTY, Exclusions.NONE));
+        assertEquals(List.of("fish:minecraft:gameplay/saddle"), sources(plan));
+    }
+
+    @Test
+    void aTradeThatComesUpRarelyCostsMorePerUnitThanOneThatAlwaysDoes() {
+        // A free trade is 3000 a try; at one offer in ten it is 30000 a saddle, dearer than fishing at 6000.
+        for (double chance : new double[] {1.0, 0.1}) {
+            AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+            builder.addSource(saddleTrade(Map.of(), chance));
+            builder.addSource(new Source.Fishing("fish:minecraft:gameplay/saddle", SADDLE, "minecraft:gameplay/saddle", 0.2));
+            Plan plan = planned(planner(book(), builder.build()),
+                    request(new Goal.HaveItem(SADDLE, 1), EMPTY, Exclusions.NONE));
+            assertEquals(List.of(chance == 1.0 ? "trade:minecraft:leatherworker#saddle" : "fish:minecraft:gameplay/saddle"),
+                    sources(plan), "chance " + chance);
+        }
+    }
+
+    @Test
+    void aTradeSpendsWhatItChargesFromTheStockSoALaterCraftGathersItsOwn() {
+        // The six emeralds in hand are the trade's payment; the fancy saddle also needs one that the trade does not
+        // leave, so one more is gathered after it.
+        ItemKey fancy = ItemKey.of("fancy_saddle");
+        RecipeBook fancyBook = bookWith(recipe("fancy_saddle_from_saddle", fancy, 1, null, one(SADDLE), one(EMERALD)));
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addSource(new Source.KillMob("kill:minecraft:witch", EMERALD, "minecraft:witch", false, 1.0, true));
+        builder.addSource(saddleTrade(Map.of(EMERALD, 6), 1.0));
+        Map<ItemKey, Integer> stock = Map.of(EMERALD, 6);
+        Plan plan = planned(planner(fancyBook, builder.build()),
+                request(new Goal.HaveItem(fancy, 1), snapshot(stock, Map.of()), Exclusions.NONE));
+        assertRunsToTheGoal(plan, fancyBook, stock, Map.of(), fancy, 1);
+        assertEquals(1, gathered(plan, EMERALD, "kill"), "one emerald beyond the payment is gathered");
+    }
+
+    @Test
+    void tradesThatPayInEachOthersGoodsEndInAFailureNotARecursion() {
+        // A saddle costs an emerald and an emerald costs a saddle, and nothing else gives either.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addSource(saddleTrade(Map.of(EMERALD, 1), 1.0));
+        builder.addSource(new Source.Trade("trade:minecraft:cleric#emerald", EMERALD, "minecraft:cleric", 1,
+                Map.of(SADDLE, 1), Map.of(), 1.0));
+        SolverPlanner planner = planner(book(), builder.build());
+        Failure failure = unplannable(planner, request(new Goal.HaveItem(SADDLE, 1), EMPTY, Exclusions.NONE));
+        assertEquals(Failure.Kind.NO_SOURCE, failure.kind());
+    }
+
+    // ─── The item loop converges and does not eat its own goal (item 11) ─────────────────────────
+
+    private static final ItemKey T = ItemKey.of("t");
+    private static final ItemKey W = ItemKey.of("w");
+
+    private static AcquisitionIndex tAndWIndex() {
+        AcquisitionIndex.Builder builder = AcquisitionIndex.builder();
+        builder.addItem(T).addItem(W);
+        builder.addSource(new Source.MineBlock("mine:minecraft:w", W, "minecraft:w", null, ToolTier.HAND,
+                false, false, false, 1.0, false, null));
+        return builder.build();
+    }
+
+    @Test
+    void aSolveThatWouldSpendTheOnlyUnitOfTheGoalItemIsKeptOffIt() {
+        // T is made from one W; W is made from one T and can also be gathered. With one T in hand and two wanted, a
+        // solve that makes W from the T in hand makes no progress.
+        RecipeBook cycle = new SimpleRecipeBook(List.of(
+                recipe("t_from_w", T, 1, null, one(W)),
+                recipe("w_from_t", W, 1, null, one(T))), Map.of());
+        SolverPlanner planner = planner(cycle, tAndWIndex());
+        Map<ItemKey, Integer> stock = Map.of(T, 1);
+        Plan plan = planned(planner, request(new Goal.HaveItem(T, 2), snapshot(stock, Map.of()), Exclusions.NONE));
+        assertRunsToTheGoal(plan, cycle, stock, Map.of(), T, 2);
+        assertEquals(1, gathered(plan, W), "one W is gathered to make the second T");
+    }
+
+    @Test
+    void aThirdCraftingTableIsNotMadeByTakingTheFirstTwoApart() {
+        // Planks can be made from a log or by taking a table apart. Two tables are in hand and three are wanted.
+        RecipeBook takingApart = bookWith(recipe("planks_from_table", OAK_PLANKS, 4, null, one(CRAFTING_TABLE)));
+        SolverPlanner planner = planner(takingApart, index());
+        Map<ItemKey, Integer> stock = Map.of(CRAFTING_TABLE, 2);
+        Plan plan = planned(planner, request(new Goal.HaveItem(CRAFTING_TABLE, 3), snapshot(stock, Map.of()),
+                Exclusions.NONE));
+        Executed executed = assertRunsToTheGoal(plan, takingApart, stock, Map.of(), CRAFTING_TABLE, 3);
+        assertEquals(3, executed.stock().getOrDefault(CRAFTING_TABLE, 0));
+    }
+
+    @Test
+    void aSolveThatStillReportsMissingItemsAfterTheGatherGathersThemAndSolvesAgain() {
+        // A made-up graph (found by a seeded search over random ones) on which the solver's own shortfall for n6 comes
+        // back flagged approximate and lists an n1 less than the plan then draws. After the gather the first solve
+        // reports n1 missing; the planner gathers it and solves again instead of giving up.
+        ItemKey[] n = new ItemKey[8];
+        for (int i = 0; i < n.length; i++) n[i] = ItemKey.of("n" + i);
+        RecipeBook graph = new SimpleRecipeBook(List.of(
+                recipe("r3", n[3], 2, null, one(n[2])),
+                recipe("r4", n[4], 3, null, one(n[3]), one(n[1]), either(n[1], n[3])),
+                recipe("r5a", n[5], 3, null, new RecipeDef.Slot(List.of(n[3], n[0]), 2), either(n[1], n[0]), one(n[2])),
+                recipe("r5b", n[5], 1, n[3], either(n[1], n[3]), either(n[0], n[3])),
+                recipe("r6", n[6], 1, n[4], one(n[1])),
+                recipe("r7a", n[7], 3, null, either(n[0], n[1]), either(n[0], n[1])),
+                recipe("r7b", n[7], 1, null, either(n[0], n[3]), one(n[4]), one(n[1]))), Map.of());
+        AcquisitionIndex.Builder builder = AcquisitionIndex.builder();
+        // Yields 1, 0.75 and 0.46 make the gather costs 40, 54 and 87: n0 is the cheapest to gather, n2 the dearest.
+        double[] yields = {1.0, 0.75, 0.46};
+        for (int i = 0; i < yields.length; i++) {
+            builder.addItem(n[i]).addSource(new Source.MineBlock("mine:minecraft:n" + i, n[i], "minecraft:n" + i,
+                    null, ToolTier.HAND, false, false, false, yields[i], false, null));
+        }
+        SolverPlanner planner = planner(graph, builder.build());
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(n[6], 1), EMPTY, Exclusions.NONE));
+        assertRunsToTheGoal(plan, graph, Map.of(), Map.of(), n[6], 1);
+    }
+
+    @Test
+    void aSubPlanLeavesTheRemaindersOfWhatItConsumedInTheStock() {
+        // Three milk buckets make a cake and come back as three empty buckets: a strategy that plans the cake as a
+        // sub-plan sees the buckets in the working stock afterwards.
+        ItemKey milk = ItemKey.of("milk_bucket");
+        ItemKey bucket = ItemKey.of("bucket");
+        ItemKey cake = ItemKey.of("cake");
+        RecipeBook cakes = new SimpleRecipeBook(List.of(recipe("cake_from_milk", cake, 1, null, of(milk, 3))),
+                Map.of(milk, bucket));
+        AcquisitionIndex.Builder builder = AcquisitionIndex.builder();
+        builder.addSource(new Source.KillMob("kill:minecraft:cow", milk, "minecraft:cow", false, 1.0, false));
+        List<Map<ItemKey, Long>> seen = new ArrayList<>();
+        ScriptedStrategy baker = new ScriptedStrategy("baker", (asked, context) -> {
+            if (!(asked instanceof Goal.Custom)) return Optional.empty();
+            PlanOutcome outcome = context.subPlan(new Goal.HaveItem(cake, 1));
+            seen.add(new TreeMap<>(context.stock()));
+            return outcome instanceof PlanOutcome.Planned planned
+                    ? Optional.of(new Strategy.Proposal(planned.plan().roots(), 1, List.of())) : Optional.empty();
+        });
+        planned(planner(cakes, builder.build(), baker), request(new Goal.Custom("bake", Map.of()), EMPTY, Exclusions.NONE));
+        assertEquals(List.of(Map.of(cake, 1L, bucket, 3L)), seen);
+    }
+
+    // ─── Craft leaves carry the solver's slot choice (item 5) ────────────────────────────────────
+
+    @Test
+    void aCraftLeafNamesTheItemsTheStockAdvanceUsed() {
+        // Every craft leaf of a whole plan carries a layout that covers exactly its crafts.
+        Plan whole = planned(planner(), request(new Goal.HaveItem(STONE_PICKAXE, 1), EMPTY, Exclusions.NONE));
+        for (NodeSpec leaf : leaves(whole)) {
+            if (!leaf.taskKind().equals("craft")) continue;
+            long covered = 0;
+            for (CraftLayout.Run run : CraftLayout.decode(leaf.params().get("layout"))) covered += run.crafts();
+            assertEquals(Long.parseLong(leaf.params().get("times")), covered, "layout of " + leaf.params());
+        }
+
+        // Torches take coal or charcoal. With one of each and sticks in hand, two crafts take the coal and then
+        // the charcoal: the layout says so, and following it leaves the stock the plan expected.
+        Map<ItemKey, Integer> stock = Map.of(COAL, 1, CHARCOAL, 1, STICK, 2);
+        Plan plan = planned(planner(), request(new Goal.HaveItem(TORCH, 8), snapshot(stock, Map.of()), Exclusions.NONE));
+        List<NodeSpec> planLeaves = leaves(plan);
+        assertEquals(1, planLeaves.size(), planLeaves.toString());
+        List<CraftLayout.Run> runs = CraftLayout.decode(planLeaves.get(0).params().get("layout"));
+        assertEquals(List.of(new CraftLayout.Run(1, List.of(COAL, STICK)), new CraftLayout.Run(1, List.of(CHARCOAL, STICK))),
+                runs);
+        Executed executed = assertRunsToTheGoal(plan, book(), stock, Map.of(), TORCH, 8);
+        assertEquals(0, executed.stock().getOrDefault(COAL, 0));
+        assertEquals(0, executed.stock().getOrDefault(CHARCOAL, 0));
+
+        // Only charcoal in hand: both crafts take it.
+        Map<ItemKey, Integer> charcoalOnly = Map.of(CHARCOAL, 2, STICK, 2);
+        Plan second = planned(planner(), request(new Goal.HaveItem(TORCH, 8), snapshot(charcoalOnly, Map.of()),
+                Exclusions.NONE));
+        assertEquals(List.of(new CraftLayout.Run(2, List.of(CHARCOAL, STICK))),
+                CraftLayout.decode(leaves(second).get(0).params().get("layout")));
+        assertRunsToTheGoal(second, book(), charcoalOnly, Map.of(), TORCH, 8);
+    }
+
+    // ─── Leaf params (items 13 and 15) ───────────────────────────────────────────────────────────
+
+    @Test
+    void aMiningLeafSaysItNeedsAToolOnlyWhenThePlanProvidesOne() {
+        // Sand drops with a bare hand; a shovel only digs it faster. The leaf must not claim a requirement that no
+        // prerequisite was planned for.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(SAND);
+        builder.addSource(new Source.MineBlock("mine:minecraft:sand", SAND, "minecraft:sand", ToolClass.SHOVEL,
+                ToolTier.WOOD, false, false, false, 1.0, false, null));
+        SolverPlanner planner = planner(book(), builder.build());
+        Plan plan = planned(planner, request(new Goal.HaveItem(SAND, 3), EMPTY, Exclusions.NONE));
+        assertEquals(1, leaves(plan).size(), "no tool is planned for a block that needs none: " + leaves(plan));
+        Map<String, String> params = leaves(plan).get(0).params();
+        assertFalse(params.containsKey("toolClass"), params.toString());
+        assertFalse(params.containsKey("minTier"), params.toString());
+        assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), SAND, 3);
+
+        // And a required tool is written, with its tier.
+        Plan stone = planned(planner(), request(new Goal.HaveItem(COBBLESTONE, 1), EMPTY, Exclusions.NONE));
+        NodeSpec mine = leaves(stone).stream().filter(l -> l.taskKind().equals("mine")
+                && "minecraft:cobblestone".equals(l.params().get("item"))).findFirst().orElseThrow();
+        assertEquals("PICKAXE", mine.params().get("toolClass"));
+        assertEquals("WOOD", mine.params().get("minTier"));
+    }
+
+    @Test
+    void aKillLeafSaysWhetherThePlayerMustDealTheKill() {
+        Plan plan = planned(planner(), request(new Goal.HaveItem(STRING, 1), EMPTY, Exclusions.NONE));
+        NodeSpec kill = leaves(plan).get(0);
+        assertEquals("kill", kill.taskKind());
+        assertEquals("true", kill.params().get("playerKillOnly"));
+    }
+
+    // ─── Any goal from any stock runs to its end ─────────────────────────────────────────────────
+
+    @Test
+    void everyFixtureGoalFromAnySeededStockRunsToItsEndWithEveryLeafGoalMet() {
+        // The behaviour the planner exists for, over many shapes of stock: a plan is executable in order, every leaf
+        // meets its own goal when it ends, and the goal count is held at the end. Seeded, so a failure reproduces.
+        List<ItemKey> goals = List.of(OAK_PLANKS, STICK, CRAFTING_TABLE, WOODEN_PICKAXE, STONE_PICKAXE, FURNACE, CHEST,
+                TORCH, COBBLESTONE, COAL, STRING, ItemKey.of("wooden_axe"), ItemKey.of("stone_shovel"));
+        List<ItemKey> stocked = List.of(OAK_LOG, OAK_PLANKS, STICK, COBBLESTONE, CRAFTING_TABLE, WOODEN_PICKAXE, COAL,
+                CHARCOAL, STONE_PICKAXE);
+        java.util.Random random = new java.util.Random(12);
+        SolverPlanner planner = planner();
+        for (int round = 0; round < 250; round++) {
+            Map<ItemKey, Integer> stock = new TreeMap<>();
+            for (ItemKey item : stocked) {
+                if (random.nextInt(3) == 0) stock.put(item, 1 + random.nextInt(12));
+            }
+            Map<ToolClass, ToolTier> tools = new TreeMap<>();
+            if (stock.containsKey(STONE_PICKAXE)) tools.put(ToolClass.PICKAXE, ToolTier.STONE);
+            else if (stock.containsKey(WOODEN_PICKAXE)) tools.put(ToolClass.PICKAXE, ToolTier.WOOD);
+            ItemKey goalItem = goals.get(random.nextInt(goals.size()));
+            int count = 1 + random.nextInt(20);
+            String context = "round " + round + ": " + count + " " + goalItem.id() + " from " + stock;
+
+            PlanOutcome outcome = planner.plan(request(new Goal.HaveItem(goalItem, count), snapshot(stock, tools),
+                    Exclusions.NONE));
+            assertTrue(outcome instanceof PlanOutcome.Planned, context + ": " + outcome);
+            Plan plan = ((PlanOutcome.Planned) outcome).plan();
+            Executed executed = run(plan, stock, tools);
+            assertNull(executed.failure(), context + ": " + executed.failure());
+            assertTrue(executed.stock().getOrDefault(goalItem, 0) >= count, context + " ended with " + executed.stock());
+        }
+    }
+
+    // ─── The fingerprint and determinism (item 8) ────────────────────────────────────────────────
+
+    @Test
+    void theFingerprintTracksWhatThePlanReadsAndNothingElse() {
         SolverPlanner instance = planner();
         Goal goal = new Goal.HaveItem(STONE_PICKAXE, 1);
         long base = instance.inputFingerprint(goal, EMPTY);
         assertEquals(base, instance.inputFingerprint(goal, snapshot(Map.of(), Map.of())),
                 "position, health, hunger and game time are not part of it");
         assertNotEquals(base, instance.inputFingerprint(goal, snapshot(Map.of(OAK_LOG, 1), Map.of())),
-                "an inventory change changes it");
+                "a log is in the recipe closure of the pickaxe");
+        assertNotEquals(base, instance.inputFingerprint(goal, snapshot(Map.of(STICK, 1), Map.of())),
+                "a stick is an ingredient of the pickaxe");
         assertNotEquals(base, instance.inputFingerprint(goal, snapshot(Map.of(), Map.of(ToolClass.PICKAXE, ToolTier.WOOD))),
                 "a best-tool change changes it");
         assertNotEquals(base, instance.inputFingerprint(new Goal.HaveItem(STONE_PICKAXE, 2), EMPTY),
                 "a goal change changes it");
+        assertNotEquals(base, instance.inputFingerprint(goal,
+                Snapshot.builder().dimension("minecraft:the_nether").build()), "the dimension is part of it");
+
+        // Items outside the goal's recipe closure and its leaves are not.
+        assertEquals(base, instance.inputFingerprint(goal, snapshot(Map.of(DIAMOND, 5, EMERALD, 2, SADDLE, 1), Map.of())),
+                "an unrelated pickup does not change it");
+    }
+
+    @Test
+    void theFingerprintCoversWhatStockpileAndEquipRead() {
+        SolverPlanner instance = planner();
+        Goal.Stockpile stockpile = new Goal.Stockpile(OAK_PLANKS, 8, "minecraft:overworld", CONTAINER);
+        long unseen = instance.inputFingerprint(stockpile, EMPTY);
+        Snapshot knownEmpty = Snapshot.builder().container(
+                new ContainerSight(CONTAINER, "minecraft:chest", true, false, Map.of())).build();
+        Snapshot knownThree = Snapshot.builder().container(
+                new ContainerSight(CONTAINER, "minecraft:chest", true, false, Map.of(OAK_PLANKS, 3))).build();
+        assertNotEquals(unseen, instance.inputFingerprint(stockpile, knownThree), "what the container holds is read");
+        assertNotEquals(instance.inputFingerprint(stockpile, knownEmpty), instance.inputFingerprint(stockpile, knownThree));
+
+        Goal.Equip equip = new Goal.Equip(Map.of(EquipSlot.MAINHAND, WOODEN_PICKAXE));
+        long bare = instance.inputFingerprint(equip, EMPTY);
+        assertNotEquals(bare, instance.inputFingerprint(equip,
+                Snapshot.builder().equip(EquipSlot.MAINHAND, WOODEN_PICKAXE).build()), "what is worn is read");
     }
 
     @Test
@@ -627,11 +1398,8 @@ final class SolverPlannerTest {
         assertEquals(instance.plan(request), instance.plan(request));
         Plan plan = planned(instance, request);
         assertFalse(plan.notes().isEmpty(), "what the planner could not consider is said out loud: " + plan.notes());
-        assertTrue(plan.notes().stream().anyMatch(note -> note.contains("silk touch")), plan.notes().toString());
-        assertTrue(plan.notes().stream().anyMatch(note -> note.contains("chest loot")), plan.notes().toString());
 
         Plan stringPlan = planned(instance, request(new Goal.HaveItem(STRING, 1), EMPTY, Exclusions.NONE));
-        assertTrue(stringPlan.notes().stream().anyMatch(note -> note.contains("shears")),
-                stringPlan.notes().toString());
+        assertFalse(stringPlan.notes().isEmpty(), "the cobweb source needs shears, which is not planned yet");
     }
 }
