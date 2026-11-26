@@ -25,6 +25,7 @@ import com.legoj15.megablockbot.core.plan.PlanRequest;
 import com.legoj15.megablockbot.core.plan.Profile;
 import com.legoj15.megablockbot.core.snapshot.ContainerSight;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
+import com.legoj15.megablockbot.core.snapshot.StackFacts;
 import com.legoj15.megablockbot.core.task.Failure;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -70,6 +71,13 @@ final class SolverPlannerTest {
     private static final ItemKey GOLD_INGOT = ItemKey.of("gold_ingot");
     private static final ItemKey AMBER = ItemKey.of("amber");
     private static final ItemKey SAND = ItemKey.of("sand");
+    private static final ItemKey STONE_SHOVEL = ItemKey.of("stone_shovel");
+    private static final ItemKey NETHERITE_PICKAXE = ItemKey.of("netherite_pickaxe");
+    private static final ItemKey UNOBTAINIUM = ItemKey.of("unobtainium");
+    private static final ItemKey WIDGET = ItemKey.of("widget");
+    private static final ItemKey GIZMO = ItemKey.of("gizmo");
+    private static final ItemKey MOUNT_KIT = ItemKey.of("mount_kit");
+    private static final ItemKey LEAD = ItemKey.of("lead");
     private static final Pos CONTAINER = new Pos(16, 64, -4);
 
     // ─── The fixture: a dozen vanilla-like recipes and a small acquisition index ─────────────────
@@ -345,7 +353,16 @@ final class SolverPlannerTest {
                 if (failure != null) return failure;
                 gain(stock, tools, recipe.result(), times * recipe.resultCount());
             }
-            case "equip", "deposit", "navigate" -> { /* recorded only; the goal carries the target */ }
+            case "deposit" -> {
+                ItemKey item = ItemKey.of(params.get("item"));
+                int moved = Integer.parseInt(params.get("count"));
+                if (stock.getOrDefault(item, 0) < moved) {
+                    return "deposit moves " + moved + " of " + item.id() + " but the stock holds "
+                            + stock.getOrDefault(item, 0);
+                }
+                lose(stock, item, moved); // the container's contents are not tracked: the items leave the body
+            }
+            case "equip", "navigate" -> { /* recorded only; a worn item is still counted in the stock */ }
             default -> { /* a strategy's own task kind: recorded, not simulated */ }
         }
         ran.add(node.taskKind() + ":" + label(node, book));
@@ -790,10 +807,9 @@ final class SolverPlannerTest {
         assertEquals(1, planLeaves.size(), planLeaves.toString());
         NodeSpec leaf = planLeaves.get(0);
         assertEquals("navigate", leaf.taskKind());
+        // The goal is what the executor reads the target from; how its position is spelled in the params is not
+        // behaviour.
         assertEquals(goal, leaf.goal());
-        assertEquals("minecraft:overworld", leaf.params().get("dimension"));
-        assertEquals("10,64,20", leaf.params().get("pos"));
-        assertEquals("8", leaf.params().get("radius"));
     }
 
     @Test
@@ -839,6 +855,64 @@ final class SolverPlannerTest {
         NodeSpec deposit = leaves(partial).get(0);
         assertEquals("5", deposit.params().get("count"), "count is how many to move");
         assertEquals(goal, deposit.goal(), "the goal is the total the container should hold");
+    }
+
+    @Test
+    void aDepositTakesItsItemsOutOfTheWorkingStockSoALaterPlanGathersThemAgain() {
+        // A strategy stockpiles three logs and then asks for three logs again: the first three went into the
+        // container, so the second ask is a second gather, not already satisfied.
+        Goal.Stockpile stockpile = new Goal.Stockpile(OAK_LOG, 3, "minecraft:overworld", CONTAINER);
+        List<Long> logsAfterEachStep = new ArrayList<>();
+        ScriptedStrategy stocker = new ScriptedStrategy("stocker", (asked, context) -> {
+            if (!(asked instanceof Goal.Custom)) return Optional.empty();
+            List<NodeSpec> nodes = new ArrayList<>();
+            for (Goal step : List.of(stockpile, new Goal.HaveItem(OAK_LOG, 3))) {
+                if (!(context.subPlan(step) instanceof PlanOutcome.Planned planned)) return Optional.empty();
+                nodes.addAll(planned.plan().roots());
+                logsAfterEachStep.add(context.stock().getOrDefault(OAK_LOG, 0L));
+            }
+            return Optional.of(new Strategy.Proposal(nodes, 1, List.of()));
+        });
+        Plan plan = planned(planner(stocker), request(new Goal.Custom("stock_then_carry", Map.of()), EMPTY,
+                Exclusions.NONE));
+
+        assertEquals(List.of(0L, 3L), logsAfterEachStep, "the deposit empties the working stock of its items");
+        assertEquals(6, gathered(plan, OAK_LOG), "three logs for the container and three to carry");
+        assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), OAK_LOG, 3);
+    }
+
+    @Test
+    void aBetterToolThePlanCraftedEarlierCountsForALaterTierGoalAndMiningLeaf() {
+        // The working stock, not only the snapshot, says what the body carries. A diamond pickaxe made by an earlier
+        // step (here from planks, with no wooden pickaxe along the way) is held by the time a wood-tier goal and a
+        // mining leaf are planned after it: neither plans a wooden pickaxe of its own.
+        RecipeBook diamondBook = bookWith(recipe("diamond_pickaxe_from_planks", DIAMOND_PICKAXE, 1, CRAFTING_TABLE,
+                of(OAK_PLANKS, 3), of(STICK, 2)));
+        List<Plan> tierPlans = new ArrayList<>();
+        ScriptedStrategy sequence = new ScriptedStrategy("pickaxe-then-mining", (asked, context) -> {
+            if (!(asked instanceof Goal.Custom)) return Optional.empty();
+            List<NodeSpec> nodes = new ArrayList<>();
+            for (Goal step : List.of(new Goal.HaveItem(DIAMOND_PICKAXE, 1),
+                    new Goal.HaveToolTier(ToolClass.PICKAXE, ToolTier.WOOD), new Goal.HaveItem(COBBLESTONE, 2))) {
+                if (!(context.subPlan(step) instanceof PlanOutcome.Planned planned)) return Optional.empty();
+                if (step instanceof Goal.HaveToolTier) tierPlans.add(planned.plan());
+                nodes.addAll(planned.plan().roots());
+            }
+            return Optional.of(new Strategy.Proposal(nodes, 1, List.of()));
+        });
+        Plan plan = planned(planner(diamondBook, index(), sequence),
+                request(new Goal.Custom("tool_then_mine", Map.of()), EMPTY, Exclusions.NONE));
+
+        assertEquals(1, tierPlans.size());
+        assertTrue(tierPlans.get(0).roots().isEmpty(), "the tier is carried already: " + tierPlans.get(0).roots());
+        List<String> recipesRun = leaves(plan).stream().filter(l -> l.taskKind().equals("craft"))
+                .map(l -> l.params().get("recipe")).toList();
+        assertFalse(recipesRun.contains("wooden_pickaxe_from_planks"),
+                "the diamond pickaxe is the tool for every later leaf: " + recipesRun);
+        assertEquals(List.of("mine:minecraft:stone"), sources(plan).stream()
+                .filter(source -> source.startsWith("mine:minecraft:stone")).toList());
+        Executed executed = assertRunsToTheGoal(plan, diamondBook, Map.of(), Map.of(), COBBLESTONE, 2);
+        assertEquals(1, executed.stock().getOrDefault(DIAMOND_PICKAXE, 0));
     }
 
     @Test
@@ -1078,25 +1152,34 @@ final class SolverPlannerTest {
 
     @Test
     void aTradeWhosePaymentCannotBePlannedIsNotUsedAndTheNextSourceIs() {
-        // Emeralds are mined with a diamond pickaxe, which the book cannot make: the cost model still prices the trade
-        // (so it is the cheaper source, ahead of fishing at 24000), but its payment cannot be planned.
-        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
-        builder.addItem(EMERALD);
-        builder.addSource(new Source.MineBlock("mine:minecraft:emerald_ore", EMERALD, "minecraft:emerald_ore",
-                ToolClass.PICKAXE, ToolTier.DIAMOND, true, false, false, 1.0, false, null));
-        builder.addSource(saddleTrade(Map.of(EMERALD, 6), 1.0));
-        builder.addSource(new Source.Fishing("fish:minecraft:gameplay/saddle", SADDLE, "minecraft:gameplay/saddle", 0.05));
-        SolverPlanner planner = planner(book(), builder.build());
+        // Emeralds are mined with a diamond pickaxe. In the first variant the book has no way to make one, which the
+        // cost model sees (the trade is priced out); in the second it has a recipe whose ingredient nothing gives,
+        // which only planning the payment finds out: the trade is the cheapest source (ahead of fishing at 24000)
+        // and is given up when its payment cannot be planned.
+        for (boolean recipeForThePickaxe : new boolean[] {false, true}) {
+            RecipeBook pickaxeBook = recipeForThePickaxe
+                    ? bookWith(recipe("diamond_pickaxe_from_unobtainium", DIAMOND_PICKAXE, 1, CRAFTING_TABLE,
+                            one(UNOBTAINIUM)))
+                    : book();
+            AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+            builder.addItem(EMERALD).addItem(UNOBTAINIUM);
+            builder.addSource(new Source.MineBlock("mine:minecraft:emerald_ore", EMERALD, "minecraft:emerald_ore",
+                    ToolClass.PICKAXE, ToolTier.DIAMOND, true, false, false, 1.0, false, null));
+            builder.addSource(saddleTrade(Map.of(EMERALD, 6), 1.0));
+            builder.addSource(new Source.Fishing("fish:minecraft:gameplay/saddle", SADDLE, "minecraft:gameplay/saddle", 0.05));
+            SolverPlanner planner = planner(pickaxeBook, builder.build());
 
-        Plan plan = planned(planner, request(new Goal.HaveItem(SADDLE, 1), EMPTY, Exclusions.NONE));
-        assertEquals(List.of("fish:minecraft:gameplay/saddle"), sources(plan),
-                "the trade cannot be paid for, so the next source is used");
+            Plan plan = planned(planner, request(new Goal.HaveItem(SADDLE, 1), EMPTY, Exclusions.NONE));
+            assertEquals(List.of("fish:minecraft:gameplay/saddle"), sources(plan),
+                    "the trade cannot be paid for, so the next source is used (recipe for the pickaxe: "
+                            + recipeForThePickaxe + ")");
 
-        Failure failure = unplannable(planner, request(new Goal.HaveItem(SADDLE, 1), EMPTY,
-                without("fish:minecraft:gameplay/saddle")));
-        assertEquals(Failure.Kind.NO_SOURCE, failure.kind());
-        assertEquals(DIAMOND_PICKAXE, ((Failure.NoSource) failure).key(),
-                "the failure is the trade's: its payment needs a pickaxe nothing makes");
+            Failure failure = unplannable(planner, request(new Goal.HaveItem(SADDLE, 1), EMPTY,
+                    without("fish:minecraft:gameplay/saddle")));
+            assertEquals(Failure.Kind.NO_SOURCE, failure.kind());
+            assertEquals(recipeForThePickaxe ? UNOBTAINIUM : DIAMOND_PICKAXE, ((Failure.NoSource) failure).key(),
+                    "the failure is the trade's: its payment needs a pickaxe that nothing can make");
+        }
     }
 
     @Test
@@ -1153,6 +1236,147 @@ final class SolverPlannerTest {
         SolverPlanner planner = planner(book(), builder.build());
         Failure failure = unplannable(planner, request(new Goal.HaveItem(SADDLE, 1), EMPTY, Exclusions.NONE));
         assertEquals(Failure.Kind.NO_SOURCE, failure.kind());
+    }
+
+    @Test
+    void aTradesPaymentIsCommittedBeforeTheShortfallIsTrustedSoTheCraftsStillFindTheirOwnStock() {
+        // A widget takes ten emeralds and a saddle; the only saddle is a trade charging twelve emeralds, and emeralds
+        // come from kills. The payment must not eat the ten the widget itself needs: the plan gathers twenty-two in
+        // all, less what the body holds, however far the payment overshoots what a one-unit repair could cover.
+        RecipeBook widgetBook = bookWith(recipe("widget_from_emeralds_and_saddle", WIDGET, 1, null,
+                of(EMERALD, 10), one(SADDLE)));
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(EMERALD).addItem(WIDGET);
+        builder.addSource(new Source.KillMob("kill:minecraft:witch", EMERALD, "minecraft:witch", false, 1.0, true));
+        builder.addSource(saddleTrade(Map.of(EMERALD, 12), 1.0));
+        SolverPlanner planner = planner(widgetBook, builder.build());
+
+        // The emerald gathers in plan order, by emeralds in hand at the start: the payment's first (twelve less what is
+        // held), then the widget's ten less whatever the trade left. Each is one leaf: a plan that found the payment
+        // out only when the widget's craft ran short would gather in pieces.
+        Map<Integer, List<Long>> expected = new TreeMap<>(Map.of(
+                0, List.of(12L, 10L), 4, List.of(8L, 10L), 10, List.of(2L, 10L), 12, List.of(10L), 25, List.<Long>of()));
+        for (Map.Entry<Integer, List<Long>> entry : expected.entrySet()) {
+            int held = entry.getKey();
+            Map<ItemKey, Integer> stock = held == 0 ? Map.of() : Map.of(EMERALD, held);
+            Plan plan = planned(planner, request(new Goal.HaveItem(WIDGET, 1), snapshot(stock, Map.of()),
+                    Exclusions.NONE));
+            assertRunsToTheGoal(plan, widgetBook, stock, Map.of(), WIDGET, 1);
+            assertEquals(entry.getValue(), gatherCounts(plan, EMERALD), "emerald gathers with " + held + " in hand");
+        }
+    }
+
+    @Test
+    void everyGoalOverTradedItemsFromAnySeededStockRunsToItsEndWithEveryLeafGoalMet() {
+        // Trades whose payments overlap what the recipes need: emeralds for a saddle and for a lead, sticks (crafted
+        // from logs) for the lead, and recipes that want the same emeralds and sticks as well. Seeded, so a failure
+        // reproduces; every plan must run in order with each leaf's own goal met when it ends.
+        RecipeBook traded = bookWith(
+                recipe("widget_from_emeralds_and_saddle", WIDGET, 1, null, of(EMERALD, 10), one(SADDLE)),
+                recipe("gizmo_from_lead_and_emeralds", GIZMO, 1, null, one(LEAD), of(EMERALD, 3), of(STICK, 2)),
+                recipe("mount_kit_from_saddles_and_chest", MOUNT_KIT, 1, CRAFTING_TABLE, of(SADDLE, 2), one(CHEST)));
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(EMERALD).addItem(LEAD).addItem(WIDGET).addItem(GIZMO).addItem(MOUNT_KIT);
+        builder.addSource(new Source.KillMob("kill:minecraft:witch", EMERALD, "minecraft:witch", false, 1.0, true));
+        builder.addSource(saddleTrade(Map.of(EMERALD, 12), 0.5));
+        builder.addSource(new Source.Trade("trade:minecraft:leatherworker#lead", LEAD, "minecraft:leatherworker", 1,
+                Map.of(STICK, 4, EMERALD, 2), Map.of(), 1.0));
+        SolverPlanner planner = planner(traded, builder.build());
+
+        List<ItemKey> goals = List.of(WIDGET, GIZMO, MOUNT_KIT, SADDLE, LEAD, EMERALD, STICK);
+        List<ItemKey> stocked = List.of(EMERALD, STICK, OAK_PLANKS, OAK_LOG, SADDLE, LEAD, CHEST, CRAFTING_TABLE);
+        java.util.Random random = new java.util.Random(7);
+        for (int round = 0; round < 300; round++) {
+            Map<ItemKey, Integer> stock = new TreeMap<>();
+            for (ItemKey item : stocked) {
+                if (random.nextInt(3) == 0) stock.put(item, 1 + random.nextInt(item.equals(EMERALD) ? 30 : 6));
+            }
+            ItemKey goalItem = goals.get(random.nextInt(goals.size()));
+            int count = 1 + random.nextInt(goalItem.equals(EMERALD) ? 40 : 3);
+            String context = "round " + round + ": " + count + " " + goalItem.id() + " from " + stock;
+
+            PlanOutcome outcome = planner.plan(request(new Goal.HaveItem(goalItem, count), snapshot(stock, Map.of()),
+                    Exclusions.NONE));
+            assertTrue(outcome instanceof PlanOutcome.Planned, context + ": " + outcome);
+            Executed executed = run(((PlanOutcome.Planned) outcome).plan(), traded, stock, Map.of());
+            assertNull(executed.failure(), context + ": " + executed.failure());
+            assertTrue(executed.stock().getOrDefault(goalItem, 0) >= count, context + " ended with " + executed.stock());
+        }
+    }
+
+    @Test
+    void aTradeThatChargesTheItemItSellsIsNeverAWayToGainIt() {
+        // One saddle for one saddle gains nothing: the trade is unusable, however cheap it prices (6000 with its
+        // payment against 12000 a saddle by fishing). A plan that took it anyway would end its trade leaf with fewer
+        // saddles than that leaf's own goal says.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addSource(new Source.Fishing("fish:minecraft:gameplay/saddle", SADDLE, "minecraft:gameplay/saddle", 0.1));
+        builder.addSource(saddleTrade(Map.of(SADDLE, 1), 1.0));
+        Plan plan = planned(planner(book(), builder.build()), request(new Goal.HaveItem(SADDLE, 2), EMPTY, Exclusions.NONE));
+        assertEquals(List.of("fish:minecraft:gameplay/saddle"), sources(plan));
+        assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), SADDLE, 2);
+
+        AcquisitionIndex.Builder tradeOnly = indexBuilder(ToolTier.IRON);
+        tradeOnly.addSource(saddleTrade(Map.of(SADDLE, 1), 1.0));
+        Failure failure = unplannable(planner(book(), tradeOnly.build()),
+                request(new Goal.HaveItem(SADDLE, 1), EMPTY, Exclusions.NONE));
+        assertEquals(Failure.Kind.NO_SOURCE, failure.kind());
+        assertEquals(SADDLE, ((Failure.NoSource) failure).key());
+    }
+
+    // ─── A gather that cannot be planned is not the cheapest way (brief P12c item 2) ─────────────
+
+    /** Gathering and mining cost next to nothing, so a mining source beats any recipe unless it is priced out. */
+    private static PlannerConfig freeMining() {
+        PlannerConfig defaults = PlannerConfig.defaults();
+        return new PlannerConfig(1, defaults.deepOre(), 0, defaults.harvest(), defaults.kill(), defaults.fish(),
+                defaults.trade(), defaults.maxTotalReplans(), defaults.toolItems());
+    }
+
+    @Test
+    void anItemWithARecipeIsCraftedWhenTheToolOfItsOnlyMiningSourceCannotBeHad() {
+        // A stone shovel is made from cobblestone and sticks. The block that drops one for free needs a netherite
+        // pickaxe, which nothing in the index or the book gives: priced as the cheaper way it would be listed as a
+        // gather whose every tool chain fails; priced out, the solver's own rule crafts the shovel.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addSource(new Source.MineBlock("mine:minecraft:shovel_ore", STONE_SHOVEL, "minecraft:shovel_ore",
+                ToolClass.PICKAXE, ToolTier.NETHERITE, true, false, false, 1.0, false, null));
+        FakeStrategy watcher = new FakeStrategy("watcher", goal -> false, 1);
+        SolverPlanner planner = new SolverPlanner(book(), builder.build(), freeMining(), List.of(watcher));
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(STONE_SHOVEL, 1), EMPTY, Exclusions.NONE));
+        // Every leaf the planner decides to gather is offered to the strategies: the shovel never was, so gathering
+        // it was never the plan, not a plan that was tried and given up.
+        assertFalse(watcher.asked.stream().anyMatch(goal -> goal instanceof Goal.HaveItem have
+                && have.key().equals(STONE_SHOVEL)), "offered as a gather: " + watcher.asked);
+        assertFalse(sources(plan).contains("mine:minecraft:shovel_ore"), sources(plan).toString());
+        assertTrue(leaves(plan).stream().anyMatch(l -> l.taskKind().equals("craft")
+                && l.params().get("recipe").equals("stone_shovel_from_cobblestone")), "the shovel is crafted: " + leaves(plan));
+        assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), STONE_SHOVEL, 1);
+    }
+
+    @Test
+    void aGatherThatFailsAtPlanningTimeForAReasonThePricesCouldNotSeeIsSetAsideAndTheItemIsCrafted() {
+        // The diamond axe that the free shovel block needs has a recipe, so it looks obtainable and the shovel is
+        // priced as a gather; but the recipe's ingredient has no source, which only planning the axe finds out. The
+        // goal is then planned again with that block set aside, and the shovel is crafted.
+        RecipeBook axeBook = bookWith(recipe("diamond_axe_from_unobtainium", ItemKey.of("diamond_axe"), 1,
+                CRAFTING_TABLE, one(UNOBTAINIUM)));
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(UNOBTAINIUM);
+        builder.addSource(new Source.MineBlock("mine:minecraft:shovel_ore", STONE_SHOVEL, "minecraft:shovel_ore",
+                ToolClass.AXE, ToolTier.DIAMOND, true, false, false, 1.0, false, null));
+        SolverPlanner planner = new SolverPlanner(axeBook, builder.build(), freeMining(), List.of());
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(STONE_SHOVEL, 1), EMPTY, Exclusions.NONE));
+        assertFalse(sources(plan).contains("mine:minecraft:shovel_ore"), sources(plan).toString());
+        assertRunsToTheGoal(plan, axeBook, Map.of(), Map.of(), STONE_SHOVEL, 1);
+
+        // The set-aside does not outlive the request: a stocked diamond axe makes the block usable again.
+        Map<ItemKey, Integer> stock = Map.of(ItemKey.of("diamond_axe"), 1);
+        Plan again = planned(planner, request(new Goal.HaveItem(STONE_SHOVEL, 1),
+                snapshot(stock, Map.of(ToolClass.AXE, ToolTier.DIAMOND)), Exclusions.NONE));
+        assertEquals(List.of("mine:minecraft:shovel_ore"), sources(again));
     }
 
     // ─── The item loop converges and does not eat its own goal (item 11) ─────────────────────────
@@ -1220,6 +1444,31 @@ final class SolverPlannerTest {
 
         Plan plan = planned(planner, request(new Goal.HaveItem(n[6], 1), EMPTY, Exclusions.NONE));
         assertRunsToTheGoal(plan, graph, Map.of(), Map.of(), n[6], 1);
+    }
+
+    @Test
+    void aSolveThatIsStillShortAfterTheGatherTakesTheShortfallAgainInsteadOfGatheringOneUnitAtATime() {
+        // A made-up graph (found by the same seeded search) on which the first shortfall lists less than the plan
+        // draws, and the gap is far past what six single units would cover: the shortfall taken again against the
+        // stock after the first gather names the amounts, and the second gather closes it.
+        ItemKey[] n = new ItemKey[5];
+        for (int i = 0; i < n.length; i++) n[i] = ItemKey.of("n" + i);
+        RecipeBook graph = new SimpleRecipeBook(List.of(
+                recipe("r3a", n[3], 1, null, new RecipeDef.Slot(List.of(n[2], n[1]), 2)),
+                recipe("r3b", n[3], 3, null, new RecipeDef.Slot(List.of(n[0], n[1]), 3)),
+                recipe("r4a", n[4], 1, n[2], new RecipeDef.Slot(List.of(n[0], n[1]), 3), of(n[0], 1),
+                        new RecipeDef.Slot(List.of(n[1], n[2]), 1)),
+                recipe("r4b", n[4], 1, null, one(n[2]), of(n[3], 3), of(n[0], 3))), Map.of());
+        AcquisitionIndex.Builder builder = AcquisitionIndex.builder();
+        double[] yields = {0.46, 0.75, 0.46};
+        for (int i = 0; i < yields.length; i++) {
+            builder.addItem(n[i]).addSource(new Source.MineBlock("mine:minecraft:n" + i, n[i], "minecraft:n" + i,
+                    null, ToolTier.HAND, false, false, false, yields[i], false, null));
+        }
+        SolverPlanner planner = planner(graph, builder.build());
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(n[4], 4), EMPTY, Exclusions.NONE));
+        assertRunsToTheGoal(plan, graph, Map.of(), Map.of(), n[4], 4);
     }
 
     @Test
@@ -1389,6 +1638,38 @@ final class SolverPlannerTest {
         long bare = instance.inputFingerprint(equip, EMPTY);
         assertNotEquals(bare, instance.inputFingerprint(equip,
                 Snapshot.builder().equip(EquipSlot.MAINHAND, WOODEN_PICKAXE).build()), "what is worn is read");
+    }
+
+    @Test
+    void theFingerprintOfAGoalWithAComponentCheckCoversTheFactsOfTheStacksHeld() {
+        // A mending book and a plain one are the same count of the same item; the goal is decided on which one the
+        // body holds, so the fingerprint must tell them apart.
+        SolverPlanner instance = planner();
+        Goal.HaveItem goal = new Goal.HaveItem(ENCHANTED_BOOK, 1, ComponentCheck.enchantment("minecraft:mending", 1));
+        Snapshot plain = Snapshot.builder().item(ENCHANTED_BOOK, 1).facts(ENCHANTED_BOOK, StackFacts.plain(1)).build();
+        Snapshot mending = Snapshot.builder().item(ENCHANTED_BOOK, 1)
+                .facts(ENCHANTED_BOOK, new StackFacts(1, Map.of("minecraft:mending", 1), "", Map.of())).build();
+        Snapshot unbreaking = Snapshot.builder().item(ENCHANTED_BOOK, 1)
+                .facts(ENCHANTED_BOOK, new StackFacts(1, Map.of("minecraft:unbreaking", 3), "", Map.of())).build();
+        assertNotEquals(instance.inputFingerprint(goal, plain), instance.inputFingerprint(goal, mending));
+        assertNotEquals(instance.inputFingerprint(goal, mending), instance.inputFingerprint(goal, unbreaking));
+        assertEquals(instance.inputFingerprint(goal, mending), instance.inputFingerprint(goal, mending));
+
+        // The facts of an item the goal does not name are not read.
+        Snapshot unrelated = Snapshot.builder().item(ENCHANTED_BOOK, 1).facts(ENCHANTED_BOOK, StackFacts.plain(1))
+                .facts(DIAMOND, new StackFacts(1, Map.of("minecraft:fortune", 3), "", Map.of())).build();
+        assertEquals(instance.inputFingerprint(goal, plain), instance.inputFingerprint(goal, unrelated));
+    }
+
+    @Test
+    void theToolTableIteratesInKeyOrderWhateverOrderItWasBuiltIn() {
+        // Two keys naming one item make the later one win in the planner's reverse table, so the order the table is
+        // read in must not depend on the JVM.
+        Map<String, ItemKey> scrambled = new java.util.HashMap<>(PlannerConfig.vanillaToolItems());
+        PlannerConfig config = PlannerConfig.defaults().withToolItems(scrambled);
+        assertEquals(new ArrayList<>(new java.util.TreeSet<>(scrambled.keySet())),
+                new ArrayList<>(config.toolItems().keySet()));
+        assertThrows(UnsupportedOperationException.class, () -> config.toolItems().put("x", STICK));
     }
 
     @Test

@@ -1,6 +1,7 @@
 package com.legoj15.megablockbot.core.planner;
 
 import com.legoj15.megablockbot.core.ItemKey;
+import com.legoj15.megablockbot.core.ToolClass;
 import com.legoj15.megablockbot.core.ToolTier;
 import com.legoj15.megablockbot.core.acquire.AcquisitionIndex;
 import com.legoj15.megablockbot.core.acquire.Source;
@@ -9,8 +10,11 @@ import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.solver.CostModel;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.ToLongFunction;
 
 /**
@@ -26,18 +30,27 @@ import java.util.function.ToLongFunction;
  * its chance, plus the unit cost of what it charges (see the {@code paymentPrice} parameter).
  *
  * <p>Not planned yet, so a source needing them is unusable here and the plan says so in its notes: silk touch,
- * shears (a drop that needs shears), and chest loot (finding structures).
+ * shears (a drop that needs shears), and chest loot (finding structures). A trade that charges the item it sells
+ * gains nothing and is unusable too.
+ *
+ * <p>A mining source whose required tool cannot be had at all (see {@link #toolObtainable}) costs {@code UNOBTAINABLE}:
+ * the solver then never lists a craftable item as a gather through it, while the planner still tries the source last,
+ * so the failure reported for an item with no other way is that source's own.
  */
 public final class GatherCosts implements CostModel<String, ItemKey> {
+    private final RecipeBook recipes;
     private final AcquisitionIndex index;
     private final PlannerConfig config;
     private final Exclusions exclusions;
     private final Snapshot snapshot;
     private final ToLongFunction<ItemKey> paymentPrice;
+    /** Whether each tool item could be had, by item, decided once per model: a model answers the same every time. */
+    private final Map<ItemKey, Boolean> toolMemo = new HashMap<>();
 
     /** A cost model that charges nothing for what a trade takes in payment. */
-    public GatherCosts(AcquisitionIndex index, PlannerConfig config, Exclusions exclusions, Snapshot snapshot) {
-        this(index, config, exclusions, snapshot, null);
+    public GatherCosts(RecipeBook recipes, AcquisitionIndex index, PlannerConfig config, Exclusions exclusions,
+                       Snapshot snapshot) {
+        this(recipes, index, config, exclusions, snapshot, null);
     }
 
     /**
@@ -45,9 +58,11 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
      *                     a separate function (the planner passes a second solver's {@code unitCost}, built over a
      *                     model that charges nothing) because the solver that owns this model must not be asked
      *                     for a unit cost while it derives one.
+     * @param recipes      what makes an item, for telling whether a mining source's tool can be had at all
      */
-    public GatherCosts(AcquisitionIndex index, PlannerConfig config, Exclusions exclusions, Snapshot snapshot,
-                       ToLongFunction<ItemKey> paymentPrice) {
+    public GatherCosts(RecipeBook recipes, AcquisitionIndex index, PlannerConfig config, Exclusions exclusions,
+                       Snapshot snapshot, ToLongFunction<ItemKey> paymentPrice) {
+        this.recipes = recipes;
         this.index = index;
         this.config = config;
         this.exclusions = exclusions;
@@ -101,14 +116,69 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
             if (mine.needsShears()) return "needs shears, not planned yet";
         }
         if (source instanceof Source.Trade trade && !(trade.chance() > 0)) return "the offer never comes up";
+        // One item per trade: a trade that takes one or more of that item back leaves the stock no higher.
+        if (source instanceof Source.Trade trade && trade.cost().getOrDefault(trade.item(), 0) >= 1) {
+            return "the trade charges the item it sells";
+        }
         if (source.yield() <= 0) return "yields nothing";
         return null;
+    }
+
+    /**
+     * Whether the tool a mining source requires can be had: carried (the snapshot's best tool, or a tool item it
+     * holds), or an item that a recipe makes or a usable source yields, followed through the tools its own sources
+     * need (a chain that loops back on itself is no way in). A source that requires no tool needs none. This only
+     * rules out what can never be planned; it does not say a plan for the tool will succeed (a recipe's ingredients
+     * may have no source), which only planning finds out.
+     */
+    public boolean toolObtainable(Source.MineBlock mine) {
+        if (!mine.toolRequired()) return true;
+        if (mine.toolClass() == null) return false;
+        if (carries(mine.toolClass(), mine.minTier())) return true;
+        ItemKey tool = config.toolItem(mine.toolClass(), mine.minTier());
+        if (tool == null) return false;
+        Boolean known = toolMemo.get(tool);
+        if (known == null) {
+            known = obtainable(tool, new HashSet<>());
+            toolMemo.put(tool, known);
+        }
+        return known;
+    }
+
+    /** Whether the snapshot holds a tool of the class at the tier or better, as the best tool or as an item. */
+    private boolean carries(ToolClass toolClass, ToolTier tier) {
+        if (snapshot.bestTool(toolClass).atLeast(tier)) return true;
+        for (ToolTier held : ToolTier.values()) {
+            ItemKey item = held.atLeast(tier) ? config.toolItem(toolClass, held) : null;
+            if (item != null && snapshot.count(item) > 0) return true;
+        }
+        return false;
+    }
+
+    /** Held, made by a recipe, or yielded by a usable source whose own tool can be had; {@code chain} guards cycles. */
+    private boolean obtainable(ItemKey item, Set<ItemKey> chain) {
+        if (snapshot.count(item) > 0 || !recipes.producers(item).isEmpty()) return true;
+        if (!chain.add(item)) return false;
+        try {
+            for (Source source : index.sources(item)) {
+                if (!usable(source)) continue;
+                if (!(source instanceof Source.MineBlock mine) || !mine.toolRequired()) return true;
+                if (mine.toolClass() == null) continue;
+                if (carries(mine.toolClass(), mine.minTier())) return true;
+                ItemKey tool = config.toolItem(mine.toolClass(), mine.minTier());
+                if (tool != null && obtainable(tool, chain)) return true;
+            }
+            return false;
+        } finally {
+            chain.remove(item);
+        }
     }
 
     /** Cost of one unit through this source, or {@code UNOBTAINABLE} when the planner has no task for it. */
     public long costOf(Source source) {
         if (reasonUnusable(source) != null) return UNOBTAINABLE;
         if (source instanceof Source.MineBlock mine) {
+            if (!toolObtainable(mine)) return UNOBTAINABLE;
             // Per-unit = the breaking attempt's cost spread over the drop, plus the depth and tool-tier charges.
             // The brief reads "mineBase / yield; plus deepOre; plus toolStep per tier below the required one".
             return saturatingAdd(breakingCost(mine), config.toolStep() * tiersBelow(mine));
@@ -130,7 +200,9 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
      */
     public long costOfCarrying(Source source) {
         if (reasonUnusable(source) != null) return UNOBTAINABLE;
-        if (source instanceof Source.MineBlock mine && mine.toolRequired()) return breakingCost(mine);
+        if (source instanceof Source.MineBlock mine && mine.toolRequired()) {
+            return toolObtainable(mine) ? breakingCost(mine) : UNOBTAINABLE;
+        }
         return costOf(source);
     }
 

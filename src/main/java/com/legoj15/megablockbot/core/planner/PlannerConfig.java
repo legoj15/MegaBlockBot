@@ -3,6 +3,7 @@ package com.legoj15.megablockbot.core.planner;
 import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.ToolClass;
 import com.legoj15.megablockbot.core.ToolTier;
+import java.util.Collections;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -26,9 +27,12 @@ import java.util.TreeMap;
  */
 public record PlannerConfig(long mineBase, long deepOre, long toolStep, long harvest, long kill, long fish,
                             long trade, int maxTotalReplans, Map<String, ItemKey> toolItems) {
-    /** Sorted, defensively copied: table iteration must not depend on how it was built. */
+    /**
+     * Sorted, defensively copied, read-only: table iteration must not depend on how it was built. ({@code Map.copyOf}
+     * would drop the order, and its own iteration order differs from one JVM to the next.)
+     */
     public PlannerConfig {
-        toolItems = Map.copyOf(new TreeMap<>(toolItems));
+        toolItems = Collections.unmodifiableMap(new TreeMap<>(toolItems));
     }
 
     /** The documented defaults of the table above: vanilla costs, the executor's replan budget. */

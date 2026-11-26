@@ -17,6 +17,7 @@ import com.legoj15.megablockbot.core.plan.Planner;
 import com.legoj15.megablockbot.core.plan.Profile;
 import com.legoj15.megablockbot.core.snapshot.ContainerSight;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
+import com.legoj15.megablockbot.core.snapshot.StackFacts;
 import com.legoj15.megablockbot.core.task.Failure;
 import com.legoj15.solver.CostModel;
 import com.legoj15.solver.PlannedStep;
@@ -29,6 +30,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
@@ -47,13 +49,19 @@ import java.util.TreeSet;
  * first, so units already in stock are never spent to make more of the goal item, and an item with a recipe is
  * gathered when its cheapest source is no dearer than crafting it (brief P12b items 3 and 11). The planner then
  * <ol>
- *   <li>plans every tool prerequisite the listed leaves need, commits its effect on the working stock, and takes
- *       the shortfall again, until a round plans none (item 1: the tool chain eats stock the first list counted);</li>
- *   <li>emits one gather leaf per listed item, the goal of each computed from the working stock at that moment;</li>
- *   <li>solves the demand from the stock and emits its crafts; a solve that still reports missing items gathers
- *       them and solves again, a bounded number of times.</li>
+ *   <li>commits everything that consumes stock before the shortfall is trusted: the tool prerequisite of a mining
+ *       source, the whole of a trade (its payment is planned, the trade leaf emitted, the payment spent), and a
+ *       strategy's nodes. After a round that committed anything the shortfall is taken again, until a round commits
+ *       none (P12b item 1, P12c item 1: the tool chain and the payments eat stock the first list counted);</li>
+ *   <li>emits one gather leaf per remaining listed item, the goal of each computed from the working stock at that
+ *       moment;</li>
+ *   <li>solves the demand from the stock and emits its crafts; a solve that still reports missing items takes the
+ *       shortfall again against the stock as it stands (it knows the amounts and can craft intermediates), gathers
+ *       that and solves again, a bounded number of times.</li>
  * </ol>
- * Every loop is bounded and ends in an {@code Unplannable(Internal)} that says which bound it hit.
+ * A gather that cannot be planned although the cost model priced it (its tool's recipe needs an ingredient nothing
+ * yields, say) is set aside, for this plan only, and the shortfall is taken again: the solver then crafts an item
+ * that has a recipe. Every loop is bounded and ends in an {@code Unplannable(Internal)} that says which bound it hit.
  *
  * <h2>Leaf params</h2>
  * Every value is a string; {@code taskKind} says which task reads them.
@@ -72,10 +80,12 @@ import java.util.TreeSet;
  *   <li>craft (the recipe's {@code kind}, {@code craft} for the grid): {@code recipe} (id), {@code times},
  *       {@code station} (the station item or empty) and {@code layout}, the item the solver chose for each slot of
  *       each craft, in the form {@link CraftLayout} documents, so a task follows it instead of re-deciding.</li>
- *   <li>{@code equip}: none; the goal names the slots.</li>
+ *   <li>{@code equip}: none; the goal names the slots. Equipping leaves the working stock as it is: the snapshot
+ *       counts worn items.</li>
  *   <li>{@code deposit}: {@code item}, {@code container}, {@code dimension}, and {@code count}, which is how many
  *       to move now: the goal asked for, minus what the container is known to hold. The node's goal is the
- *       {@link Goal.Stockpile} itself and carries the total the container should hold.</li>
+ *       {@link Goal.Stockpile} itself and carries the total the container should hold. The moved items leave the
+ *       working stock.</li>
  *   <li>{@code navigate}: {@code dimension}, {@code pos}, {@code radius}.</li>
  * </ul>
  */
@@ -151,9 +161,10 @@ public final class SolverPlanner implements Planner {
     /**
      * How one leaf item is to be obtained: a strategy's nodes (done), or the source to gather from (emitted later).
      *
-     * @param committed   whether deciding put nodes in the plan (a tool prerequisite, a strategy's result) and so
-     *                    changed the working stock
-     * @param sourceIndex the position in cost order of the source to gather from, or -1 for a strategy
+     * @param committed   whether deciding put nodes in the plan (a tool prerequisite, a whole trade, a strategy's
+     *                    result) and so changed the working stock
+     * @param sourceIndex the position in cost order of the source whose gather is still to be emitted, or -1 when
+     *                    nothing is left to emit (a strategy's nodes, or a trade committed whole)
      * @param skipped     the failure of the first source that could not be used, so that a gather that fails later
      *                    still reports the cheapest source's failure; null when the cheapest source was usable
      */
@@ -162,8 +173,11 @@ public final class SolverPlanner implements Planner {
         static Decision fail(Failure failure) { return new Decision(List.of(), false, -1, null, failure); }
     }
 
-    /** The working stock and the notes at one moment, so an attempt that is not kept can be undone. */
-    private record State(TreeMap<ItemKey, Long> stock, List<String> notes) {}
+    /**
+     * The working stock, the notes and the sources set aside at one moment, so an attempt that is not kept can be
+     * undone: a source set aside while a losing strategy's sub-plan was tried must not be missing from the real plan.
+     */
+    private record State(TreeMap<ItemKey, Long> stock, List<String> notes, TreeSet<String> setAside) {}
 
     /** The demand "carry {@code count} of {@code key}", as the one recipe the solver is asked to make (item 11). */
     private record DemandRecipe(ItemKey key, int count) implements RecipeGraphSolver.RecipeInfo<String, ItemKey> {
@@ -197,8 +211,14 @@ public final class SolverPlanner implements Planner {
         private final PlanRequest request;
         private final Snapshot snapshot;
         private final Exclusions exclusions;
-        private final GatherCosts costs;
-        private final RecipeGraphSolver<String, ItemKey> solver;
+        /**
+         * Sources this plan gave up on after pricing them: a gather that could not be planned for a reason the cost
+         * model cannot see. Part of {@link State}; the cost model and the solver are rebuilt when it changes.
+         */
+        private final TreeSet<String> setAside = new TreeSet<>();
+        /** The cost model and the solver over it; rebuilt, never mutated, because a solver keeps its derived costs. */
+        private GatherCosts costs;
+        private RecipeGraphSolver<String, ItemKey> solver;
         /** What the body will hold once the nodes planned so far have run; starts as the snapshot's inventory. */
         private final TreeMap<ItemKey, Long> stock = new TreeMap<>();
         private final Map<ItemKey, Long> stockView = Collections.unmodifiableMap(stock);
@@ -218,17 +238,26 @@ public final class SolverPlanner implements Planner {
             this.request = request;
             this.snapshot = request.snapshot();
             this.exclusions = request.exclusions();
-            // A trade's price includes what it charges, priced by a second solver whose model charges nothing for
-            // payments: the solver that owns a cost model must not be asked for a unit cost while it derives one.
-            RecipeGraphSolver<String, ItemKey> pricer =
-                    newSolver(new GatherCosts(index, config, exclusions, snapshot));
-            this.costs = new GatherCosts(index, config, exclusions, snapshot, pricer::unitCost);
-            // Fresh per run: the solver keeps derived unit costs for its lifetime, and this run's model carries
-            // this request's exclusions and best tools.
-            this.solver = newSolver(costs);
+            buildModels();
             for (Map.Entry<ItemKey, Integer> item : snapshot.items().entrySet()) {
                 stock.put(item.getKey(), (long) item.getValue());
             }
+        }
+
+        /**
+         * A fresh cost model and solver over the request's exclusions and the sources set aside: the solver keeps
+         * derived unit costs for its lifetime, and this run's model carries this request's best tools.
+         */
+        private void buildModels() {
+            TreeSet<String> excluded = new TreeSet<>(exclusions.sources());
+            excluded.addAll(setAside);
+            Exclusions effective = new Exclusions(excluded, exclusions.blocks(), exclusions.areas());
+            // A trade's price includes what it charges, priced by a second solver whose model charges nothing for
+            // payments: the solver that owns a cost model must not be asked for a unit cost while it derives one.
+            RecipeGraphSolver<String, ItemKey> pricer =
+                    newSolver(new GatherCosts(recipes, index, config, effective, snapshot));
+            this.costs = new GatherCosts(recipes, index, config, effective, snapshot, pricer::unitCost);
+            this.solver = newSolver(costs);
         }
 
         private RecipeGraphSolver<String, ItemKey> newSolver(CostModel<String, ItemKey> model) {
@@ -316,14 +345,19 @@ public final class SolverPlanner implements Planner {
         }
 
         /**
-         * The gather leaves of the demand's shortfall (brief P12b item 1). Each round takes the shortfall from the
-         * working stock and decides how every listed item is obtained; deciding commits a tool prerequisite (or a
-         * strategy's result), and a round that committed anything is followed by a fresh shortfall, because the tool
-         * chain eats and leaves stock the list did not count. A round that committed nothing emits the gathers, each
-         * with a goal computed from the stock at that moment. The rounds are bounded.
+         * The gather leaves of the demand's shortfall (brief P12b item 1, P12c item 1). Each round takes the shortfall
+         * from the working stock and decides how every listed item is obtained; deciding commits a tool
+         * prerequisite, a whole trade (payment included) or a strategy's result, and a round that committed anything
+         * is followed by a fresh shortfall, because those eat and leave stock the list did not count. A round that
+         * committed nothing emits the gathers, each with a goal computed from the stock at that moment.
+         *
+         * <p>An item that has a recipe but whose every source fails to plan is not lost yet: its sources are set
+         * aside and the shortfall is taken again, so the solver crafts it (P12c item 2). Should that not get
+         * anywhere either, the failure reported is the gather's. The rounds are bounded.
          */
         Step gatherShortfall(ItemKey key, DemandRecipe demand) {
             List<NodeSpec> nodes = new ArrayList<>();
+            Failure gatherFailure = null;
             for (int round = 0; round <= MAX_SETTLE_ROUNDS; round++) {
                 RecipeGraphSolver.ShortfallResult<ItemKey> shortfall = solver.shortfallLong(demand, stock);
                 if (shortfall.saturated()) {
@@ -343,20 +377,36 @@ public final class SolverPlanner implements Planner {
                 }
 
                 boolean committed = false;
+                boolean setAsideAny = false;
                 Map<ItemKey, Decision> gathers = new TreeMap<>();
                 for (Map.Entry<ItemKey, Long> entry : demands.entrySet()) {
                     Decision decision = decide(entry.getKey(), entry.getValue());
-                    if (decision.failure() != null) return Step.fail(decision.failure());
+                    if (decision.failure() != null) {
+                        if (!giveUp(entry.getKey(), decision.failure())) {
+                            return Step.fail(gatherFailure != null ? gatherFailure : decision.failure());
+                        }
+                        if (gatherFailure == null) gatherFailure = decision.failure();
+                        setAsideAny = true;
+                        break;
+                    }
                     nodes.addAll(decision.nodes());
                     committed |= decision.committed();
                     if (decision.sourceIndex() >= 0) gathers.put(entry.getKey(), decision);
                 }
-                if (committed) continue;
+                if (setAsideAny || committed) continue;
                 for (Map.Entry<ItemKey, Decision> gather : gathers.entrySet()) {
                     Step emitted = emitGather(gather.getKey(), demands.get(gather.getKey()), gather.getValue());
-                    if (emitted.failure() != null) return emitted;
+                    if (emitted.failure() != null) {
+                        if (!giveUp(gather.getKey(), emitted.failure())) {
+                            return gatherFailure != null ? Step.fail(gatherFailure) : emitted;
+                        }
+                        if (gatherFailure == null) gatherFailure = emitted.failure();
+                        setAsideAny = true;
+                        break;
+                    }
                     nodes.addAll(emitted.nodes());
                 }
+                if (setAsideAny) continue;
                 return Step.ok(nodes);
             }
             // Not reached: the last round either finds nothing to gather or fails. Said as a failure, not a throw,
@@ -366,8 +416,11 @@ public final class SolverPlanner implements Planner {
 
         /**
          * The crafts that assemble the demand from the working stock (brief P12 step 4). A solve that reports missing
-         * items after the gather (the shortfall may list too little; brief P12b item 11c) gathers those that have a
-         * source and solves again, a bounded number of times.
+         * items after the gather (the shortfall may list too little, or a payment planned late ate stock; brief P12b
+         * item 11c, P12c item 1) takes the proper shortfall again against the stock as it stands, which knows the
+         * amounts and can craft intermediates, gathers that and solves again, a bounded number of times. Only when the
+         * shortfall lists nothing (the solver flagged it approximate) are the solve's own missing items gathered, a
+         * unit each; a solve that names nothing with a source ends the plan.
          */
         Step craftDemand(ItemKey key, DemandRecipe demand) {
             List<NodeSpec> nodes = new ArrayList<>();
@@ -384,17 +437,29 @@ public final class SolverPlanner implements Planner {
                         || failure.budgetExceeded() || failure.tooLarge() || attempt >= MAX_RESOLVE_ROUNDS) {
                     return Step.fail(internal(detail));
                 }
-                List<ItemKey> gatherable = new ArrayList<>();
-                for (ItemKey missing : new TreeSet<>(failure.missing())) {
-                    if (!costs.ranked(missing).isEmpty()) gatherable.add(missing);
-                }
-                if (gatherable.isEmpty()) return Step.fail(internal(detail));
-                for (ItemKey missing : gatherable) {
-                    Step gathered = leaf(missing, 1);
+                Step gathered = gatherShortfall(key, demand);
+                if (gathered.failure() != null) return gathered;
+                if (gathered.nodes().isEmpty()) {
+                    // The shortfall lists nothing although the solve is short (the solver flags such a list
+                    // approximate): the solve's own missing items, with no amounts, are all there is to go on.
+                    gathered = gatherMissing(failure.missing());
                     if (gathered.failure() != null) return gathered;
-                    nodes.addAll(gathered.nodes());
+                    if (gathered.nodes().isEmpty()) return Step.fail(internal(detail));
                 }
+                nodes.addAll(gathered.nodes());
             }
+        }
+
+        /** One unit of each missing item that has a source, through the same leaf rules as any gather. */
+        private Step gatherMissing(Set<ItemKey> missing) {
+            List<NodeSpec> nodes = new ArrayList<>();
+            for (ItemKey item : new TreeSet<>(missing)) {
+                if (costs.ranked(item).isEmpty()) continue;
+                Step gathered = leaf(item, 1);
+                if (gathered.failure() != null) return gathered;
+                nodes.addAll(gathered.nodes());
+            }
+            return Step.ok(nodes);
         }
 
         /** The solver's steps as craft leaves, advancing the working stock through each (the demand step is not one). */
@@ -475,7 +540,7 @@ public final class SolverPlanner implements Planner {
 
         // ─── Obtaining one leaf item ─────────────────────────────────────────────────────────────
 
-        /** Obtains one leaf item now: decides how, then emits the gather if that is how (the missing-items path). */
+        /** Obtains one leaf item now (an item no recipe makes): decides how, then emits the gather if that is how. */
         Step leaf(ItemKey item, long demand) {
             Decision decision = decide(item, demand);
             if (decision.failure() != null) return Step.fail(decision.failure());
@@ -490,11 +555,15 @@ public final class SolverPlanner implements Planner {
 
         /**
          * How a leaf item is obtained: a strategy's proposal, or a gather from the first source (in cost order)
-         * whose tool prerequisite can be planned. A source that cannot be used falls through to the next; when none
-         * can be, the failure reported is the cheapest source's. The proposals and the gather are compared by what
-         * the whole demand costs, the gather's tool prerequisite included, and each is tried from the stock as it was
-         * before any of them (brief P12b items 2 and 4); only the winner's effect on the working stock stays.
-         * Committing the tool prerequisite (or the strategy's nodes) is what makes {@link Decision#committed()} true.
+         * that can be prepared. A source that cannot be used falls through to the next; when none can be, the failure
+         * reported is the cheapest source's. The proposals and the gather are compared by what the whole demand
+         * costs, the gather's preparation included, and each is tried from the stock as it was before any of them
+         * (brief P12b items 2 and 4); only the winner's effect on the working stock stays.
+         *
+         * <p>Preparing a mining source is planning its tool prerequisite; the gather itself is emitted later. Preparing
+         * a trade is the whole of it: its payment is planned and spent and the trade leaf emitted, so that what the
+         * trade eats is out of the stock before the shortfall is trusted (P12c item 1). Committing nodes (a tool
+         * prerequisite, a whole trade, a strategy's nodes) is what makes {@link Decision#committed()} true.
          */
         private Decision decide(ItemKey item, long demand) {
             long absolute = held(item) + demand;
@@ -506,18 +575,22 @@ public final class SolverPlanner implements Planner {
 
             Failure gatherFailure = ranked.isEmpty() ? noSource(item) : null;
             int chosen = -1;
+            boolean emitted = false;
             List<NodeSpec> prerequisite = List.of();
             State afterPrerequisite = null;
             long gatherCost = CostModel.UNOBTAINABLE;
             for (int i = 0; i < ranked.size() && chosen < 0; i++) {
-                Step tool = prerequisite(ranked.get(i));
-                if (tool.failure() == null) {
+                Source source = ranked.get(i);
+                boolean trade = source instanceof Source.Trade;
+                Step ready = trade ? planSource(item, demand, source) : prerequisite(source);
+                if (ready.failure() == null) {
                     chosen = i;
-                    prerequisite = tool.nodes();
+                    emitted = trade;
+                    prerequisite = ready.nodes();
                     afterPrerequisite = mark();
-                    if (!strategies.isEmpty()) gatherCost = gatherTotal(ranked.get(i), demand, !prerequisite.isEmpty());
+                    if (!strategies.isEmpty()) gatherCost = gatherTotal(source, demand, !prerequisite.isEmpty());
                 } else if (gatherFailure == null) {
-                    gatherFailure = tool.failure();
+                    gatherFailure = ready.failure();
                 }
                 restore(base);
             }
@@ -545,7 +618,7 @@ public final class SolverPlanner implements Planner {
             }
             restore(afterPrerequisite);
             noteSkippedSources(item, ranked.get(chosen));
-            return new Decision(prerequisite, !prerequisite.isEmpty(), chosen, gatherFailure, null);
+            return new Decision(prerequisite, !prerequisite.isEmpty(), emitted ? -1 : chosen, gatherFailure, null);
         }
 
         /**
@@ -592,7 +665,11 @@ public final class SolverPlanner implements Planner {
             return Step.fail(first != null ? first : noSource(item));
         }
 
-        /** The nodes that obtain {@code demand} of the item from one source, and their effect on the working stock. */
+        /**
+         * The nodes that obtain {@code demand} of the item from one source, and their effect on the working stock.
+         * The leaf's goal is the stock after the leaf's own effect (a trade spends its payment), which is what the
+         * executor verifies when the leaf ends. On a failure the stock may be part way: the caller restores it.
+         */
         private Step planSource(ItemKey item, long demand, Source source) {
             List<NodeSpec> nodes = new ArrayList<>();
             Step tool = prerequisite(source);
@@ -602,20 +679,36 @@ public final class SolverPlanner implements Planner {
                 Step payment = payment(item, trade, demand);
                 if (payment.failure() != null) return payment;
                 nodes.addAll(payment.nodes());
-            }
-            long absolute = held(item) + demand;
-            if (absolute > Integer.MAX_VALUE) {
-                return Step.fail(internal("the demand for " + item.id() + " exceeds what a goal can count"));
-            }
-            nodes.add(NodeSpec.leaf(new Goal.HaveItem(item, (int) absolute), taskKind(source),
-                    gatherParams(source, demand), source.id()));
-            if (source instanceof Source.Trade trade) {
                 for (Map.Entry<ItemKey, Integer> charge : trade.cost().entrySet()) {
                     removeStock(charge.getKey(), (long) charge.getValue() * demand);
                 }
             }
             addStock(item, demand);
+            long absolute = held(item);
+            if (absolute > Integer.MAX_VALUE) {
+                return Step.fail(internal("the demand for " + item.id() + " exceeds what a goal can count"));
+            }
+            nodes.add(NodeSpec.leaf(new Goal.HaveItem(item, (int) absolute), taskKind(source),
+                    gatherParams(source, demand), source.id()));
             return Step.ok(nodes);
+        }
+
+        /**
+         * Sets aside every source of the item after they all failed to plan, when a recipe could still make it, and
+         * rebuilds the cost model so the solver crafts it (P12c item 2: the prices could not see why they failed).
+         *
+         * @return whether anything was set aside, so that taking the shortfall again can lead somewhere new
+         */
+        private boolean giveUp(ItemKey item, Failure failure) {
+            // Only a source that cannot be had is given up on; an internal bound a plan hit is not about the source.
+            if (!(failure instanceof Failure.NoSource || failure instanceof Failure.MissingTool)) return false;
+            if (recipes.producers(item).isEmpty()) return false;
+            boolean added = false;
+            for (Source source : costs.ranked(item)) added |= setAside.add(source.id());
+            if (!added) return false;
+            note(item.id() + ": gathering it could not be planned (" + failure.detail() + "), so it is crafted instead");
+            buildModels();
+            return true;
         }
 
         /**
@@ -768,6 +861,9 @@ public final class SolverPlanner implements Planner {
             params.put("container", goal.container().encode());
             params.put("dimension", goal.dimension());
             nodes.add(NodeSpec.leaf(goal, "deposit", params, ""));
+            // The moved items are in the container, not on the body: a plan that asks for the item again (a
+            // strategy's next step) must gather it again.
+            removeStock(goal.key(), need);
             return Step.ok(nodes);
         }
 
@@ -849,6 +945,7 @@ public final class SolverPlanner implements Planner {
             for (Source source : sources) {
                 detail.append(' ').append(source.id());
                 if (exclusions.sources().contains(source.id())) detail.append(" excluded");
+                else if (setAside.contains(source.id())) detail.append(" set aside, it could not be planned");
                 else detail.append(' ').append(costs.reasonUnusable(source));
             }
             return detail.toString();
@@ -890,7 +987,7 @@ public final class SolverPlanner implements Planner {
         }
 
         private State mark() {
-            return new State(new TreeMap<>(stock), new ArrayList<>(notes));
+            return new State(new TreeMap<>(stock), new ArrayList<>(notes), new TreeSet<>(setAside));
         }
 
         private void restore(State state) {
@@ -898,6 +995,11 @@ public final class SolverPlanner implements Planner {
             stock.putAll(state.stock());
             notes.clear();
             notes.addAll(state.notes());
+            if (!setAside.equals(state.setAside())) {
+                setAside.clear();
+                setAside.addAll(state.setAside());
+                buildModels();
+            }
         }
 
         private static Failure.Internal internal(String detail) {
@@ -975,7 +1077,8 @@ public final class SolverPlanner implements Planner {
      * counts of the items in the goal's recipe closure (every item reachable through recipe ingredients and
      * stations, the tools the sources it can be gathered from require, and what a trade charges) and, for a goal
      * the planner cannot see into (a build or a custom goal), of the whole inventory; and what {@code Stockpile}
-     * reads (the container's known contents) and {@code Equip} reads (what is worn). Position, health, hunger, game
+     * reads (the container's known contents), {@code Equip} reads (what is worn) and a goal with a component check reads
+ * (the facts of the stacks of its item that the body holds). Position, health, hunger, game
      * time and the counts of items the plan never reads are not part of it, so an unrelated pickup keeps the plan
      * current. Stable across JVMs: FNV-1a over a canonical text, no {@code hashCode} (whose 32 bits collide sooner
      * than needed here).
@@ -994,6 +1097,17 @@ public final class SolverPlanner implements Planner {
         for (ItemKey item : read) {
             int count = snapshot.count(item);
             if (count > 0) text.append(item.id()).append(':').append(count).append(',');
+        }
+        if (goal instanceof Goal.HaveItem have && have.check() != null) {
+            // A checked goal is decided on the facts of the stacks held (which enchantments the book carries), which
+            // the item counts above do not say.
+            List<String> facts = new ArrayList<>();
+            for (StackFacts stack : snapshot.stackFacts().getOrDefault(have.key(), List.of())) {
+                facts.add(stack.count() + "|" + new TreeMap<>(stack.enchantments()) + "|" + stack.potion() + "|"
+                        + new TreeMap<>(stack.extra()));
+            }
+            Collections.sort(facts);
+            text.append(";facts=").append(facts);
         }
         if (goal instanceof Goal.Equip equip) {
             text.append(";worn=");
