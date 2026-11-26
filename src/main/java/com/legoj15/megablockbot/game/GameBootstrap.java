@@ -2,10 +2,14 @@ package com.legoj15.megablockbot.game;
 
 import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.game.body.BodyFeature;
+import com.legoj15.megablockbot.game.bot.BotFeature;
 import com.legoj15.megablockbot.game.command.AiPlayerCommand;
 import com.legoj15.megablockbot.game.gametest.SolverGameTests;
 import com.legoj15.megablockbot.game.nav.NavFeature;
+import com.legoj15.megablockbot.game.plan.PlanFeature;
+import com.legoj15.megablockbot.game.reflex.ReflexFeature;
 import com.legoj15.megablockbot.game.resolver.ResolverFeature;
+import com.legoj15.megablockbot.game.safety.SafetyFeature;
 import com.legoj15.megablockbot.nav.NavModule;
 import com.legoj15.megablockbot.platform.Platform;
 
@@ -25,6 +29,10 @@ public final class GameBootstrap {
         BodyFeature.init();
         ResolverFeature.init();
         NavFeature.init();
+        SafetyFeature.init();
+        PlanFeature.init();
+        ReflexFeature.init();
+        BotFeature.init();
 
         // GameTests: a no-op unless a GameTest run enabled them.
         Platform.loader().registerGameTests(SolverGameTests.class);
