@@ -24,11 +24,16 @@ import java.util.TreeMap;
  * results are then folded into routes, keeping for each item only its least demanding way out.
  *
  * <p>Simplifications, all on the side of reporting an item as obtainable: a condition this class cannot judge is
- * tried both ways; luck, looting and fortune are at level 0; {@code apply_bonus}, {@code explosion_decay},
- * {@code limit_count} and every function that edits components are ignored; a function whose condition is not certain
- * under both readings is ignored; global loot modifiers are not run; one roll picks among the entries that can run by
- * weight, and the chance that a leaf is picked when other entries are themselves uncertain is the leaf's weight over
- * the expected weight in the pool (exact when nothing else is uncertain).
+ * tried both ways, and an item both readings yield keeps the larger expected count and the larger chance of each;
+ * luck, looting and fortune are at level 0; {@code apply_bonus}, {@code explosion_decay}, {@code limit_count} and
+ * every function that edits components are ignored; a function whose condition is not certain under both readings
+ * is ignored; global loot modifiers are not run; one roll picks among the entries that can run by weight, and the
+ * chance that a leaf is picked when other entries are themselves uncertain is the leaf's weight over the expected
+ * weight in the pool (exact when nothing else is uncertain).
+ *
+ * <p>Functions run in the game's order, the entry's first and the pool's after. A {@code set_count} on the pool is
+ * applied to item and tag entries; over a nested {@code loot_table} entry, and at table level, it is noted and not
+ * applied, as are the pool-level functions that change counts in ways this class does not model.
  */
 final class LootEval {
     /** What the player holds when the table is rolled. */
@@ -76,10 +81,21 @@ final class LootEval {
 
     private static final double EPS = 1e-9;
 
+    // Pool-level functions that change a count in a way this class does not model. The others are either modeled
+    // (set_count), ignored on purpose as at entry level (apply_bonus at level 0, explosion_decay), or leave counts
+    // alone. The last three wrap other functions, any of which may be a set_count. Table level models nothing.
+    private static final Set<String> UNMODELED_POOL_FUNCTIONS =
+        Set.of("limit_count", "enchanted_count_increase", "sequence", "filtered", "reference");
+    private static final Set<String> UNMODELED_TABLE_FUNCTIONS =
+        Set.of("set_count", "limit_count", "enchanted_count_increase", "sequence", "filtered", "reference");
+    private static final Set<String> SET_COUNT = Set.of("set_count");
+
     private final Environment env;
     private final BuildNotes notes;
     private final Map<String, Map<Scenario, Map<String, Drop>>> memo = new HashMap<>();
     private final Set<String> visiting = new HashSet<>();
+    // The table being evaluated, so a note can name it. An inline table belongs to the table that holds it.
+    private String current = "?";
 
     LootEval(Environment env, BuildNotes notes) {
         this.env = env;
@@ -91,7 +107,8 @@ final class LootEval {
     /**
      * The routes by which the table yields items. {@code tools} are the tool scenarios to try (PLAIN first) and
      * {@code playerKills} whether to try a player kill as well. An item that a less demanding scenario already yields
-     * gets no route for a more demanding one.
+     * gets no route for a more demanding one. Within a scenario the two readings of the conditions this class cannot
+     * judge are merged per item, each figure taking the more permissive of the two.
      */
     List<Route> routes(String tableId, Set<Tool> tools, boolean playerKills) {
         List<Route> routes = new ArrayList<>();
@@ -100,7 +117,9 @@ final class LootEval {
         for (Tool tool : EnumSet.copyOf(tools)) {
             for (boolean byPlayer : playerKills ? new boolean[] {false, true} : new boolean[] {false}) {
                 Map<String, Drop> merged = new TreeMap<>(evalTableId(tableId, new Scenario(tool, byPlayer, false)));
-                merged.putAll(evalTableId(tableId, new Scenario(tool, byPlayer, true)));
+                for (Map.Entry<String, Drop> e : evalTableId(tableId, new Scenario(tool, byPlayer, true)).entrySet()) {
+                    merged.merge(e.getKey(), e.getValue(), (a, b) -> new Drop(Math.max(a.expected(), b.expected()), Math.max(a.hit(), b.hit())));
+                }
                 for (Map.Entry<String, Drop> e : merged.entrySet()) {
                     Drop drop = e.getValue();
                     if (drop.expected() <= EPS || drop.hit() <= EPS) continue;
@@ -133,6 +152,8 @@ final class LootEval {
             return Map.of();
         }
         Map<String, Drop> result;
+        String outer = current;
+        current = id;
         try {
             JsonObject table = env.table(id);
             if (table == null) {
@@ -141,14 +162,20 @@ final class LootEval {
             } else {
                 result = evalTable(table, s);
             }
+        } catch (RuntimeException e) {
+            // A table written in a shape this class did not expect costs that table; a table that nests it carries on.
+            notes.skipped("loot tables that threw while evaluated", id + " (" + e.getClass().getSimpleName() + ")");
+            result = Map.of();
         } finally {
             visiting.remove(id);
+            current = outer;
         }
         byScenario.put(s, result);
         return result;
     }
 
     private Map<String, Drop> evalTable(JsonObject table, Scenario s) {
+        noteFunctions(table.get("functions"), UNMODELED_TABLE_FUNCTIONS, "table-level loot functions that change counts are not applied");
         Map<String, Drop> out = new TreeMap<>();
         for (JsonElement pool : array(table, "pools")) {
             if (pool.isJsonObject()) merge(out, evalPool(pool.getAsJsonObject(), s));
@@ -160,10 +187,12 @@ final class LootEval {
         double poolChance = allConditions(pool.get("conditions"), s);
         if (poolChance <= EPS) return Map.of();
         Num rolls = Num.parse(pool.get("rolls"), notes);
+        JsonElement poolFunctions = pool.get("functions");
+        noteFunctions(poolFunctions, UNMODELED_POOL_FUNCTIONS, "pool-level loot functions that change counts in ways not modeled");
 
         List<Expansion> expansions = new ArrayList<>();
         for (JsonElement entry : array(pool, "entries")) {
-            if (entry.isJsonObject()) expansions.addAll(expand(entry.getAsJsonObject(), s));
+            if (entry.isJsonObject()) expansions.addAll(expand(entry.getAsJsonObject(), poolFunctions, s));
         }
 
         // The pool picks one entry per roll among those that expanded, by weight. For an uncertain entry, the weight
@@ -211,7 +240,8 @@ final class LootEval {
 
     // ---- entries -----------------------------------------------------------------------------------------------
 
-    private List<Expansion> expand(JsonObject entry, Scenario s) {
+    // poolFunctions are the functions of the pool the entry sits in, which run after the entry's own.
+    private List<Expansion> expand(JsonObject entry, JsonElement poolFunctions, Scenario s) {
         double chance = allConditions(entry.get("conditions"), s);
         if (chance <= EPS) return List.of();
         String type = strip(string(entry, "type"));
@@ -219,8 +249,11 @@ final class LootEval {
         switch (type) {
             case "item": {
                 String name = string(entry, "name");
-                if (name.isEmpty()) return List.of();
-                Num count = count(entry, s);
+                if (name.isEmpty()) {
+                    notes.skipped("loot item entries with no item name", current);
+                    return List.of();
+                }
+                Num count = count(entry, poolFunctions, s);
                 return single(chance, new Leaf(weight, Map.of(name, new Drop(count.mean(), count.pPositive()))));
             }
             case "tag": {
@@ -230,15 +263,16 @@ final class LootEval {
                     notes.skipped("item tags used by loot tables that are empty or unknown", string(entry, "name"));
                     return List.of();
                 }
+                Num count = count(entry, poolFunctions, s);
+                Drop each = new Drop(count.mean(), count.pPositive());
                 if (expandTag) {
                     // Each item of the tag is its own entry of the pool, with the tag entry's weight.
                     List<Leaf> leaves = new ArrayList<>();
-                    for (String item : items) leaves.add(new Leaf(weight, Map.of(item, new Drop(1, 1))));
+                    for (String item : items) leaves.add(new Leaf(weight, Map.of(item, each)));
                     return List.of(new Expansion(List.of(new Outcome(chance, leaves))));
                 }
-                Num count = count(entry, s);
                 Map<String, Drop> drops = new TreeMap<>();
-                for (String item : items) drops.put(item, new Drop(count.mean(), count.pPositive()));
+                for (String item : items) drops.put(item, each);
                 return single(chance, new Leaf(weight, drops));
             }
             case "loot_table": {
@@ -246,7 +280,13 @@ final class LootEval {
                 Map<String, Drop> drops;
                 if (value != null && value.isJsonObject()) drops = evalTable(value.getAsJsonObject(), s);
                 else if (value != null && value.isJsonPrimitive()) drops = evalTableId(value.getAsString(), s);
-                else return List.of();
+                else {
+                    notes.skipped("loot_table entries with no readable value", current);
+                    return List.of();
+                }
+                // The nested table's stacks are already aggregated into expected counts, so a pool-level set_count
+                // cannot be laid over them exactly.
+                noteFunctions(poolFunctions, SET_COUNT, "pool-level set_count over a nested loot_table entry is not applied");
                 return single(chance, new Leaf(weight, drops));
             }
             case "empty":
@@ -263,7 +303,7 @@ final class LootEval {
                 for (JsonElement child : array(entry, "children")) {
                     if (!child.isJsonObject() || reach <= EPS) continue;
                     JsonObject c = child.getAsJsonObject();
-                    List<Expansion> expanded = expand(c, s);
+                    List<Expansion> expanded = expand(c, poolFunctions, s);
                     if (expanded.size() == 1) {
                         for (Outcome o : expanded.get(0).outcomes()) exclusive.add(scale(o, chance * reach));
                     } else {
@@ -280,7 +320,7 @@ final class LootEval {
                 // Every child expands; they are separate entries of the pool.
                 List<Expansion> out = new ArrayList<>();
                 for (JsonElement child : array(entry, "children")) {
-                    if (child.isJsonObject()) for (Expansion x : expand(child.getAsJsonObject(), s)) out.add(scale(x, chance));
+                    if (child.isJsonObject()) for (Expansion x : expand(child.getAsJsonObject(), poolFunctions, s)) out.add(scale(x, chance));
                 }
                 return out;
             }
@@ -291,7 +331,7 @@ final class LootEval {
                 for (JsonElement child : array(entry, "children")) {
                     if (!child.isJsonObject() || reach <= EPS) continue;
                     JsonObject c = child.getAsJsonObject();
-                    for (Expansion x : expand(c, s)) out.add(scale(x, reach));
+                    for (Expansion x : expand(c, poolFunctions, s)) out.add(scale(x, reach));
                     reach *= success(c, s);
                 }
                 return out;
@@ -334,11 +374,29 @@ final class LootEval {
         return new Expansion(out);
     }
 
-    /** The count one pick of an item entry gives: 1 unless a certain {@code set_count} says otherwise. */
-    private Num count(JsonObject entry, Scenario s) {
-        Num count = Num.constant(1);
-        boolean skippedUncertain = false;
-        for (JsonElement f : array(entry, "functions")) {
+    // The count a pick of an entry has been given so far, and whether a set_count was left out for want of certainty.
+    private static final class Count {
+        Num value = Num.constant(1);
+        boolean skippedUncertain;
+    }
+
+    /**
+     * The count one pick of an item entry gives: 1 unless a certain {@code set_count} says otherwise, the entry's own
+     * functions first and its pool's after, which is the order the game runs them in.
+     */
+    private Num count(JsonObject entry, JsonElement poolFunctions, Scenario s) {
+        Count count = new Count();
+        applyFunctions(entry.get("functions"), count, s);
+        applyFunctions(poolFunctions, count, s);
+        // A multi-face block (glow lichen, vines) adds one per face and takes one off the base; with the per-face
+        // additions skipped that would leave nothing. The entry exists to drop something, so a break gives at least 1.
+        if (count.skippedUncertain && count.value.mean() <= 0) return Num.constant(1);
+        return count.value;
+    }
+
+    private void applyFunctions(JsonElement functions, Count count, Scenario s) {
+        if (functions == null || !functions.isJsonArray()) return;
+        for (JsonElement f : functions.getAsJsonArray()) {
             if (!f.isJsonObject()) continue;
             JsonObject fn = f.getAsJsonObject();
             String id = strip(string(fn, "function"));
@@ -350,16 +408,22 @@ final class LootEval {
             // Only a count that holds whatever the unjudgeable conditions say: a double slab drops two slabs only
             // when it is a double slab, and a single attempt cannot be assumed to be one.
             if (!certain(fn.get("conditions"), s)) {
-                skippedUncertain = true;
+                count.skippedUncertain = true;
                 continue;
             }
             Num value = Num.parse(fn.get("count"), notes);
-            count = fn.has("add") && fn.get("add").getAsBoolean() ? count.plus(value) : value;
+            count.value = fn.has("add") && fn.get("add").getAsBoolean() ? count.value.plus(value) : value;
         }
-        // A multi-face block (glow lichen, vines) adds one per face and takes one off the base; with the per-face
-        // additions skipped that would leave nothing. The entry exists to drop something, so a break gives at least 1.
-        if (skippedUncertain && count.mean() <= 0) return Num.constant(1);
-        return count;
+    }
+
+    // Names, under the table being evaluated, each of the functions that this class leaves out of a count.
+    private void noteFunctions(JsonElement functions, Set<String> ids, String category) {
+        if (functions == null || !functions.isJsonArray()) return;
+        for (JsonElement f : functions.getAsJsonArray()) {
+            if (!f.isJsonObject()) continue;
+            String id = strip(string(f.getAsJsonObject(), "function"));
+            if (ids.contains(id)) notes.skipped(category, current + " (" + id + ")");
+        }
     }
 
     // ---- conditions --------------------------------------------------------------------------------------------

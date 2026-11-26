@@ -46,9 +46,19 @@ final class OreRanges {
     private enum Dimension { OVERWORLD, NETHER, END }
 
     // The build limits an anchor resolves against: the dimension's own and its noise settings', as the game does.
-    private record Limits(int minY, int depth) {}
+    // The sea level is the generator's, which is what "can be dug at anywhere" is measured against.
+    private record Limits(int minY, int depth, int seaLevel) {}
 
-    private record Contribution(String feature, int veinSize, OreRange range) {}
+    // One placed feature's share of a block's range; its best Y is the feature's peak.
+    private record Contribution(String feature, int veinSize, OreRange range, int seaLevel) {
+        boolean peaksAtOrBelowSea() {
+            return range.bestY() <= seaLevel;
+        }
+
+        int width() {
+            return range.maxY() - range.minY();
+        }
+    }
 
     private OreRanges() {}
 
@@ -92,13 +102,7 @@ final class OreRanges {
                 min = Math.min(min, c.range().minY());
                 max = Math.max(max, c.range().maxY());
             }
-            // The best Y is the best of the largest feature: the biggest veins, then the widest range, then the id.
-            Contribution largest = e.getValue().stream()
-                .max(Comparator.comparingInt(Contribution::veinSize)
-                    .thenComparingInt(c -> c.range().maxY() - c.range().minY())
-                    .thenComparing(Contribution::feature, Comparator.reverseOrder()))
-                .orElseThrow();
-            out.put(e.getKey(), new OreRange(min, max, largest.range().bestY()));
+            out.put(e.getKey(), new OreRange(min, max, e.getValue().stream().min(OreRanges::preferred).orElseThrow().range().bestY()));
         }
 
         // Blocks the ore tag lists but no feature produced: noted, so a lint reader knows the gap is ours.
@@ -108,6 +112,26 @@ final class OreRanges {
             if (!out.containsKey(id)) notes.skipped("ore blocks (tag c:ores) with no readable placed feature", id);
         }
         return out;
+    }
+
+    /**
+     * Orders one block's features by how good a place to dig their peak is; the least is the one whose peak is the
+     * block's best Y. The bot digs down to wherever the best Y is, so it must be a height it can reach from the surface
+     * anywhere, which a peak above the sea level (iron's mountain-only feature, y=232) is not. Of the features that peak
+     * at or below the sea level the one with the largest veins comes first, then the widest range. When none does, the
+     * lowest peak does, then the same two. The feature id makes the order total.
+     */
+    private static int preferred(Contribution a, Contribution b) {
+        if (a.peaksAtOrBelowSea() != b.peaksAtOrBelowSea()) return a.peaksAtOrBelowSea() ? -1 : 1;
+        if (!a.peaksAtOrBelowSea()) {
+            int byPeak = Integer.compare(a.range().bestY(), b.range().bestY());
+            if (byPeak != 0) return byPeak;
+        }
+        int byVeins = Integer.compare(b.veinSize(), a.veinSize());
+        if (byVeins != 0) return byVeins;
+        int byWidth = Integer.compare(b.width(), a.width());
+        if (byWidth != 0) return byWidth;
+        return a.feature().compareTo(b.feature());
     }
 
     private static void readFeature(String id, PlacedFeature feature, Limits limits, DynamicOps<JsonElement> ops,
@@ -129,7 +153,7 @@ final class OreRanges {
             notes.skipped("ore features without a readable height range", id);
             return;
         }
-        Contribution contribution = new Contribution(id, veinSize, range);
+        Contribution contribution = new Contribution(id, veinSize, range, limits.seaLevel());
         for (String block : blocks) byBlock.computeIfAbsent(block, k -> new ArrayList<>()).add(contribution);
     }
 
@@ -211,10 +235,10 @@ final class OreRanges {
         NoiseGeneratorSettings settings = access.registryOrThrow(Registries.NOISE_SETTINGS).get(noise);
         if (dimension == null || settings == null) {
             notes.count("build limits of the " + d.name().toLowerCase() + " not found, the overworld's assumed");
-            return new Limits(-64, 384);
+            return new Limits(-64, 384, 63);
         }
         // WorldGenerationContext takes the higher floor and the smaller height of the dimension and its generator.
         return new Limits(Math.max(dimension.minY(), settings.noiseSettings().minY()),
-            Math.min(dimension.height(), settings.noiseSettings().height()));
+            Math.min(dimension.height(), settings.noiseSettings().height()), settings.seaLevel());
     }
 }

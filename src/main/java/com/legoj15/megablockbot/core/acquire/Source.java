@@ -48,7 +48,11 @@ public sealed interface Source {
         }
     }
 
-    /** The Y levels an ore block generates at: inclusive bounds, and the level a branch miner should aim for. */
+    /**
+     * The Y levels an ore block generates at: inclusive bounds covering every feature that generates it, and the level
+     * a branch miner should aim for, which is the peak of the best feature that peaks at or below the sea level (the
+     * lowest peak when none does), never that of a mountain-only feature while a lower one exists.
+     */
     record OreRange(int minY, int maxY, int bestY) {}
 
     /** Killing a mob. {@code playerKillOnly} is true when the drop needs a kill by a player. */

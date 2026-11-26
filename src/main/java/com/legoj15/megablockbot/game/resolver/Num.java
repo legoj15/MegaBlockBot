@@ -36,14 +36,27 @@ final class Num {
     }
 
     static Num binomial(int n, double p) {
-        if (n <= 0 || p <= 0) return constant(0);
+        if (n <= 0 || !(p > 0)) return constant(0); // also a NaN chance
         if (p >= 1) return constant(n);
         if (n > MAX_BINOMIAL_N) return constant((int) Math.round(n * p));
+        // Built from the ratio of neighbouring terms, in log space: the first term, (1-p)^n, underflows a double well
+        // inside the cap (0.1^500), and a running product that starts at zero stays zero. The largest term is
+        // factored out before exponentiating, and the terms are normalized, which also absorbs the rounding.
+        double[] logs = new double[n + 1];
+        double logOdds = Math.log(p) - Math.log1p(-p);
+        logs[0] = n * Math.log1p(-p);
+        double max = logs[0];
+        for (int k = 1; k <= n; k++) {
+            logs[k] = logs[k - 1] + Math.log((double) (n - k + 1) / k) + logOdds;
+            max = Math.max(max, logs[k]);
+        }
         double[] pmf = new double[n + 1];
-        double q = 1 - p;
-        // Built from the ratio of neighbouring terms; (1-p)^n underflows only for absurd n*p, which the cap excludes.
-        pmf[0] = Math.pow(q, n);
-        for (int k = 1; k <= n; k++) pmf[k] = pmf[k - 1] * (n - k + 1) / k * (p / q);
+        double sum = 0;
+        for (int k = 0; k <= n; k++) {
+            pmf[k] = Math.exp(logs[k] - max);
+            sum += pmf[k];
+        }
+        for (int k = 0; k <= n; k++) pmf[k] /= sum;
         return new Num(0, pmf);
     }
 

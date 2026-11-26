@@ -71,8 +71,17 @@ final class TradeSampler {
         keys.sort(Comparator.naturalOrder());
         for (int level : keys) {
             VillagerTrades.ItemListing[] listings = levels.get(level);
+            if (listings == null) {
+                notes.skipped("villager trade levels with no listing array", profession + ":" + level);
+                continue;
+            }
             for (int i = 0; i < listings.length; i++) {
                 VillagerTrades.ItemListing listing = listings[i];
+                if (listing == null) {
+                    // A mod's trade event can leave a hole in the array; it costs that listing, not the other trades.
+                    notes.skipped("null villager trade listings", profession + ":" + level + ":" + i);
+                    continue;
+                }
                 if (listing instanceof VillagerTrades.TreasureMapForEmeralds) {
                     // Rolling it searches for a structure and allocates a map id in the world's saved data, once per
                     // sample, so it is left out rather than polluting the save.

@@ -37,6 +37,8 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.util.GsonHelper;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.ai.attributes.DefaultAttributes;
+import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -79,6 +81,8 @@ public final class AcquisitionIndexBuilder {
     private final AcquisitionIndex.Builder index = AcquisitionIndex.builder();
     private final GameLootEnvironment environment;
     private final LootEval eval;
+    // Recipes that report no result item (the special crafting types compute theirs from the ingredients).
+    private int noResultRecipes;
 
     private AcquisitionIndexBuilder(MinecraftServer server) {
         this.server = server;
@@ -148,7 +152,8 @@ public final class AcquisitionIndexBuilder {
             if (!PLANNABLE_RECIPE_TYPES.contains(type)) index.countUnplannableRecipe(type);
             try {
                 ItemStack result = recipe.getResultItem(access);
-                if (!result.isEmpty()) index.addCraftable(ItemKey.of(BuiltInRegistries.ITEM.getKey(result.getItem()).toString()));
+                if (result.isEmpty()) noResultRecipes++;
+                else index.addCraftable(ItemKey.of(BuiltInRegistries.ITEM.getKey(result.getItem()).toString()));
             } catch (RuntimeException e) {
                 notes.skipped("recipes whose result could not be read", holder.id().toString());
             }
@@ -243,7 +248,7 @@ public final class AcquisitionIndexBuilder {
         BuiltInRegistries.ENTITY_TYPE.forEach(types::add);
         types.sort(Comparator.comparing(t -> BuiltInRegistries.ENTITY_TYPE.getKey(t).toString()));
         for (EntityType<?> type : types) {
-            if (type == EntityType.PLAYER) continue;
+            if (!isMob(type)) continue;
             String entityId = BuiltInRegistries.ENTITY_TYPE.getKey(type).toString();
             String table = type.getDefaultLootTable().location().toString();
             if (environment.table(table) == null) continue;
@@ -252,6 +257,12 @@ public final class AcquisitionIndexBuilder {
                     route.expected(), route.random()));
             }
         }
+    }
+
+    // A kill source is something a player fights. Only living entities have attributes (the game cannot spawn one
+    // that lacks them, modded ones included), but a player and an armor stand are living entities and no mobs.
+    private static boolean isMob(EntityType<?> type) {
+        return type != EntityType.PLAYER && type != EntityType.ARMOR_STAND && DefaultAttributes.hasSupplier(type);
     }
 
     private void fishing() {
@@ -290,6 +301,11 @@ public final class AcquisitionIndexBuilder {
         notes.always("global loot modifiers are not evaluated (" + globalLootModifierCount() + " registered)");
         notes.always("drops a mob's code adds outside its loot table (a wither's nether star) are not seen");
         notes.always("a block drops its loot-table items whether or not it can exist in the world, so a block that never generates still counts as a source of its own item");
+        notes.always("recipes of special crafting types (armor dyeing, firework rockets, tipped arrows, ...) report no result item ("
+            + noResultRecipes + " loaded), so what only they make is not in craftable() and shows as unobtainable");
+        if (server.getWorldData().enabledFeatures().contains(FeatureFlags.TRADE_REBALANCE)) {
+            notes.always("the trade_rebalance feature is on: villagers and the wandering trader use the experimental per-biome trade lists, which are not sampled; the trades listed are those of the default lists");
+        }
         notes.always("villager trades are sampled " + TradeSampler.SAMPLES + " times per listing with a fixed seed: a result rarer than about 1 in 20 can be missed, and chance ignores which of a level's listings a villager rolled");
     }
 
