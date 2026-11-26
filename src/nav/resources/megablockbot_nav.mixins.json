@@ -3,7 +3,11 @@
   "minVersion": "0.8",
   "package": "com.legoj15.megablockbot.nav.mixin",
   "compatibilityLevel": "JAVA_${java_version}",
-  "mixins": [],
+  "mixins": [
+    "MixinEntity",
+    "MixinItemStack",
+    "MixinMobEntity"
+  ],
   "client": [],
   "server": [],
   "injectors": {

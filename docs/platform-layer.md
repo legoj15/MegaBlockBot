@@ -89,6 +89,13 @@ runs wherever the command tree is built (a worker thread while data loads).
   directives work in `src/nav/`; the source set exists on every node so a version switch rewrites it, but only a
   bot node compiles and packages it). `navJar` builds it; `jarJar(files(navJar))` nests it. Main compiles
   against `nav`'s output (`compileOnly`); dev runs load both mods.
+- Engine: `com.legoj15.megablockbot.nav.engine` is the ported Automatone engine (upstream, commit and every
+  modification in `src/nav/resources/UPSTREAM.md`, shipped at the jar root; keep it current when an engine file
+  changes). No loader import in it. `NavRuntime` (logger, ids, the bounded `MegaBlockBot nav N` search pool, the
+  settings directory) and `NavTags` are its loader-neutral services; `NavModule` sets the directories and shuts the
+  pool down on server stop, and registers no tick event: whoever owns a driven entity calls `IBaritone.serverTick()`
+  once per server tick. Entry: `IBaritone.KEY.get(entity).getCustomGoalProcess().setGoalAndPath(goal)`.
+  `game.gametest.NavEngineGameTests` drives an armor stand with it (why not a zombie: the class comment).
 - Evidence the nested jars are in: `unzip -l versions/1.21.1/build/libs/*.jar` lists `META-INF/jarjar/` with the
   solver jar and `megablockbot-nav-<version>.jar`; a non-bot node's jar has the solver only.
 

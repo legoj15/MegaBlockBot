@@ -39,9 +39,13 @@ stonecutter {
     constants.put("bot", botEnabled)
 }
 
+// Every source set (main, nav, test) is UTF-8, whatever the build machine's default charset is.
+tasks.withType<JavaCompile>().configureEach {
+    options.encoding = "UTF-8"
+}
+
 tasks.compileJava {
     dependsOn("stonecutterGenerate")
-    options.encoding = "UTF-8"
     // The game package touches Minecraft internals the other nodes' versions may not have; it is built where the bot is.
     if (!botEnabled) exclude("com/legoj15/megablockbot/game/**")
 }
