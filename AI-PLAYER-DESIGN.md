@@ -508,6 +508,21 @@ Griefing is a non-goal, but a mining bot breaks blocks by default. Rules, on in 
 - Never break or take from containers, beds, or villager workstations it didn't place, except
   where a strategy explicitly needs it (the lectern it placed during a librarian reroll).
 
+Decided in #9 (`game.safety.BlockSafety`, the one place tasks and the nav engine ask):
+- Radius: constant 16 (`SafetyConstants`), a horizontal square, around the owner's respawn point (online, or from
+  saved player data, followed through logins and logouts) and the overworld's world spawn. Neither it nor a claim is
+  lifted by anything, bot's own blocks included; an allowance lifts only the player-placed and container rules, never
+  a bed or a job site, and ends with its body (dies, despawns, is replaced) if its goal does not close it.
+- Container: a block whose block entity is a vanilla `Container` or `Clearable` (a campfire counts, so do generated
+  loot chests; on the server thread the real block entity is asked too, for breaking as for using); workstation: a
+  block of a POI type a villager profession holds or acquires as its job site (from the POI data, no list); bed:
+  `BedBlock` or the `beds` tag. Decided per block type, so it works off-thread. A double chest is two records and one
+  inventory: breaking is per half, using needs both halves to be the bot's.
+- Player-placed: placed by a real player (an enderman setting a block down is not), recorded per level with the block
+  type; a position the level holds another block at is pruned, and only on the level's word, never a caller's state.
+  Doors, tall plants and beds answer for their other half. Everything the record cannot see is in
+  `docs/block-safety.md`.
+
 ## 4. Planning pipeline
 
 ```

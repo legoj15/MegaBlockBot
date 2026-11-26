@@ -21,7 +21,8 @@ import java.util.Map;
  * @param foodUnits   hunger points the carried food would restore
  * @param stations    stations (crafting table, furnace, modded machines) within the snapshot radius
  * @param containers  containers within the snapshot radius, or named by the active goal
- * @param stackFacts  per-stack component facts, only for the item keys the active goal's check names
+ * @param stackFacts  per-stack component facts: one entry per occupied stack of an item (two stacks of one item
+ *                    are two entries); a goal's check reads the keys it names
  * @param structures  one report per blueprint a build goal names, keyed by {@code blueprint@x,y,z}
  * @param observations extra facts a strategy declared it needs, keyed by the strategy's own key
  */
