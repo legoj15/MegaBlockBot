@@ -1,0 +1,30 @@
+package com.legoj15.megablockbot.game.body;
+
+/**
+ * Every tunable of the body, in one place so a later config pass can find them. Nothing here is read from a config
+ * file yet.
+ */
+public final class BodyConstants {
+    private BodyConstants() {}
+
+    /** How long a body that nobody needs stays logged in before the manager despawns it (design 3.1). */
+    public static final int IDLE_GRACE_TICKS = 600;
+
+    /** A body loads chunks like a player; this keeps its ring small. It is the view distance the body reports. */
+    public static final int VIEW_DISTANCE = 6;
+
+    /** The owner counts as "near" inside this many blocks, in the same dimension. */
+    public static final int OWNER_NEAR_BLOCKS = 128;
+
+    /** How often a body refreshes its chunk tickets and its connection's last-good position (Carpet's cadence). */
+    public static final int CHUNK_REFRESH_TICKS = 10;
+
+    /** How often the manager evaluates the idle policy. The idle counter advances by this much per evaluation. */
+    public static final int IDLE_CHECK_INTERVAL_TICKS = 20;
+
+    /** How often the body record is brought up to date for bodies that are logged in. */
+    public static final int RECORD_REFRESH_TICKS = 200;
+
+    /** Longest a body may be asked to hold a test input with {@code /aiplayer input}. */
+    public static final int MAX_HELD_INPUT_TICKS = 6000;
+}

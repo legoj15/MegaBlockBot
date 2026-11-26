@@ -3,7 +3,11 @@
   "minVersion": "0.8",
   "package": "com.legoj15.megablockbot.game.mixin",
   "compatibilityLevel": "JAVA_${java_version}",
-  "mixins": [],
+  "mixins": [
+    "PlayerAdvancementsBodyMixin",
+    "PlayerListBodyMixin",
+    "SleepStatusBodyMixin"
+  ],
   "client": [],
   "server": [],
   "injectors": {

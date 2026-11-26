@@ -185,15 +185,38 @@ chat ──► Language layer (LLM, tool calls) ──► typed Goal
   ticked, so the body's own `tick()` writes its movement input (`xxa`/`zza`, jumping, sneaking,
   sprinting, look direction) and then calls `doTick()` itself, as Carpet does. Inputs go in before
   `doTick()`, or they act a tick late. `ServerPlayer.setPlayerInput` is not the way in: it only
-  writes for a passenger. Navigation outputs those inputs, never teleports. #6's first check is
-  that our body falls, walks, jumps and swims under plain inputs on 1.21.1, in a GameTest.
+  writes for a passenger. Navigation outputs those inputs, never teleports. Verified in #6
+  (`BodyGameTests`, run by `scripts/gametest.ps1`): on 1.21.1 the body falls, takes fall damage,
+  walks, jumps, steps up a one-block ledge and swims up under plain inputs, and `ServerLevel` calls
+  its `tick()` once per server tick (every player in the level, riders through `rideTick`).
 - It has a real inventory, real interaction distance, and real tool-tier rules.
-- A client-less player is visible to the rest of the game. Decide each case in M1: the tab list
-  entry, sleep-percentage counting, advancements and stats, and mods that send packets to "all
-  players" (the stub connection must swallow them safely).
+- A client-less player is visible to the rest of the game. Decided in #6, each with its evidence:
+  - Tab list: listed, like a player (`ClientInformation.allowsListing` true; the tab entry is
+    always sent as listed). `listedInTabList` checks the join packet.
+  - Sleeping: a body never blocks the night skip. An awake body does not count as an active
+    player in `SleepStatus` (mixin on `SleepStatus.update`; a sleeping body would still count).
+    `doesNotBlockSleep` measures it against an awake ordinary player as control.
+  - Advancements and stats: vanilla keeps them (saved with the body); a body's advancements are
+    not announced in chat (mixin on `PlayerAdvancements.award` hands the callback a display
+    with the announcement off, so the earned event still fires). `advancementsAreNotAnnounced`
+    measures it, with a real connection as listener and control.
+  - Packets "to all players": the body's listener and connection swallow every packet, skip
+    NeoForge's payload check, and keep nothing (`send`, `flushChannel` and `runOnceConnected` are
+    no-ops). The connection does own an unwritten `EmbeddedChannel`: NeoForge reads connection
+    attributes off `Connection.channel()` for every player in `placeNewPlayer`, and a connection
+    with no channel throws there (seen in the first GameTest run).
+  - Mob spawning and targeting treat a body as a player, which is wanted (it must be attackable):
+    `ChunkMap.skipPlayer` and `playerIsCloseEnoughForSpawning` exclude only spectators,
+    `Level.getNearestPlayer` and `NearestAttackableTargetGoal` read the level's player list, and
+    `Mob.checkDespawn` asks `getNearestPlayer`. Read from the 1.21.1 source, and run:
+    `mobsTargetBody` has an ordinary zombie pick the body as its target.
 - Bound to an owner; it only takes goals from its owner (or ops). The owner can pause, resume
-  and cancel its goal by command (§3.4).
-- Chunk loading: keeps a ticket around itself only while it has an active goal.
+  and cancel its goal by command (§3.4). The owner's UUID and name are saved with the body;
+  `mayCommand` is true for the owner and for any permission-level-2 source (the console runs at 4).
+- Chunk loading: keeps a ticket around itself only while it has an active goal. A logged-in body
+  loads chunks like any player (view distance 6), so the manager despawns a body whose brain does
+  not want to stay loaded and whose owner is not online in the same dimension within 128 blocks,
+  after 600 ticks (`BodyConstants`).
 - Death: drops are recorded with coordinates; respawn re-enters the goal tree with a
   "recover drops" prerequisite if they are still within reach and the despawn timer allows.
 
@@ -388,13 +411,22 @@ empty food supply cannot hold a goal paused forever without a result.
 - **Body record**, in a server-level saved-data file: body UUID and name, owner, dimension and
   position, and whether it has an active goal. At server start every body with an active goal is
   re-created from this record (AIBot does the same from its `runtime.json`). Bodies without one
-  respawn when their owner next asks for them.
+  respawn when their owner next asks for them. Built in #6: `megablockbot_bodies` in the
+  overworld's saved data, schema 1, kept current on spawn, despawn, death and every 200 ticks;
+  an entry that does not decode is skipped and logged.
 - **Goal state**, in the body's player data: the root goal, the goal tree's node specs and states,
   a small per-node checkpoint map, the replan counters, pending
   death records (drop positions and death time), the queued goals and the owner's paused flag.
-  #6 must confirm that vanilla saves player data for a stub-connection body; if it does not, the
-  goal state *and* the body's inventory, equipment, health and hunger move into the body record's
-  file.
+  Vanilla does save player data for a stub-connection body (answer to #6's question):
+  `PlayerList.save` only skips a player whose `connection` is null, and a body has one.
+  `inventorySurvivesDespawnAndSpawn` gives a body items, a helmet, 7 health and 12 hunger,
+  despawns it, spawns it again and finds all of it back, at the position it left from;
+  the body record therefore holds no inventory. The brain saves and loads inside that player
+  data, under one `megablockbot` compound (`BotBrain.save`/`load`), next to the owner; a brain
+  that throws in `load` is replaced by a fresh one and one that throws in `save` is skipped,
+  and the body is saved and loaded regardless (`badBrainDoesNotBlockSaveOrSpawn`;
+  `brainStateSurvivesDespawnAndSpawn` for the round trip). Server stop saves bodies through
+  `PlayerList.saveAll` like any player.
 
 The checkpoint map holds the few facts a task kind declares worth keeping across a restart,
 as hints for where to look (a mine shaft's position and the Y it reached, a village found, a
