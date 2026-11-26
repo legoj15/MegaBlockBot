@@ -1,0 +1,241 @@
+package com.legoj15.megablockbot.game.plan;
+
+import com.legoj15.megablockbot.core.EquipSlot;
+import com.legoj15.megablockbot.core.ItemKey;
+import com.legoj15.megablockbot.core.Pos;
+import com.legoj15.megablockbot.core.ToolClass;
+import com.legoj15.megablockbot.core.ToolTier;
+import com.legoj15.megablockbot.core.snapshot.ContainerSight;
+import com.legoj15.megablockbot.core.snapshot.Snapshot;
+import com.legoj15.megablockbot.core.snapshot.StackFacts;
+import com.legoj15.megablockbot.core.snapshot.StationSight;
+import com.legoj15.megablockbot.game.body.BotPlayer;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.food.FoodProperties;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.alchemy.PotionContents;
+import net.minecraft.world.item.enchantment.ItemEnchantments;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+
+/**
+ * Reads one body into the immutable {@link Snapshot} the planner and the postconditions work from (design 3.4). Server
+ * thread only, and read-only: it never opens a container, moves an item, loads a chunk or changes any state. What the
+ * world cannot say (which table the bot placed, what was in a chest it left) comes from the body's {@link BotMemory}.
+ */
+public final class SnapshotCollector {
+    /** How far from the body, in blocks, a station is looked for. */
+    public static final int STATION_SCAN_RADIUS = 8;
+
+    // Stations the bot knows without any recipe naming them: the vanilla workstations. A recipe in the book that names
+    // another item as its station adds it (stationBlocks below), which is how a mod's machine becomes visible.
+    private static final List<ItemKey> VANILLA_STATIONS = List.of(
+        ItemKey.of("minecraft:crafting_table"), ItemKey.of("minecraft:furnace"), ItemKey.of("minecraft:blast_furnace"),
+        ItemKey.of("minecraft:smoker"), ItemKey.of("minecraft:stonecutter"), ItemKey.of("minecraft:smithing_table"),
+        ItemKey.of("minecraft:anvil"));
+
+    /** The blocks that are stations, derived from {@code basis}; rebuilt only when a new book is published. */
+    private record StationTable(Set<ItemKey> basis, Map<Block, ItemKey> byBlock) {}
+
+    private static volatile StationTable stationTable = new StationTable(null, Map.of());
+
+    private SnapshotCollector() {}
+
+    /** Collects with the body's own memory. */
+    public static Snapshot collect(BotPlayer body) {
+        return collect(body, BotMemory.of(body.getUUID()));
+    }
+
+    public static Snapshot collect(BotPlayer body, BotMemory memory) {
+        MinecraftServer server = body.getServer();
+        if (server != null && !server.isSameThread()) {
+            throw new IllegalStateException("a snapshot is collected on the server thread, not " + Thread.currentThread().getName());
+        }
+        ServerLevel level = body.serverLevel();
+        String dimension = level.dimension().location().toString();
+        BlockPos at = body.blockPosition();
+
+        Snapshot.Builder builder = Snapshot.builder()
+            .gameTime(level.getGameTime())
+            .dimension(dimension)
+            .pos(pos(at))
+            .health(body.getHealth())
+            .hunger(body.getFoodData().getFoodLevel());
+
+        inventory(body, builder);
+        equipment(body, builder);
+        stations(level, dimension, at, memory, builder);
+        containers(level, dimension, at, memory, builder);
+        addGoalFacts(body, builder);
+        return builder.build();
+    }
+
+    /**
+     * The place where structure reports and strategy observations will be added. Both depend on what the active goal
+     * names (a blueprint and its anchor, an observation key), which {@link #collect} is not given yet: when the executor
+     * lands it passes the goal's wants in, and this method fills {@code structures} and {@code observations}. Until
+     * then both stay empty.
+     */
+    private static void addGoalFacts(BotPlayer body, Snapshot.Builder builder) {
+    }
+
+    // ---- inventory ---------------------------------------------------------------------------------------------
+
+    private static void inventory(BotPlayer body, Snapshot.Builder builder) {
+        Inventory inventory = body.getInventory();
+        int foodUnits = 0;
+        // getContainerSize covers the main slots, the armour and the offhand, in that order.
+        for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
+            ItemStack stack = inventory.getItem(slot);
+            if (stack.isEmpty()) continue;
+            ItemKey key = ItemKeys.of(stack.getItem());
+            builder.item(key, stack.getCount());
+            builder.facts(key, factsOf(stack));
+
+            for (ToolClass toolClass : ToolFacts.classesOf(stack)) {
+                // Shears have no mining tier of their own: the resolver asks for them at HAND (Source.MineBlock).
+                builder.tool(toolClass, toolClass == ToolClass.SHEARS ? ToolTier.HAND : ToolFacts.tierOf(stack));
+            }
+
+            FoodProperties food = stack.get(DataComponents.FOOD);
+            if (food != null) foodUnits += food.nutrition() * stack.getCount();
+        }
+        builder.foodUnits(foodUnits);
+    }
+
+    private static void equipment(BotPlayer body, Snapshot.Builder builder) {
+        equip(builder, EquipSlot.HEAD, body.getItemBySlot(EquipmentSlot.HEAD));
+        equip(builder, EquipSlot.CHEST, body.getItemBySlot(EquipmentSlot.CHEST));
+        equip(builder, EquipSlot.LEGS, body.getItemBySlot(EquipmentSlot.LEGS));
+        equip(builder, EquipSlot.FEET, body.getItemBySlot(EquipmentSlot.FEET));
+        equip(builder, EquipSlot.MAINHAND, body.getItemBySlot(EquipmentSlot.MAINHAND));
+        equip(builder, EquipSlot.OFFHAND, body.getItemBySlot(EquipmentSlot.OFFHAND));
+    }
+
+    private static void equip(Snapshot.Builder builder, EquipSlot slot, ItemStack stack) {
+        if (!stack.isEmpty()) builder.equip(slot, ItemKeys.of(stack.getItem()));
+    }
+
+    private static StackFacts factsOf(ItemStack stack) {
+        Map<String, Integer> enchantments = new TreeMap<>();
+        // A book keeps its enchantments apart from the ones it would apply, and the check does not care which.
+        mergeEnchantments(enchantments, stack.getOrDefault(DataComponents.ENCHANTMENTS, ItemEnchantments.EMPTY));
+        mergeEnchantments(enchantments, stack.getOrDefault(DataComponents.STORED_ENCHANTMENTS, ItemEnchantments.EMPTY));
+
+        String potion = "";
+        PotionContents contents = stack.get(DataComponents.POTION_CONTENTS);
+        if (contents != null) {
+            potion = contents.potion().flatMap(Holder::unwrapKey).map(k -> k.location().toString()).orElse("");
+        }
+        return new StackFacts(stack.getCount(), enchantments, potion, Map.of());
+    }
+
+    private static void mergeEnchantments(Map<String, Integer> into, ItemEnchantments enchantments) {
+        for (var entry : enchantments.entrySet()) {
+            // An enchantment that is not in the registry has no id to report.
+            entry.getKey().unwrapKey().ifPresent(k -> into.merge(k.location().toString(), entry.getIntValue(), Math::max));
+        }
+    }
+
+    // ---- stations ----------------------------------------------------------------------------------------------
+
+    private static void stations(ServerLevel level, String dimension, BlockPos at, BotMemory memory, Snapshot.Builder builder) {
+        Map<Block, ItemKey> stationBlocks = stationBlocks();
+        int radius = STATION_SCAN_RADIUS;
+        List<StationSight> found = new ArrayList<>();
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    if (dx * dx + dy * dy + dz * dz > radius * radius) continue;
+                    cursor.set(at.getX() + dx, at.getY() + dy, at.getZ() + dz);
+                    // getBlockState on an unloaded chunk would load it; a snapshot never changes what is loaded.
+                    if (!level.hasChunkAt(cursor)) continue;
+                    BlockState state = level.getBlockState(cursor);
+                    if (state.isAir()) continue;
+                    ItemKey station = stationBlocks.get(state.getBlock());
+                    if (station == null) continue;
+                    found.add(new StationSight(station, pos(cursor), memory.isPlaced(dimension, cursor)));
+                }
+            }
+        }
+        // Nearest first, ties by position, so equal worlds give equal snapshots.
+        Pos origin = pos(at);
+        found.sort(Comparator.<StationSight>comparingLong(s -> s.pos().distSq(origin))
+            .thenComparingInt(s -> s.pos().x()).thenComparingInt(s -> s.pos().y()).thenComparingInt(s -> s.pos().z()));
+        found.forEach(builder::station);
+    }
+
+    private static Map<Block, ItemKey> stationBlocks() {
+        Set<ItemKey> named = RecipeBooks.stations();
+        StationTable cached = stationTable;
+        if (cached.basis() == named) return cached.byBlock();
+
+        Set<ItemKey> all = new LinkedHashSet<>(VANILLA_STATIONS);
+        all.addAll(named);
+        Map<Block, ItemKey> byBlock = new HashMap<>();
+        for (ItemKey station : all) {
+            ResourceLocation id = ResourceLocation.tryParse(station.id());
+            Item item = id == null ? null : BuiltInRegistries.ITEM.getOptional(id).orElse(null);
+            // A station that is not a block (a recipe that names a tool, say) cannot stand in the world.
+            if (item instanceof BlockItem blockItem) byBlock.put(blockItem.getBlock(), station);
+        }
+        // A chipped or damaged anvil is still an anvil to every recipe that names one.
+        ItemKey anvil = ItemKey.of("minecraft:anvil");
+        byBlock.put(Blocks.CHIPPED_ANVIL, anvil);
+        byBlock.put(Blocks.DAMAGED_ANVIL, anvil);
+
+        stationTable = new StationTable(named, Map.copyOf(byBlock));
+        return stationTable.byBlock();
+    }
+
+    // ---- containers --------------------------------------------------------------------------------------------
+
+    /**
+     * Only what the body's memory knows. A container is {@code contentsKnown} when it is within the scan radius, its
+     * chunk is loaded and the same kind of block still stands there; the contents are then what the body last saw, which
+     * an owner who opened the chest since has made stale. Otherwise the contents are withheld (an empty map) so that
+     * nothing reads old memory as the current state: the postcondition answers UNKNOWN and the executor walks over.
+     */
+    private static void containers(ServerLevel level, String dimension, BlockPos at, BotMemory memory, Snapshot.Builder builder) {
+        long radiusSq = (long) STATION_SCAN_RADIUS * STATION_SCAN_RADIUS;
+        for (BotMemory.RememberedContainer container : memory.containers()) {
+            if (!container.dimension().equals(dimension)) continue; // a Pos carries no dimension, so another one's cannot be shown
+            BlockPos pos = container.pos();
+            boolean inRange = pos(pos).distSq(pos(at)) <= radiusSq;
+            boolean stillThere = inRange && level.hasChunkAt(pos)
+                && blockId(level.getBlockState(pos).getBlock()).equals(container.block());
+            builder.container(new ContainerSight(pos(pos), container.block(), stillThere, memory.isPlaced(dimension, pos),
+                stillThere ? container.contents() : Map.of()));
+        }
+    }
+
+    // ---- helpers -----------------------------------------------------------------------------------------------
+
+    private static Pos pos(BlockPos pos) {
+        return new Pos(pos.getX(), pos.getY(), pos.getZ());
+    }
+
+    private static String blockId(Block block) {
+        return BuiltInRegistries.BLOCK.getKey(block).toString();
+    }
+}
