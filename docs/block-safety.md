@@ -18,6 +18,16 @@ Design: `AI-PLAYER-DESIGN.md` 3.5. Bot nodes only (1.21.1). Code: `game.safety`;
 A body that cannot be answered for refuses: no published zones for its owner yet, a level whose record is not loaded yet
 (off the server thread only), a container position that is not loaded.
 
+## Supply containers
+
+The owner can name a container for a body to take from (`use chest at <x> <y> <z>`; design 3.5, `BotMemory.supply`). The
+body may then *use* it (open it, take from it, put into it) as it may its own, and may never *break* it. Using was never
+subject to the protected radius (only breaking is), so a named chest inside the radius is used too; a claim still refuses
+it. Naming lifts the container rule and the workstation rule for that block, not the bed rule (a bed holds nothing to take
+and cannot be named). A double chest is named as one inventory (both halves), and a half joined to it later is not named:
+using needs both halves, so the pair is refused. Naming is the owner's word for a position: a task that finds no container
+there drops it.
+
 ## Threads
 
 `mayBreak` is callable from any thread and allocates nothing when it allows. Off the server thread it trusts the block

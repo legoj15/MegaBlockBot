@@ -13,6 +13,7 @@ import com.legoj15.megablockbot.game.body.BotPlayer;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -215,17 +216,40 @@ public final class SnapshotCollector {
      * chunk is loaded and the same kind of block still stands there; the contents are then what the body last saw, which
      * an owner who opened the chest since has made stale. Otherwise the contents are withheld (an empty map) so that
      * nothing reads old memory as the current state: the postcondition answers UNKNOWN and the executor walks over.
+     *
+     * <p>A container the body may take from (one it placed, or one its owner named: design 3.5) is shown to the planner
+     * even when it is out of sight: its contents are then the remembered ones, marked
+     * {@link ContainerSight#remembered()}, because the plan walks over and counts on what the body last saw there. Only a
+     * container whose chunk is loaded and no longer holds that block is treated as gone, whatever the distance. Each
+     * inventory is one sight, a double chest included (its entry is at one half). A container the owner named and the
+     * body has no memory of is listed with nothing in it, so that it is at least known to be there.
      */
     private static void containers(ServerLevel level, String dimension, BlockPos at, BotMemory memory, Snapshot.Builder builder) {
         long radiusSq = (long) STATION_SCAN_RADIUS * STATION_SCAN_RADIUS;
+        Set<BlockPos> listed = new HashSet<>();
         for (BotMemory.RememberedContainer container : memory.containers()) {
             if (!container.dimension().equals(dimension)) continue; // a Pos carries no dimension, so another one's cannot be shown
             BlockPos pos = container.pos();
+            boolean placed = memory.isPlaced(dimension, pos);
+            boolean named = memory.isSupply(dimension, pos);
             boolean inRange = pos(pos).distSq(pos(at)) <= radiusSq;
-            boolean stillThere = inRange && level.hasChunkAt(pos)
-                && blockId(level.getBlockState(pos).getBlock()).equals(container.block());
-            builder.container(new ContainerSight(pos(pos), container.block(), stillThere, memory.isPlaced(dimension, pos),
-                stillThere ? container.contents() : Map.of()));
+            boolean loaded = level.hasChunkAt(pos);
+            boolean sameBlock = loaded && blockId(level.getBlockState(pos).getBlock()).equals(container.block());
+            boolean stillThere = inRange && sameBlock;
+            listed.add(pos);
+            if (stillThere) {
+                builder.container(new ContainerSight(pos(pos), container.block(), true, placed, placed || named, false,
+                    container.contents()));
+            } else if ((placed || named) && !(loaded && !sameBlock)) {
+                // Out of sight (or in range with its chunk not loaded): what the body remembers, marked as such.
+                builder.container(new ContainerSight(pos(pos), container.block(), false, placed, true, true, container.contents()));
+            } else {
+                builder.container(new ContainerSight(pos(pos), container.block(), false, placed, false, false, Map.of()));
+            }
+        }
+        for (BotMemory.SupplyContainer entry : memory.supply()) {
+            if (!entry.dimension().equals(dimension) || listed.contains(entry.pos())) continue;
+            builder.container(new ContainerSight(pos(entry.pos()), "", false, memory.isPlaced(dimension, entry.pos()), true, false, Map.of()));
         }
     }
 

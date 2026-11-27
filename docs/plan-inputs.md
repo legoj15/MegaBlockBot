@@ -49,12 +49,19 @@ container, moves an item or loads a chunk.
 - `containers`: only `BotMemory`. `contentsKnown` is true when the container is within the radius, its chunk is loaded
   and the same block still stands there; the contents are then what the body last saw (stale if someone emptied it
   since). Otherwise `contentsKnown` is false and the contents are withheld. Other dimensions are not listed.
+  `mayTakeFrom` says whether the body may take from it: the body placed it, or its owner named it (`BotMemory.supply`).
+  For such a container out of sight, or in range with its chunk not loaded, the contents are the remembered ones and
+  `remembered` is set, so that the plan can walk over and count on them; one whose chunk is loaded and no longer holds
+  the block is shown with nothing and may not be taken from. A named container the body has no note of is listed empty.
+  A double chest is one sight, at the half with the lower position hash.
 - `structures` and `observations` are empty. They need the active goal's wants (blueprints, observation keys), which
   `collect` is not given yet; `SnapshotCollector.addGoalFacts` is where they go.
 
 ## BotMemory
 
-Per body UUID (`BotMemory.of(uuid)`): positions of placed blocks per dimension, containers whose contents were seen.
+Per body UUID (`BotMemory.of(uuid)`): positions of placed blocks per dimension, containers whose contents were seen, and
+the containers the owner named for the body to take from (`supply`, one entry per inventory: a double chest is one entry
+holding both halves). `BotMemory.peek(uuid)` reads without making one.
 `save()` is the compact persistent form; `BotMemory.restore(uuid, tag)` reads one back (tolerant of missing or
 malformed parts) and installs it as that body's memory, replacing what was there, which is how a body gets its memory
 back at spawn. Nothing in production calls the `note` methods or `restore` yet: the brain's placement hook, the

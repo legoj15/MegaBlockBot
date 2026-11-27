@@ -293,7 +293,9 @@ id string), inventory and equipment counts by item key, best tool tier per tool 
 units, nearby stations and container contents (radius configurable), and the extra data an
 active goal asks for: per-stack component facts for the item keys a `componentCheck` names
 (enchantments, potion, fill state), a structure report for a build goal, and observations a
-strategy declares (the current offers of the villager a librarian reroll is watching). Collected on the server
+strategy declares (the current offers of the villager a librarian reroll is watching). A container sight also says
+whether the body may take from it (one it placed, or one its owner named: §3.5, supply containers) and, for such a
+container out of sight, shows what the body last noted of it, marked as remembered. Collected on the server
 thread, read-only. Collecting it never changes state (AIBot's collector made capability
 decisions as a side effect).
 
@@ -536,6 +538,10 @@ above, these hold; the code is `core/exec`.**
   shift-click for a whole stack, one right-click per item for part of one) and closes the menu, which hands the cursor
   back to the inventory. A container with no room takes what it can and the task completes; the postcondition says what
   is missing.
+- A withdraw is the same in the other direction (supply containers, 3.5): the planner puts one `withdraw` leaf per
+  container and item in front of the rest of the plan, and the task takes the items with the same clicks. A container
+  that holds fewer than the leaf needs gives nothing (`MISSING_INPUT`, and what it held is noted so the replan counts
+  the truth); an inventory with no room for it is `NO_PROGRESS`, as in the craft task.
 
 ### 3.5 Block safety
 
@@ -562,6 +568,22 @@ Decided in #9 (`game.safety.BlockSafety`, the one place tasks and the nav engine
   type; a position the level holds another block at is pruned, and only on the level's word, never a caller's state.
   Doors, tall plants and beds answer for their other half. Everything the record cannot see is in
   `docs/block-safety.md`.
+
+Supply containers (#12, "craft from a given chest"). The rule above forbids taking from a container the bot did not
+place, and it stays: the one exception is the owner's word. `use chest at <x> <y> <z>` names a container, `forget chest
+at <x> <y> <z>` takes it back, `chests` lists them (only the owner or the console may say it: the rule that guards a
+goal). The list is per body and saved with it (`BotMemory`); naming either half of a double chest names both, and one
+half joined to it later is nobody's word, so the pair is refused. A named container is one the body may *use*: open it,
+take from it, put into it, exactly as it may its own. It may never *break* it, named or not: `mayBreak` does not read
+the list. Whether using a container inside the protected radius is allowed was already decided by the code and is kept:
+yes. `evaluateUse` skips the radius (it only ever stopped breaking, and would only keep a bot from its own chest) and
+asks the claim rule, then the container rule; a supply container passes the container and workstation rules for that
+block (a named barrel is also a job site) and still meets a claim. A bed cannot be named (it holds nothing to take). The
+position is the word: when the task finds no container there it drops the owner's word and what it remembered, so a
+container someone puts there later is not the one that was named. What the body knows of a named container is what it
+noted: the owner showing it (`use` notes the contents at that moment) and what the withdraw task saw when it opened it;
+the planner counts that, marked as remembered while the container is out of sight (4.5: nothing is read from a chest
+the body has not looked inside).
 
 ## 4. Planning pipeline
 

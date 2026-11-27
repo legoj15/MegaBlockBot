@@ -8,7 +8,9 @@ amendments are the contract), 4.2 and 6. Bot node only (1.21.1). Server thread t
 1. Words arrive: `/aiplayer goal <name> <text...>` or a chat line from the body's owner that starts with its name
    (`Bot1, make 4 planks`, `Bot1 make 4 planks`). Both go to `BotTalk.interpret`; the other commands (`cancel [all]`,
    `status`, `pause`, `resume`) skip the language layer and go to `BotTalk.apply` as the matching `Intent`. Commands need
-   `body.mayCommand(source)`; chat is the owner's voice only (an op's chat line is not a command).
+   `body.mayCommand(source)`; chat is the owner's voice only (an op's chat line is not a command). The supply commands
+   (`use chest at <x> <y> <z>`, `forget chest at ...`, `chests`) are words of the fixed grammar like any other, so they
+   take the same two ways in and the same guard; see "Supply containers" below.
 2. `LanguageLayers.current()` (the `FixedGrammar` until a model-backed layer replaces it with `set`) answers with
    `Intent`s for a `LanguageContext` built per message (`RegistryItemSearch`, dimension, owner and bot position, the status
    paragraph, no blueprints, the game's enchantment ids). A layer that already answered is applied at once; one that
@@ -66,8 +68,8 @@ returns its own `Failed`** (the executor does not abort a task that failed itsel
 `waiting()` is true while it waits on the game (a break, a pickup) so the stuck watchdog leaves it alone; `checkpoint()`
 returns hints for where to look after a restart, never facts.
 
-Registered here: `craft` and `equip`. `navigate`, `reach`, `mine`, `recover_drops` and `deposit` are registered by the
-navigation work, not here.
+Registered here: `craft` and `equip`. `navigate`, `reach`, `mine`, `recover_drops`, `deposit` and `withdraw` are registered
+by the navigation work (`TaskFeature`), not here.
 
 What the navigation tasks need from this runtime:
 
@@ -119,6 +121,46 @@ load and whenever a goal ends (`tidyArmed`): the nearest crafting table within r
 placed. Found, it runs `CraftTask.takeUp(pos)` (the craft's own break and pickup, crafting nothing) before the executor is
 ticked again, so the next plan sees the table in the inventory. A failure there is logged, not a goal's failure; the table
 stays, remembered. Covered by `BotRuntimeGameTests.aTableLeftStandingByALogoutIsTakenUp`.
+
+## Supply containers and `withdraw`
+
+The owner names the containers a body may take from (design 3.5): `use chest at <x> <y> <z>` (the position in the
+dimension the words were read in; any container block, whatever the word), `forget chest at ...`, `chests`. `BotTalk`
+carries the three `Intent`s out through `BotSupply`, which answers in a sentence: the dimension must be the body's, the
+position loaded, and a container with slots must stand there (`SupplyChests.look`: a double chest named by either half
+is one inventory, its two halves recorded as one `BotMemory.SupplyContainer`, and its contents are the two together).
+Naming also notes what is inside at that moment, as an owner would say it; naming again refreshes the note.
+
+`BotMemory` keeps the list (saved with the body, the `supply` list of its compound; saves from before it load as none).
+`BlockSafety.mayUseContainer` lets a named container through the container and workstation rules for that block, never
+the claim rule; `mayBreak` never reads the list. Using a container is not subject to the protected radius, and the same
+holds here: a named chest inside the radius is used, and still cannot be broken.
+
+The snapshot shows each container the body may take from (placed by it, or named) as one `ContainerSight` with
+`mayTakeFrom`; out of sight (out of the 8-block scan radius, or its chunk not loaded) it shows the remembered contents with
+`remembered` set; a container whose chunk is loaded and no longer holds that block is shown with nothing. The planner
+(`SolverPlanner`, "Containers the body may take from") counts what such a container holds before anything is gathered or
+crafted and puts one `withdraw` leaf per container and item in front of the plan, nearest container first, never more
+than the container is known to hold and never more than the plan needs after what the body carries; a container ruled out
+by a `PROTECTED` failure, and a stockpile goal's own target, are not counted.
+
+`withdraw` (`WithdrawTask`): leaf params `container`, `dimension`, `count`; the item and the absolute count the body should
+hold afterwards are the leaf goal's. It walks to within 2 blocks, looks at the container, checks block safety (at that
+point: a position far away is not loaded), uses the block so that the container's own rules decide whether it opens, and
+moves items with slot clicks on the menu (a shift-click for a whole stack, one right-click per item for part of one). The
+menu is closed on every exit, which empties the cursor. Before it takes anything it counts the item in the container's
+slots: fewer than the leaf needs is `MissingInput` with nothing taken. Whatever it saw is noted in `BotMemory` (before the
+failure, and after a take), so the replan counts the truth.
+
+- Failures: `Unreachable` (no way there, the container will not open, another dimension, the menu kept closing),
+  `TargetGone` (no container at the position: the memory of it and the owner's word for it are dropped),
+  `Protected` (block safety, the rule in the failure), `MissingInput` (holds fewer; takes none), `NoProgress` (no room in
+  the inventory; what fitted was taken).
+- A goal that already holds when the task starts (a restart after part of it was taken) completes without opening anything.
+- `SupplyChestGameTests`: a named chest supplies a craft; what it holds is taken and the rest gathered; a double chest is
+  one inventory; a chest emptied after the plan is not counted again; a chest nobody named, or taken back, is never
+  opened; only the owner or the console can name one; a named chest is usable inside the protected radius and never
+  breakable.
 
 ## `equip`
 

@@ -275,6 +275,27 @@ final class SolverPlannerTest {
         return run(plan, book(), start, startTools);
     }
 
+    /** What each container the run may take from still holds; null outside {@link #runWithContainers}. */
+    private static Map<Pos, Map<ItemKey, Integer>> shelves;
+
+    /** A run's end state and what its containers hold afterwards. */
+    private record Shelved(Executed executed, Map<Pos, Map<ItemKey, Integer>> left) {
+    }
+
+    /** Runs the plan with containers whose contents the withdraw leaves take from, as a body's menu clicks would. */
+    private static Shelved runWithContainers(Plan plan, Map<ItemKey, Integer> start,
+                                             Map<Pos, Map<ItemKey, Integer>> containers) {
+        Map<Pos, Map<ItemKey, Integer>> held = new LinkedHashMap<>();
+        containers.forEach((at, contents) -> held.put(at, new TreeMap<>(contents)));
+        shelves = held;
+        try {
+            Executed executed = run(plan, start, Map.of());
+            return new Shelved(executed, held);
+        } finally {
+            shelves = null;
+        }
+    }
+
     private static Executed run(Plan plan, RecipeBook book, Map<ItemKey, Integer> start,
                                 Map<ToolClass, ToolTier> startTools) {
         Map<ItemKey, Integer> stock = new TreeMap<>(start);
@@ -361,6 +382,21 @@ final class SolverPlannerTest {
                             + stock.getOrDefault(item, 0);
                 }
                 lose(stock, item, moved); // the container's contents are not tracked: the items leave the body
+            }
+            case "withdraw" -> {
+                // What a container holds is only tracked in a run that was given containers (runWithContainers).
+                if (shelves == null) return "a withdraw leaf ran with no containers to take from";
+                Pos at = Pos.parse(params.get("container"));
+                ItemKey item = ItemKey.of(params.get("item"));
+                int count = Integer.parseInt(params.get("count"));
+                Map<ItemKey, Integer> shelf = shelves.get(at);
+                if (shelf == null) return "withdraw names a container the run has none of: " + at;
+                int held = shelf.getOrDefault(item, 0);
+                if (held < count) {
+                    return "withdraw takes " + count + " of " + item.id() + " from " + at + ", which holds " + held;
+                }
+                lose(shelf, item, count);
+                gain(stock, tools, item, count);
             }
             case "equip", "navigate" -> { /* recorded only; a worn item is still counted in the stock */ }
             default -> { /* a strategy's own task kind: recorded, not simulated */ }
@@ -1596,6 +1632,237 @@ final class SolverPlannerTest {
             assertNull(executed.failure(), context + ": " + executed.failure());
             assertTrue(executed.stock().getOrDefault(goalItem, 0) >= count, context + " ended with " + executed.stock());
         }
+    }
+
+    // ─── Containers the body may take from (design 3.5, supply containers) ───────────────────────
+
+    private static final Pos SHELF_A = new Pos(10, 64, 4);
+    private static final Pos SHELF_B = new Pos(-3, 64, 9);
+
+    /** A container its owner named, out of sight: the contents are what the body remembers of it. */
+    private static ContainerSight supplyBox(Pos at, Map<ItemKey, Integer> contents) {
+        return new ContainerSight(at, "minecraft:chest", false, false, true, true, contents);
+    }
+
+    /** A container the body did not place and was not told to use, as a snapshot shows one it has seen. */
+    private static ContainerSight strangersBox(Pos at, Map<ItemKey, Integer> contents) {
+        return new ContainerSight(at, "minecraft:chest", true, false, false, false, contents);
+    }
+
+    private static Snapshot snapshotWith(Map<ItemKey, Integer> items, ContainerSight... boxes) {
+        Snapshot.Builder builder = Snapshot.builder().gameTime(0).dimension("minecraft:overworld").pos(new Pos(0, 64, 0));
+        items.forEach(builder::item);
+        for (ContainerSight box : boxes) builder.container(box);
+        return builder.build();
+    }
+
+    private static List<NodeSpec> withdrawals(Plan plan) {
+        return leaves(plan).stream().filter(leaf -> leaf.taskKind().equals("withdraw")).toList();
+    }
+
+    private static long withdrawn(Plan plan, ItemKey item) {
+        long total = 0;
+        for (NodeSpec leaf : withdrawals(plan)) {
+            if (leaf.params().get("item").equals(item.id())) total += Long.parseLong(leaf.params().get("count"));
+        }
+        return total;
+    }
+
+    @Test
+    void partOfACraftInAContainerShrinksTheGatherByThatMuchAndIsWithdrawnBeforeTheCrafts() {
+        // A chest takes eight planks and stands at a crafting table of four: twelve planks, three logs, from nothing.
+        Goal goal = new Goal.HaveItem(CHEST, 1);
+        Plan bare = planned(planner(), request(goal, EMPTY, Exclusions.NONE));
+        long logsFromNothing = gathered(bare, OAK_LOG, "mine");
+        assertEquals(3, logsFromNothing, leaves(bare).toString());
+        assertTrue(withdrawals(bare).isEmpty(), "no container, nothing to take from");
+
+        Snapshot snapshot = snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(OAK_PLANKS, 4)));
+        Plan plan = planned(planner(), request(goal, snapshot, Exclusions.NONE));
+        assertEquals(logsFromNothing - 1, gathered(plan, OAK_LOG, "mine"), "four planks in the container are one log fewer");
+
+        assertEquals(1, withdrawals(plan).size(), leaves(plan).toString());
+        NodeSpec take = withdrawals(plan).get(0);
+        assertEquals("4", take.params().get("count"));
+        assertEquals(OAK_PLANKS.id(), take.params().get("item"));
+        assertEquals(SHELF_A.encode(), take.params().get("container"));
+        assertEquals("minecraft:overworld", take.params().get("dimension"));
+        assertEquals(new Goal.HaveItem(OAK_PLANKS, 4), take.goal(), "the goal is the count held once the leaf is done");
+        List<NodeSpec> order = leaves(plan);
+        for (int i = 0; i < order.size(); i++) {
+            if (order.get(i).taskKind().equals("craft")) {
+                assertTrue(i > order.indexOf(take), "the planks are taken before any craft that uses them: " + order);
+            }
+        }
+
+        Shelved shelved = runWithContainers(plan, Map.of(), Map.of(SHELF_A, Map.of(OAK_PLANKS, 4)));
+        assertNull(shelved.executed().failure(), shelved.executed().failure() + " after " + shelved.executed().ran());
+        assertEquals(1, shelved.executed().stock().getOrDefault(CHEST, 0));
+        assertEquals(0, shelved.left().get(SHELF_A).getOrDefault(OAK_PLANKS, 0), "the container gave what it was asked for");
+    }
+
+    @Test
+    void aContainerHoldingAllOfTheNeedLeavesNothingToGather() {
+        Goal goal = new Goal.HaveItem(CHEST, 1);
+        Snapshot snapshot = snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(OAK_PLANKS, 12)));
+        Plan plan = planned(planner(), request(goal, snapshot, Exclusions.NONE));
+        assertTrue(leaves(plan).stream().noneMatch(leaf -> leaf.taskKind().equals("mine")), leaves(plan).toString());
+        assertEquals(12, withdrawn(plan, OAK_PLANKS));
+        assertEquals("withdraw", leaves(plan).get(0).taskKind(), "the planks come first");
+
+        Shelved shelved = runWithContainers(plan, Map.of(), Map.of(SHELF_A, Map.of(OAK_PLANKS, 12)));
+        assertNull(shelved.executed().failure(), shelved.executed().failure());
+        assertEquals(1, shelved.executed().stock().getOrDefault(CHEST, 0));
+    }
+
+    @Test
+    void thePlanTakesOnlyWhatItNeedsAfterWhatTheBodyCarries() {
+        // Twelve planks are needed, five are carried, and the container holds forty: seven are taken, not forty.
+        Goal goal = new Goal.HaveItem(CHEST, 1);
+        Snapshot snapshot = snapshotWith(Map.of(OAK_PLANKS, 5), supplyBox(SHELF_A, Map.of(OAK_PLANKS, 40)));
+        Plan plan = planned(planner(), request(goal, snapshot, Exclusions.NONE));
+        assertEquals(7, withdrawn(plan, OAK_PLANKS), leaves(plan).toString());
+        assertEquals(new Goal.HaveItem(OAK_PLANKS, 12), withdrawals(plan).get(0).goal(), "five carried and seven taken");
+        assertTrue(leaves(plan).stream().noneMatch(leaf -> leaf.taskKind().equals("mine")), leaves(plan).toString());
+
+        Shelved shelved = runWithContainers(plan, Map.of(OAK_PLANKS, 5), Map.of(SHELF_A, Map.of(OAK_PLANKS, 40)));
+        assertNull(shelved.executed().failure(), shelved.executed().failure());
+        assertEquals(33, shelved.left().get(SHELF_A).get(OAK_PLANKS));
+    }
+
+    @Test
+    void aPlanNeverTakesMoreThanTheContainersAreKnownToHoldAndGathersTheRest() {
+        // Twelve planks are needed: three in the far container, four in the near one, five from two logs.
+        Goal goal = new Goal.HaveItem(CHEST, 1);
+        Snapshot snapshot = snapshotWith(Map.of(),
+                supplyBox(SHELF_A, Map.of(OAK_PLANKS, 3)), supplyBox(SHELF_B, Map.of(OAK_PLANKS, 4)));
+        Plan plan = planned(planner(), request(goal, snapshot, Exclusions.NONE));
+        assertEquals(7, withdrawn(plan, OAK_PLANKS), leaves(plan).toString());
+        assertEquals(2, gathered(plan, OAK_LOG, "mine"), "five more planks are two logs");
+        for (NodeSpec take : withdrawals(plan)) {
+            Pos at = Pos.parse(take.params().get("container"));
+            int holds = at.equals(SHELF_A) ? 3 : 4;
+            assertTrue(Integer.parseInt(take.params().get("count")) <= holds, "more than " + at + " holds: " + take.params());
+        }
+        assertEquals(SHELF_B.encode(), withdrawals(plan).get(0).params().get("container"), "the nearer container first");
+
+        Shelved shelved = runWithContainers(plan, Map.of(),
+                Map.of(SHELF_A, Map.of(OAK_PLANKS, 3), SHELF_B, Map.of(OAK_PLANKS, 4)));
+        assertNull(shelved.executed().failure(), shelved.executed().failure() + " after " + shelved.executed().ran());
+        assertEquals(1, shelved.executed().stock().getOrDefault(CHEST, 0));
+    }
+
+    @Test
+    void aContainerTheBodyMayNotTakeFromChangesNothing() {
+        Goal goal = new Goal.HaveItem(CHEST, 1);
+        Plan bare = planned(planner(), request(goal, snapshotWith(Map.of()), Exclusions.NONE));
+        Snapshot strangers = snapshotWith(Map.of(), strangersBox(SHELF_A, Map.of(OAK_PLANKS, 12)));
+        assertEquals(bare, planned(planner(), request(goal, strangers, Exclusions.NONE)),
+                "a chest the owner did not name is not a supply, whatever it holds");
+
+        // The body's own container is one it may take from.
+        Snapshot own = snapshotWith(Map.of(), new ContainerSight(SHELF_A, "minecraft:chest", true, true, Map.of(OAK_PLANKS, 12)));
+        assertEquals(12, withdrawn(planned(planner(), request(goal, own, Exclusions.NONE)), OAK_PLANKS));
+    }
+
+    @Test
+    void aContainerAFailureRuledOutIsNotCounted() {
+        Goal goal = new Goal.HaveItem(CHEST, 1);
+        Snapshot snapshot = snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(OAK_PLANKS, 12)));
+        Exclusions protectedSpot = new Exclusions(Set.of(), Set.of(SHELF_A), List.of());
+        Plan plan = planned(planner(), request(goal, snapshot, protectedSpot));
+        assertTrue(withdrawals(plan).isEmpty(), "the replan after a PROTECTED must not walk back to the same container");
+        assertEquals(3, gathered(plan, OAK_LOG, "mine"));
+    }
+
+    @Test
+    void aStockpileGoalsOwnContainerIsNotItsSupplyButAnotherOneIs() {
+        Goal.Stockpile goal = new Goal.Stockpile(OAK_PLANKS, 8, "minecraft:overworld", SHELF_A);
+        ContainerSight target = new ContainerSight(SHELF_A, "minecraft:chest", true, false, true, false, Map.of(OAK_PLANKS, 3));
+        Snapshot snapshot = snapshotWith(Map.of(), target, supplyBox(SHELF_B, Map.of(OAK_PLANKS, 2)));
+        Plan plan = planned(planner(), request(goal, snapshot, Exclusions.NONE));
+        for (NodeSpec take : withdrawals(plan)) {
+            assertEquals(SHELF_B.encode(), take.params().get("container"), "the target is never taken from for itself");
+        }
+        assertEquals(2, withdrawn(plan, OAK_PLANKS));
+        NodeSpec deposit = leaves(plan).get(leaves(plan).size() - 1);
+        assertEquals("deposit", deposit.taskKind());
+        assertEquals("5", deposit.params().get("count"), "three are in it already");
+
+        Shelved shelved = runWithContainers(plan, Map.of(), Map.of(SHELF_B, Map.of(OAK_PLANKS, 2)));
+        assertNull(shelved.executed().failure(), shelved.executed().failure() + " after " + shelved.executed().ran());
+    }
+
+    @Test
+    void aToolInAContainerIsWithdrawnInsteadOfCraftedOrMined() {
+        // The wooden pickaxe is what the cobblestone needs, and it lies in a container.
+        Snapshot snapshot = snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(WOODEN_PICKAXE, 1)));
+        Plan plan = planned(planner(), request(new Goal.HaveItem(COBBLESTONE, 3), snapshot, Exclusions.NONE));
+        assertEquals(1, withdrawn(plan, WOODEN_PICKAXE), leaves(plan).toString());
+        assertTrue(leaves(plan).stream().noneMatch(leaf -> leaf.taskKind().equals("craft")), leaves(plan).toString());
+        Shelved shelved = runWithContainers(plan, Map.of(), Map.of(SHELF_A, Map.of(WOODEN_PICKAXE, 1)));
+        assertNull(shelved.executed().failure(), shelved.executed().failure() + " after " + shelved.executed().ran());
+        assertEquals(3, shelved.executed().stock().getOrDefault(COBBLESTONE, 0));
+
+        Plan tier = planned(planner(), request(new Goal.HaveToolTier(ToolClass.PICKAXE, ToolTier.WOOD), snapshot, Exclusions.NONE));
+        assertEquals(List.of("withdraw"), leaves(tier).stream().map(NodeSpec::taskKind).toList());
+    }
+
+    @Test
+    void aStationInAContainerIsWithdrawnForTheCraftsThatNeedItInsteadOfCrafted() {
+        // The table is never drawn by a recipe, only stood at: the plan still has to hold it.
+        Goal goal = new Goal.HaveItem(WOODEN_PICKAXE, 1);
+        long logsFromNothing = gathered(planned(planner(), request(goal, EMPTY, Exclusions.NONE)), OAK_LOG, "mine");
+        Snapshot snapshot = snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(CRAFTING_TABLE, 1)));
+        Plan plan = planned(planner(), request(goal, snapshot, Exclusions.NONE));
+        assertEquals(1, withdrawn(plan, CRAFTING_TABLE), leaves(plan).toString());
+        assertTrue(gathered(plan, OAK_LOG, "mine") < logsFromNothing, "four planks of table are not gathered: " + leaves(plan));
+        assertTrue(leaves(plan).stream().noneMatch(leaf -> "crafting_table_from_planks".equals(leaf.params().get("recipe"))),
+                "the table in the container is crafted again: " + leaves(plan));
+        Shelved shelved = runWithContainers(plan, Map.of(), Map.of(SHELF_A, Map.of(CRAFTING_TABLE, 1)));
+        assertNull(shelved.executed().failure(), shelved.executed().failure() + " after " + shelved.executed().ran());
+        assertEquals(1, shelved.executed().stock().getOrDefault(WOODEN_PICKAXE, 0));
+    }
+
+    @Test
+    void anItemTheBodyCouldGatherIsWithdrawnWhenAContainerHoldsIt() {
+        Snapshot snapshot = snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(OAK_LOG, 2)));
+        Plan plan = planned(planner(), request(new Goal.HaveItem(OAK_LOG, 2), snapshot, Exclusions.NONE));
+        assertEquals(List.of("withdraw"), leaves(plan).stream().map(NodeSpec::taskKind).toList());
+        assertEquals(2, withdrawn(plan, OAK_LOG));
+
+        // One short: the container's two come first and a third is gathered.
+        Plan more = planned(planner(), request(new Goal.HaveItem(OAK_LOG, 3), snapshot, Exclusions.NONE));
+        assertEquals(2, withdrawn(more, OAK_LOG));
+        assertEquals(1, gathered(more, OAK_LOG, "mine"));
+        assertEquals(new Goal.HaveItem(OAK_LOG, 3), leaves(more).get(leaves(more).size() - 1).goal());
+        Shelved shelved = runWithContainers(more, Map.of(), Map.of(SHELF_A, Map.of(OAK_LOG, 2)));
+        assertNull(shelved.executed().failure(), shelved.executed().failure() + " after " + shelved.executed().ran());
+        assertEquals(3, shelved.executed().stock().getOrDefault(OAK_LOG, 0));
+    }
+
+    @Test
+    void theFingerprintFollowsWhatTheBodyMayTakeFromContainersInTheGoalsClosureOnly() {
+        SolverPlanner instance = planner();
+        Goal goal = new Goal.HaveItem(STONE_PICKAXE, 1);
+        long base = instance.inputFingerprint(goal, EMPTY);
+
+        long twoPlanks = instance.inputFingerprint(goal, snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(OAK_PLANKS, 2))));
+        assertNotEquals(base, twoPlanks, "planks are in the recipe closure of the pickaxe");
+        assertNotEquals(twoPlanks, instance.inputFingerprint(goal, snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(OAK_PLANKS, 3)))),
+                "how many it may take is read");
+        assertNotEquals(twoPlanks, instance.inputFingerprint(goal, snapshotWith(Map.of(), supplyBox(SHELF_B, Map.of(OAK_PLANKS, 2)))),
+                "which container it takes them from is read");
+        assertEquals(twoPlanks, instance.inputFingerprint(goal, snapshotWith(Map.of(),
+                new ContainerSight(SHELF_A, "minecraft:chest", true, false, true, false, Map.of(OAK_PLANKS, 2)))),
+                "whether the contents are remembered or in sight is not what the plan reads");
+
+        assertEquals(base, instance.inputFingerprint(goal, snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(DIAMOND, 9, EMERALD, 4)))),
+                "what a container holds outside the closure is not read");
+        assertEquals(base, instance.inputFingerprint(goal, snapshotWith(Map.of(), strangersBox(SHELF_A, Map.of(OAK_PLANKS, 12)))),
+                "a container the body may not take from is not read");
+        assertEquals(base, instance.inputFingerprint(goal, snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of()))),
+                "an empty container adds nothing");
     }
 
     // ─── The fingerprint and determinism (item 8) ────────────────────────────────────────────────

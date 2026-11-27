@@ -1,5 +1,6 @@
 package com.legoj15.megablockbot.core.lang;
 
+import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.goal.Goal;
 
 /**
@@ -23,6 +24,18 @@ public sealed interface Intent {
 
     /** Clears a {@link Pause}. */
     record Resume() implements Intent {}
+
+    /**
+     * The owner names a container the body may take from (design 3.5, supply containers). Not a goal: the body keeps the
+     * name and the planner counts what is inside. {@code dimension} is the one the owner's words were read in.
+     */
+    record UseChest(String dimension, Pos pos) implements Intent {}
+
+    /** The owner takes a container off the list {@link UseChest} makes. */
+    record ForgetChest(String dimension, Pos pos) implements Intent {}
+
+    /** Ask which containers the body may take from. */
+    record Chests() implements Intent {}
 
     /** Something to say back, with no action: an answer, a clarifying question, a refusal. */
     record Say(String text) implements Intent {}

@@ -151,6 +151,10 @@ public final class BotTalk {
                     runtime.say("Nothing to resume.");
                 }
             }
+            // The supply list belongs to the body: the answer needs the body the runtime was attached to (apply did that).
+            case Intent.UseChest use -> runtime.say(BotSupply.use(runtime.body(), use.dimension(), use.pos()));
+            case Intent.ForgetChest forget -> runtime.say(BotSupply.forget(runtime.body(), forget.dimension(), forget.pos()));
+            case Intent.Chests chests -> runtime.say(BotSupply.list(runtime.body()));
             case Intent.Status status -> runtime.say(runtime.statusText());
             case Intent.Say say -> runtime.say(say.text());
             case Intent.Unknown unknown -> runtime.say(unknown.reason());

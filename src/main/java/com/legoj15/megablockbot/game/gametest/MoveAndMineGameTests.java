@@ -692,6 +692,18 @@ public final class MoveAndMineGameTests {
      */
     private static AABB registerArena(GameTestHelper helper, NavRun run) {
         AABB box = arena(helper);
+        run.atEnd(allowBreaking(helper));
+        return box;
+    }
+
+    /**
+     * The registration {@link #registerArena} makes, for a test of another class whose body mines inside its arena
+     * through the real runtime: breaking is allowed in this test's arena and nowhere outside the registered ones, as for
+     * the tests here (the rules are global, so a class that sets its own would take these tests' away). Returns what
+     * undoes it; the test calls it however it ends.
+     */
+    static Runnable allowBreaking(GameTestHelper helper) {
+        AABB box = arena(helper);
         ARENAS.put(box, Boolean.TRUE);
         BreakRules.set((level, at, state) -> {
             for (Map.Entry<AABB, Boolean> arena : ARENAS.entrySet()) {
@@ -699,11 +711,10 @@ public final class MoveAndMineGameTests {
             }
             return false;
         });
-        run.atEnd(() -> {
+        return () -> {
             ARENAS.remove(box);
             if (ARENAS.isEmpty()) BreakRules.reset();
-        });
-        return box;
+        };
     }
 
     /** From now on nothing inside this test's arena may be broken. */

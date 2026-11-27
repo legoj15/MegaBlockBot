@@ -2,6 +2,7 @@ package com.legoj15.megablockbot.core.planner;
 
 import com.legoj15.megablockbot.core.EquipSlot;
 import com.legoj15.megablockbot.core.ItemKey;
+import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.ToolClass;
 import com.legoj15.megablockbot.core.ToolTier;
 import com.legoj15.megablockbot.core.acquire.AcquisitionIndex;
@@ -26,6 +27,7 @@ import com.legoj15.solver.SlotLayout;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -87,7 +89,23 @@ import java.util.TreeSet;
  *       {@link Goal.Stockpile} itself and carries the total the container should hold. The moved items leave the
  *       working stock.</li>
  *   <li>{@code navigate}: {@code dimension}, {@code pos}, {@code radius}.</li>
+ *   <li>{@code withdraw}: {@code item}, {@code container} (its position), {@code dimension} and {@code count}, how
+ *       many to take out of that container. The node's goal is the item's absolute count once the leaf is done (what
+ *       the body carried when it was planned, plus what this and the earlier withdrawals of the item take); its
+ *       source is {@code withdraw:<container>}.</li>
  * </ul>
+ *
+ * <h2>Containers the body may take from</h2>
+ * A {@link ContainerSight} the body {@linkplain ContainerSight#mayTakeFrom() may take from} (its own, or one its
+ * owner named) holds stock like the inventory does, for the whole run: what it is known to hold is added to the
+ * working stock first, so the solver credits it before anything is gathered or crafted. The plan then says how much of
+ * it was really used. Every item the run consumed from the working stock ({@code drawn}), plus what it still relies on
+ * holding at the end ({@code relied}: a goal's count, a tool it carries on), had to come from the body's own stock, then
+ * from the containers, then from what the plan makes; so the containers give {@code drawn + relied - carried}, capped at
+ * what they hold, nearest first, and each give is a {@code withdraw} leaf placed in front of every other node. Taking it
+ * all up front is what keeps the leaf goals of the later nodes true: they were counted with the container's items in the
+ * stock. A container is left out when the request's exclusions rule its position out (a failure at it), and the target
+ * of a {@link Goal.Stockpile} is not a supply for that goal.
  */
 public final class SolverPlanner implements Planner {
     /** Solver budgets, SprawlCrafting's pins (docs/handoff/solver-core.md): depth and attempt caps per solve. */
@@ -141,7 +159,11 @@ public final class SolverPlanner implements Planner {
         Run run = new Run(request);
         Step step = run.expand(request.goal());
         if (step.failure() != null) return new PlanOutcome.Unplannable(step.failure());
-        return new PlanOutcome.Planned(finish(request.goal(), step.nodes(), run));
+        Step takes = run.withdrawals();
+        if (takes.failure() != null) return new PlanOutcome.Unplannable(takes.failure());
+        List<NodeSpec> nodes = new ArrayList<>(takes.nodes());
+        nodes.addAll(step.nodes());
+        return new PlanOutcome.Planned(finish(request.goal(), nodes, run));
     }
 
     private Plan finish(Goal goal, List<NodeSpec> roots, Run run) {
@@ -177,7 +199,8 @@ public final class SolverPlanner implements Planner {
      * The working stock, the notes and the sources set aside at one moment, so an attempt that is not kept can be
      * undone: a source set aside while a losing strategy's sub-plan was tried must not be missing from the real plan.
      */
-    private record State(TreeMap<ItemKey, Long> stock, List<String> notes, TreeSet<String> setAside) {}
+    private record State(TreeMap<ItemKey, Long> stock, List<String> notes, TreeSet<String> setAside,
+                         TreeMap<ItemKey, Long> drawn, TreeMap<ItemKey, Long> relied) {}
 
     /** The demand "carry {@code count} of {@code key}", as the one recipe the solver is asked to make (item 11). */
     private record DemandRecipe(ItemKey key, int count) implements RecipeGraphSolver.RecipeInfo<String, ItemKey> {
@@ -226,6 +249,12 @@ public final class SolverPlanner implements Planner {
         private final TreeSet<String> toolPath = new TreeSet<>();
         /** Items whose trade payment is being planned: a payment that needs the item itself is a cycle. */
         private final TreeSet<ItemKey> paying = new TreeSet<>();
+        /** The containers the body may take from, nearest first, and the sum of what they are known to hold. */
+        private final List<ContainerSight> supply;
+        private final TreeMap<ItemKey, Long> supplyTotal = new TreeMap<>();
+        /** What the plan consumed from the working stock, in all, and what it still relies on holding (see the class doc). */
+        private final TreeMap<ItemKey, Long> drawn = new TreeMap<>();
+        private final TreeMap<ItemKey, Long> relied = new TreeMap<>();
         /**
          * One solver-side wrapper per recipe for the whole run: the solver's quantity path matches recipes by
          * identity, so a producers function that built new objects on every call would defeat it.
@@ -242,6 +271,35 @@ public final class SolverPlanner implements Planner {
             for (Map.Entry<ItemKey, Integer> item : snapshot.items().entrySet()) {
                 stock.put(item.getKey(), (long) item.getValue());
             }
+            this.supply = supplyBoxes();
+            for (ContainerSight box : supply) {
+                for (Map.Entry<ItemKey, Integer> held : box.contents().entrySet()) {
+                    if (held.getValue() <= 0) continue;
+                    supplyTotal.merge(held.getKey(), (long) held.getValue(), Long::sum);
+                    stock.merge(held.getKey(), (long) held.getValue(), Long::sum);
+                }
+            }
+        }
+
+        /**
+         * The containers this plan may count: ones the body may take from that are known to hold something, not ruled
+         * out by an earlier failure, and not the target of the goal being planned. Nearest to the body first, then by
+         * position, so equal requests give equal plans.
+         */
+        private List<ContainerSight> supplyBoxes() {
+            Pos target = request.goal() instanceof Goal.Stockpile stockpile
+                    && stockpile.dimension().equals(snapshot.dimension()) ? stockpile.container() : null;
+            Pos here = snapshot.pos();
+            List<ContainerSight> boxes = new ArrayList<>();
+            for (ContainerSight box : snapshot.containers()) {
+                if (!box.mayTakeFrom() || box.contents().isEmpty() || box.pos().equals(target)) continue;
+                if (exclusions.excludes(snapshot.dimension(), box.pos())) continue;
+                boxes.add(box);
+            }
+            boxes.sort(Comparator.comparingLong((ContainerSight box) -> box.pos().distSq(here))
+                    .thenComparingInt(box -> box.pos().x()).thenComparingInt(box -> box.pos().y())
+                    .thenComparingInt(box -> box.pos().z()));
+            return List.copyOf(boxes);
         }
 
         /**
@@ -289,7 +347,10 @@ public final class SolverPlanner implements Planner {
 
         /** Satisfied tiers plan nothing; otherwise the tier's tool item and its item plan (brief P12). */
         Step haveToolTier(Goal.HaveToolTier goal) {
-            if (carriedTier(goal.toolClass()).atLeast(goal.tier())) return Step.ok(List.of());
+            if (carriedTier(goal.toolClass()).atLeast(goal.tier())) {
+                relyOnTool(goal.toolClass(), goal.tier());
+                return Step.ok(List.of());
+            }
             ItemKey toolItem = config.toolItem(goal.toolClass(), goal.tier());
             if (toolItem == null) {
                 return Step.fail(new Failure.MissingTool(goal.toolClass(), goal.tier(),
@@ -312,6 +373,23 @@ public final class SolverPlanner implements Planner {
             return best;
         }
 
+        /**
+         * A plan that goes on with a tool it counted as carried relies on holding that tool. When the body's own
+         * inventory has one that serves, nothing is relied on; otherwise it is the cheapest tool item of the class and
+         * tier in the working stock, which is a container's (or the plan's own, which no container is asked for).
+         */
+        private void relyOnTool(ToolClass toolClass, ToolTier required) {
+            if (snapshot.bestTool(toolClass).atLeast(required)) return;
+            ItemKey cheapest = null;
+            for (Map.Entry<ItemKey, Long> held : stock.entrySet()) {
+                if (held.getValue() <= 0 || toolClasses.get(held.getKey()) != toolClass) continue;
+                ToolTier tier = toolTiers.get(held.getKey());
+                if (!tier.atLeast(required)) continue;
+                if (cheapest == null || tier.ordinal() < toolTiers.get(cheapest).ordinal()) cheapest = held.getKey();
+            }
+            if (cheapest != null) relied.merge(cheapest, 1L, (a, b) -> Math.max(a, b));
+        }
+
         // ─── The item plan ───────────────────────────────────────────────────────────────────────
 
         /**
@@ -320,6 +398,14 @@ public final class SolverPlanner implements Planner {
          * not raise the stock of the goal item ends the plan with a reason rather than looping (item 11).
          */
         Step itemPlan(ItemKey key, int count) {
+            Step step = planItem(key, count);
+            // Whoever asked for the count goes on counting on holding it, whether it was there, taken from a container
+            // or made: until a later node consumes it (removeStock).
+            if (step.failure() == null) relied.merge(key, (long) count, (a, b) -> Math.max(a, b));
+            return step;
+        }
+
+        private Step planItem(ItemKey key, int count) {
             if (held(key) >= count) return Step.ok(List.of());
             if (recipes.producers(key).isEmpty()) return leaf(key, count - held(key));
 
@@ -535,6 +621,8 @@ public final class SolverPlanner implements Planner {
                 if (remainder != null) addStock(remainder, draw.getValue());
             }
             addStock(recipe.result(), step.crafts() * recipe.resultCount());
+            // The station is not drawn, but the craft counts on holding it: a table that lies in a container is taken.
+            if (recipe.station() != null) relied.merge(recipe.station(), 1L, (a, b) -> Math.max(a, b));
             return null;
         }
 
@@ -722,7 +810,10 @@ public final class SolverPlanner implements Planner {
                 return Step.fail(new Failure.MissingTool(null, mine.minTier(),
                         mine.id() + " needs a tool of no known class"));
             }
-            if (carriedTier(mine.toolClass()).atLeast(mine.minTier())) return Step.ok(List.of());
+            if (carriedTier(mine.toolClass()).atLeast(mine.minTier())) {
+                relyOnTool(mine.toolClass(), mine.minTier());
+                return Step.ok(List.of());
+            }
             return toolPrerequisite(mine);
         }
 
@@ -960,6 +1051,46 @@ public final class SolverPlanner implements Planner {
             }
         }
 
+        // ─── Taking from containers ──────────────────────────────────────────────────────────────
+
+        /**
+         * The {@code withdraw} leaves of this run (see the class doc), in item order and, within an item, nearest
+         * container first. Each leaf's goal is the absolute count of the item once it is done.
+         */
+        Step withdrawals() {
+            TreeMap<ItemKey, Long> needed = new TreeMap<>(drawn);
+            relied.forEach((item, count) -> needed.merge(item, count, Long::sum));
+            List<NodeSpec> leaves = new ArrayList<>();
+            for (Map.Entry<ItemKey, Long> entry : needed.entrySet()) {
+                ItemKey item = entry.getKey();
+                long carried = snapshot.count(item);
+                long want = Math.min(supplyTotal.getOrDefault(item, 0L), entry.getValue() - carried);
+                long total = carried;
+                for (ContainerSight box : supply) {
+                    if (want <= 0) break;
+                    long take = Math.min(want, box.count(item));
+                    if (take <= 0) continue;
+                    want -= take;
+                    total += take;
+                    if (total > Integer.MAX_VALUE) {
+                        return Step.fail(internal("the stock of " + item.id() + " exceeds what a goal can count"));
+                    }
+                    Map<String, String> params = new TreeMap<>();
+                    params.put("item", item.id());
+                    params.put("count", Long.toString(take));
+                    params.put("container", box.pos().encode());
+                    params.put("dimension", snapshot.dimension());
+                    leaves.add(NodeSpec.leaf(new Goal.HaveItem(item, (int) total), "withdraw", params,
+                            "withdraw:" + box.pos().encode()));
+                    if (box.remembered()) {
+                        note(item.id() + ": " + take + " from the container at " + box.pos().encode()
+                                + ", as the body remembers it (it cannot see it from here)");
+                    }
+                }
+            }
+            return Step.ok(leaves);
+        }
+
         // ─── Stock and notes ─────────────────────────────────────────────────────────────────────
 
         private void note(String line) {
@@ -978,6 +1109,12 @@ public final class SolverPlanner implements Planner {
             long have = held(item) - count;
             if (have > 0) stock.put(item, have);
             else stock.remove(item);
+            if (count <= 0) return;
+            // A unit consumed was one the plan relied on holding, if anything was: it is spent, not held.
+            drawn.merge(item, count, Long::sum);
+            long reliedOn = relied.getOrDefault(item, 0L) - count;
+            if (reliedOn > 0) relied.put(item, reliedOn);
+            else relied.remove(item);
         }
 
         /** Brings the stock of an item up to {@code count} when a strategy's nodes did not account for it already. */
@@ -987,7 +1124,8 @@ public final class SolverPlanner implements Planner {
         }
 
         private State mark() {
-            return new State(new TreeMap<>(stock), new ArrayList<>(notes), new TreeSet<>(setAside));
+            return new State(new TreeMap<>(stock), new ArrayList<>(notes), new TreeSet<>(setAside),
+                    new TreeMap<>(drawn), new TreeMap<>(relied));
         }
 
         private void restore(State state) {
@@ -995,6 +1133,10 @@ public final class SolverPlanner implements Planner {
             stock.putAll(state.stock());
             notes.clear();
             notes.addAll(state.notes());
+            drawn.clear();
+            drawn.putAll(state.drawn());
+            relied.clear();
+            relied.putAll(state.relied());
             if (!setAside.equals(state.setAside())) {
                 setAside.clear();
                 setAside.addAll(state.setAside());
@@ -1123,12 +1265,33 @@ public final class SolverPlanner implements Planner {
             else if (!sight.contentsKnown()) text.append("unknown");
             else text.append(sight.count(stockpile.key()));
         }
+        text.append(";take=");
+        Pos stockpileTarget = goal instanceof Goal.Stockpile stockpile ? stockpile.container() : null;
+        for (ContainerSight box : sortedByPosition(snapshot.containers())) {
+            if (!box.mayTakeFrom() || box.pos().equals(stockpileTarget)) continue;
+            StringBuilder held = new StringBuilder();
+            // What a plan may take from a container, among the items it reads the stock of; a goal the planner cannot
+            // see into reads them all. Whether the contents are remembered or in sight is not read.
+            for (Map.Entry<ItemKey, Integer> entry : new TreeMap<>(box.contents()).entrySet()) {
+                if (entry.getValue() > 0 && (everything || read.contains(entry.getKey()))) {
+                    held.append(entry.getKey().id()).append(':').append(entry.getValue()).append(',');
+                }
+            }
+            if (held.length() > 0) text.append(box.pos().encode()).append('{').append(held).append('}');
+        }
         long hash = 0xcbf29ce484222325L;
         for (int i = 0; i < text.length(); i++) {
             hash ^= text.charAt(i);
             hash *= 0x100000001b3L;
         }
         return hash;
+    }
+
+    private static List<ContainerSight> sortedByPosition(List<ContainerSight> boxes) {
+        List<ContainerSight> sorted = new ArrayList<>(boxes);
+        sorted.sort(Comparator.comparingInt((ContainerSight box) -> box.pos().x())
+                .thenComparingInt(box -> box.pos().y()).thenComparingInt(box -> box.pos().z()));
+        return sorted;
     }
 
     /**

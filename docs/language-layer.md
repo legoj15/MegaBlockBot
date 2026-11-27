@@ -23,6 +23,10 @@ no-model implementation; `ModelLanguageLayer` is the one that asks a language mo
   `new ModelLanguageLayer(settings)` from the result (provider `none` behaves exactly as `FixedGrammar`).
 - `FixedGrammar` exposes its count, level and radius limits and its equip-slot rule as public statics, so the model's
   goals are held to the same ranges and filed the same way. Change them there, not here.
+- The supply commands of the grammar (`use chest at <x> <y> <z>`, `forget chest at ...`, `chests`: `Intent.UseChest`,
+  `ForgetChest`, `Chests`) are carried out like any grammar intent, and the grammar goes first, so a message of those is
+  understood without a request. The model has no tool for them (the seven tools above are unchanged): a loosely worded
+  "you may take from the chest over there" gets the grammar's `Unknown` plus whatever the model says.
 
 ## What the model is asked, and what it is not
 

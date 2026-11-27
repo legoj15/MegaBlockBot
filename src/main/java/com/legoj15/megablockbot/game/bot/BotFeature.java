@@ -4,6 +4,7 @@ import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.core.lang.model.ModelLanguageLayer;
 import com.legoj15.megablockbot.game.body.BotBrains;
 import com.legoj15.megablockbot.game.gametest.BotRuntimeGameTests;
+import com.legoj15.megablockbot.game.gametest.SupplyChestGameTests;
 import com.legoj15.megablockbot.game.lang.ModelLanguageConfig;
 import com.legoj15.megablockbot.game.task.CraftTask;
 import com.legoj15.megablockbot.game.task.EquipTask;
@@ -43,6 +44,6 @@ public final class BotFeature {
         // The planner thread belongs to the server that started it.
         Platform.loader().onServerStopping(server -> BotPlanner.shutdown());
 
-        Platform.loader().registerGameTests(BotRuntimeGameTests.class);
+        Platform.loader().registerGameTests(BotRuntimeGameTests.class, SupplyChestGameTests.class);
     }
 }

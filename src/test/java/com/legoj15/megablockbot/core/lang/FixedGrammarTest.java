@@ -347,6 +347,48 @@ class FixedGrammarTest {
     }
 
     @Test
+    void useChestNamesAContainerInTheContextDimension() {
+        assertEquals(new Intent.UseChest(DIMENSION, new Pos(100, 64, -200)), parse("use chest at 100 64 -200").get(0));
+        assertEquals(1, parse("use chest at 100 64 -200").size());
+        // The owner's own coordinates stand for themselves, and case does not matter.
+        assertEquals(new Intent.UseChest(DIMENSION, new Pos(10, 63, -8)), parse("Use Chest At ~ ~-1 ~").get(0));
+    }
+
+    @Test
+    void forgetChestTakesItBack() {
+        assertEquals(new Intent.ForgetChest(DIMENSION, new Pos(1, 2, 3)), parse("forget chest at 1 2 3").get(0));
+        assertEquals(new Intent.ForgetChest(DIMENSION, new Pos(12, 64, -8)), parse("forget chest at ~2 ~ ~").get(0));
+    }
+
+    @Test
+    void chestsAsksForTheList() {
+        assertEquals(new Intent.Chests(), parse("chests").get(0));
+        assertEquals(1, parse("chests").size());
+    }
+
+    @Test
+    void aChestCommandThatIsNotWholeIsUnknownNotGuessed() {
+        assertUnknown(parse("use chest"));
+        assertUnknown(parse("use chest at 1 2"));
+        assertUnknown(parse("use chest 1 2 3"));
+        assertUnknown(parse("use chest at 1 2 three"));
+        assertUnknown(parse("use chest at 1 2 3 4"));
+        assertUnknown(parse("use barrel at 1 2 3"));
+        assertUnknown(parse("forget chest at 1 2"));
+        assertUnknown(parse("forget everything"));
+        assertUnknown(parse("chests please"));
+        assertUnknown(parse("use chest at ~2147483647 2 3"));
+    }
+
+    @Test
+    void chestCommandsFollowOthersInOneMessage() {
+        List<Intent> intents = parse("use chest at 1 2 3 then make 4 oak planks");
+        assertEquals(2, intents.size());
+        assertEquals(new Intent.UseChest(DIMENSION, new Pos(1, 2, 3)), intents.get(0));
+        assertEquals(new Goal.HaveItem(ItemKey.of("oak_planks"), 4), assertInstanceOf(Intent.SetGoal.class, intents.get(1)).goal());
+    }
+
+    @Test
     void cancelForms() {
         assertEquals(new Intent.Cancel(false), parse("cancel").get(0));
         assertEquals(new Intent.Cancel(true), parse("stop all").get(0));

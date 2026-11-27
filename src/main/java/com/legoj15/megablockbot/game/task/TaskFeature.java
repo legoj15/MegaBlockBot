@@ -10,6 +10,8 @@ package com.legoj15.megablockbot.game.task;
  *   <li>{@value #MINE}: break blocks until the body holds a count of an item ({@link MineTask}).</li>
  *   <li>{@value #RECOVER_DROPS}: pick up what a death dropped ({@link RecoverDropsTask}).</li>
  *   <li>{@value #DEPOSIT}: put items into a container ({@link DepositTask}).</li>
+ *   <li>{@value #WITHDRAW}: take items out of a container its owner named (or the body placed), as a player does
+ *       ({@link WithdrawTask}).</li>
  * </ul>
  *
  * <p>Called from {@code NavFeature.init()} for now, since the tasks are built on the navigator; the bot runtime
@@ -24,6 +26,8 @@ public final class TaskFeature {
     /** The kind of the node the executor inserts after a death; the name is the executor's ({@code DeathHandling}). */
     public static final String RECOVER_DROPS = "recover_drops";
     public static final String DEPOSIT = "deposit";
+    /** The kind the planner's supply leaves bind to ({@code SolverPlanner}, "withdraw"). */
+    public static final String WITHDRAW = "withdraw";
 
     private TaskFeature() {}
 
@@ -33,5 +37,6 @@ public final class TaskFeature {
         TaskRegistry.register(MINE, MineTask::new);
         TaskRegistry.register(RECOVER_DROPS, (leaf, hints) -> new RecoverDropsTask(leaf));
         TaskRegistry.register(DEPOSIT, (leaf, hints) -> new DepositTask(leaf));
+        TaskRegistry.register(WITHDRAW, (leaf, hints) -> new WithdrawTask(leaf));
     }
 }

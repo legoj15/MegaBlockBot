@@ -44,6 +44,10 @@ import java.util.regex.Pattern;
  *       resolved exactly through {@link ItemSearch#byId}; when any of the four is missing the clause is read as
  *       the item list above instead</li>
  *   <li>{@code stockpile <count> <item> at <x> <y> <z>} — into the context's dimension</li>
+ *   <li>{@code use chest at <x> <y> <z>} — {@code UseChest}: the container there, in the context's dimension, is one the
+ *       body may take items from (a "supply container", design 3.5); {@code forget chest at <x> <y> <z>} takes it off
+ *       that list and {@code chests} asks for the list. Not goals: the body keeps them, and what such a container holds
+ *       counts toward whatever goal comes next. Any container block can be named, whatever the word {@code chest}</li>
  *   <li>{@code build <blueprint> at <x> <y> <z>} — the blueprint must be in {@link LanguageContext#blueprints()}</li>
  *   <li>{@code goto|go to|come to <x> <y> <z> [within <r>]} — the radius is 0 to 256, default 2</li>
  *   <li>{@code come here|come} — to where the owner stands, within 3</li>
@@ -77,8 +81,9 @@ import java.util.regex.Pattern;
  * must be one of {@link LanguageContext#enchantments()} when that set is not empty; an empty set means the game's
  * ids are not known yet and the id is taken as typed. Coordinates accept {@code ~}
  * for the owner's own coordinate and {@code ~n} offsets (one that leaves the int range is {@code Unknown}), in
- * every command that takes them. The {@code at} separator of {@code stockpile} and {@code build} is the token
- * four from the end, so a blueprint or item word of {@code at} before it stays part of the name.
+ * every command that takes them (the chest commands included). The {@code at} separator of {@code stockpile} and
+ * {@code build} is the token four from the end, so a blueprint or item word of {@code at} before it stays part of the
+ * name; {@code use chest at} and {@code forget chest at} are exactly those six words, with nothing before or after.
  *
  * <p>An exception while interpreting is logged at WARNING through {@link System.Logger} with its stack trace
  * and reaches the owner as a plain {@code Unknown}.
@@ -183,6 +188,9 @@ public final class FixedGrammar implements LanguageLayer {
             case "tool": return parseTool(tokens);
             case "equip": return parseEquip(tokens, context);
             case "stockpile": return parseStockpile(tokens, context);
+            case "use":
+            case "forget": return parseChest(tokens, context);
+            case "chests": return tokens.size() == 1 ? new Intent.Chests() : unknown("'chests' is on its own");
             case "build": return parseBuild(tokens, context);
             case "goto":
             case "go":
@@ -347,6 +355,19 @@ public final class FixedGrammar implements LanguageLayer {
         Resolved item = resolveItem(joinWords(tokens, 2, size - 4), context.items());
         if (item.error() != null) return unknown(item.error());
         return new Intent.SetGoal(new Goal.Stockpile(item.key(), count, context.dimension(), container));
+    }
+
+    /** {@code use chest at <x> <y> <z>} and {@code forget chest at <x> <y> <z>}: exactly six words. */
+    private Intent parseChest(List<String> tokens, LanguageContext context) {
+        String verb = tokens.get(0);
+        if (tokens.size() != 6 || !tokens.get(1).equals("chest") || !tokens.get(2).equals("at")) {
+            return unknown("'" + verb + "' takes a spot: '" + verb + " chest at 100 64 -200'");
+        }
+        Pos container = coords(tokens.subList(3, 6), context.ownerPos());
+        if (container == null) return unknown("That is not a position: three coordinates, with ~ for mine");
+        return verb.equals("use")
+                ? new Intent.UseChest(context.dimension(), container)
+                : new Intent.ForgetChest(context.dimension(), container);
     }
 
     private Intent parseBuild(List<String> tokens, LanguageContext context) {

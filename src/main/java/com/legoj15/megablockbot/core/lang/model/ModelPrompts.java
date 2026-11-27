@@ -82,6 +82,10 @@ final class ModelPrompts {
             case Intent.Status status -> "status";
             case Intent.Pause pause -> "pause";
             case Intent.Resume resume -> "resume";
+            // The model has no tool for the owner's chests: these are only ever the grammar's.
+            case Intent.UseChest use -> "a chest the bot may take from, at " + use.pos();
+            case Intent.ForgetChest forget -> "a chest the bot may no longer take from, at " + forget.pos();
+            case Intent.Chests chests -> "the list of chests the bot may take from";
             case Intent.Say say -> "a reply to the owner";
             // Never passed in: the grammar's Unknowns are what the model is asked about.
             case Intent.Unknown unknown -> "something it could not read";
