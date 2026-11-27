@@ -50,6 +50,12 @@ public interface LoaderServices {
     void onBlockPlaced(BlockChangeListener listener);
 
     /**
+     * Runs the listener when a player sends a chat message, on the server thread. It observes: it cannot cancel the
+     * message, and a message another handler cancelled is not reported.
+     */
+    void onChatMessage(ChatListener listener);
+
+    /**
      * Registers the vanilla {@code @GameTest} methods of the given classes. A no-op unless GameTests are enabled, so it
      * is safe to call on every start.
      */

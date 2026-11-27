@@ -3,6 +3,7 @@ package com.legoj15.megablockbot.platform.neoforge;
 //? if neoforge {
 import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.platform.BlockChangeListener;
+import com.legoj15.megablockbot.platform.ChatListener;
 import com.legoj15.megablockbot.platform.LoaderServices;
 import com.mojang.brigadier.CommandDispatcher;
 import java.nio.file.Path;
@@ -23,6 +24,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.state.BlockState;
 import net.neoforged.bus.api.EventPriority;
+import net.neoforged.neoforge.event.ServerChatEvent;
 import net.neoforged.neoforge.event.TagsUpdatedEvent;
 import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.server.ServerStartingEvent;
@@ -129,6 +131,18 @@ public final class NeoForgeLoaderServices implements LoaderServices {
         });
         *///?} else {
         throw new UnsupportedOperationException("onBlockPlaced is implemented for bot nodes only");
+        //?}
+    }
+
+    @Override
+    public void onChatMessage(ChatListener listener) {
+        //? if bot {
+        /*// LOWEST skips a message another listener cancelled. The event is posted on the server thread (the chat packet
+        // handler runs its work through server.execute) and this only observes: the line still reaches everyone.
+        NeoForge.EVENT_BUS.addListener(EventPriority.LOWEST, ServerChatEvent.class,
+                event -> listener.chat(event.getPlayer(), event.getRawText()));
+        *///?} else {
+        throw new UnsupportedOperationException("onChatMessage is implemented for bot nodes only");
         //?}
     }
 

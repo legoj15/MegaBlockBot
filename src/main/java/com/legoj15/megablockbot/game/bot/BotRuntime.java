@@ -1,0 +1,387 @@
+package com.legoj15.megablockbot.game.bot;
+
+import com.legoj15.megablockbot.MegaBlockBot;
+import com.legoj15.megablockbot.core.Pos;
+import com.legoj15.megablockbot.core.exec.ExecutorConfig;
+import com.legoj15.megablockbot.core.exec.ExecutorHost;
+import com.legoj15.megablockbot.core.exec.ExecutorView;
+import com.legoj15.megablockbot.core.exec.GoalExecutor;
+import com.legoj15.megablockbot.core.exec.GoalResult;
+import com.legoj15.megablockbot.core.exec.PlanTicket;
+import com.legoj15.megablockbot.core.exec.ReflexHold;
+import com.legoj15.megablockbot.core.goal.Goal;
+import com.legoj15.megablockbot.core.goal.Postconditions;
+import com.legoj15.megablockbot.core.plan.NodeSpec;
+import com.legoj15.megablockbot.core.plan.PlanRequest;
+import com.legoj15.megablockbot.core.plan.Profile;
+import com.legoj15.megablockbot.core.snapshot.Snapshot;
+import com.legoj15.megablockbot.core.task.Failure;
+import com.legoj15.megablockbot.core.task.Task;
+import com.legoj15.megablockbot.core.task.TaskState;
+import com.legoj15.megablockbot.core.task.TickResult;
+import com.legoj15.megablockbot.game.body.BotBrain;
+import com.legoj15.megablockbot.game.body.BotPlayer;
+import com.legoj15.megablockbot.game.body.DeathRecord;
+import com.legoj15.megablockbot.game.plan.BotMemory;
+import com.legoj15.megablockbot.game.plan.SnapshotCollector;
+import com.legoj15.megablockbot.game.task.CraftTask;
+import com.legoj15.megablockbot.game.task.TaskRegistry;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import javax.annotation.Nullable;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.Tag;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.item.ItemStack;
+
+/**
+ * The brain of one body (design 3): it owns a {@link GoalExecutor} and is the executor's host, so a goal the owner
+ * states becomes a plan on the planner thread, tasks on the server thread, and a result in the owner's chat. Nothing
+ * in it knows how to craft or walk: a leaf's task comes from the {@link TaskRegistry}, which the features fill.
+ *
+ * <p>Server thread only, except {@link BotPlanner}'s thread, which only ever sees immutable plan requests.
+ *
+ * <p><b>Saving.</b> The brain's compound holds a schema number, the executor's save form as NBT ({@link NbtForm}) and
+ * the body's {@link BotMemory}. The memory belongs to the body's UUID, which the brain does not know until it is first
+ * ticked (the body is still being built when it loads), so a loaded memory is parked and installed on the first tick.
+ */
+public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
+    /** Version of this brain's save form; a save with another one does not load. */
+    static final int SAVE_SCHEMA = 1;
+
+    /** How long a death's drops are worth walking back to: five minutes of game time, about when they despawn. */
+    static final long DROPS_RECOVERABLE_TICKS = 5L * 60L * 20L;
+
+    private final GoalExecutor<BotPlayer> executor;
+
+    /** The instance of the body this brain last served: replaced on a respawn, which hands the brain to a new one. */
+    @Nullable
+    private BotPlayer body;
+    @Nullable
+    private UUID bodyId;
+    /** A loaded memory not yet installed: see the class comment. */
+    @Nullable
+    private CompoundTag pendingMemory;
+
+    /**
+     * A table this body put down and was stopped before it took it up again (a restart, a cancel, a failure) is taken
+     * up before the executor goes on: the planner counts the table in the inventory, so one left standing would cost a
+     * goal its planks. Looked for after a load and whenever a goal ends; {@link #tidy} is the task doing it.
+     */
+    private boolean tidyArmed;
+    @Nullable
+    private Task<BotPlayer> tidy;
+
+    /** The task the executor last asked for: the one whose end resets the body's input. */
+    @Nullable
+    private Task<BotPlayer> currentTask;
+    private boolean taskWasActive;
+
+    /** The last goal result, as a line; what a status says about an idle bot. */
+    @Nullable
+    private GoalResult lastResult;
+    /** The command being carried out, so the answer to it also goes to whoever typed it. */
+    @Nullable
+    private CommandSourceStack feedback;
+
+    public BotRuntime() {
+        this.executor = new GoalExecutor<>(this, new Postconditions(), ExecutorConfig.defaults());
+    }
+
+    /** The runtime driving this body, or null when it has another brain (a test's, the navigation dev command's). */
+    @Nullable
+    public static BotRuntime of(BotPlayer body) {
+        return body.brain() instanceof BotRuntime runtime ? runtime : null;
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // What commands and chat do (BotTalk)
+    // ---------------------------------------------------------------------------------------------------------
+
+    /** Starts the goal now, or queues it behind the one running (design 3.4, the FIFO queue). */
+    public void submit(Goal goal) {
+        executor.submit(goal);
+    }
+
+    public void cancel(boolean all) {
+        if (all) executor.cancelAll();
+        else executor.cancel();
+    }
+
+    public void pause() {
+        executor.pause();
+    }
+
+    public void resume() {
+        executor.resume();
+    }
+
+    /** What the executor is doing, as an immutable picture. */
+    public ExecutorView view() {
+        return executor.view();
+    }
+
+    /** The goal that ended last, or null when none has since the body was made. Not saved. */
+    @Nullable
+    public GoalResult lastResult() {
+        return lastResult;
+    }
+
+    /** The status paragraph: which goal, which step, what waits. */
+    public String statusText() {
+        return BotSpeech.status(executor.view(), lastResult == null ? null : BotSpeech.result(lastResult));
+    }
+
+    /** True while a goal is running or paused. */
+    public boolean hasGoal() {
+        return executor.active();
+    }
+
+    /** Makes this the body whose answers go out, and installs a parked memory. Every entry point calls it first. */
+    void attach(BotPlayer current) {
+        if (body != current) {
+            body = current;
+            bodyId = current.getUUID();
+        }
+        if (pendingMemory != null) {
+            BotMemory.restore(current.getUUID(), pendingMemory);
+            pendingMemory = null;
+        }
+    }
+
+    /**
+     * Runs {@code action} with {@code source} told everything the bot says meanwhile, so a command's own feedback
+     * includes the result it caused (a cancel publishes its CANCELLED result before the call returns).
+     */
+    void withFeedback(@Nullable CommandSourceStack source, Runnable action) {
+        CommandSourceStack before = feedback;
+        feedback = source;
+        try {
+            action.run();
+        } finally {
+            feedback = before;
+        }
+    }
+
+    /**
+     * The bot says something to its owner as a system message prefixed with its name. The log always gets the line. With
+     * the owner online they get it in chat; the source of the command being carried out gets it too unless it is that
+     * same player (they would read it twice). With no owner online it goes to the log and the command's feedback only.
+     */
+    void say(String text) {
+        String name = body == null ? "bot" : body.getGameProfile().getName();
+        String line = "<" + name + "> " + text;
+        MegaBlockBot.LOGGER.info("{}", line);
+        ServerPlayer owner = ownerOnline();
+        if (owner != null) owner.sendSystemMessage(Component.literal(line));
+        if (feedback != null && !(owner != null && feedback.getEntity() == owner)) {
+            feedback.sendSuccess(() -> Component.literal(line), false);
+        }
+    }
+
+    @Nullable
+    ServerPlayer ownerOnline() {
+        if (body == null || body.ownerId() == null) return null;
+        MinecraftServer server = body.getServer();
+        return server == null ? null : server.getPlayerList().getPlayer(body.ownerId());
+    }
+
+    @Nullable
+    BotPlayer body() {
+        return body;
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // BotBrain
+    // ---------------------------------------------------------------------------------------------------------
+
+    @Override
+    public void tick(BotPlayer current) {
+        attach(current);
+        // The executor waits for the table to be back in the inventory: its replan would plan without it.
+        if (tidyTick(current)) return;
+        executor.tick(current, reflexHold(current));
+        // A task that has ended may have left the body walking: its movement input is reset once, the tick it ends. A
+        // hold a command put on a body with no goal is never touched, because no task was ever active for it.
+        boolean active = currentTask != null && (currentTask.state() == TaskState.RUNNING || currentTask.state() == TaskState.PAUSED);
+        if (taskWasActive && !active) current.input().reset();
+        taskWasActive = active;
+    }
+
+    /** True while the leftover-table task has the body this tick. */
+    private boolean tidyTick(BotPlayer current) {
+        if (tidy == null && tidyArmed && !(currentTask != null && currentTask.state() == TaskState.RUNNING)) {
+            tidyArmed = false;
+            BlockPos leftover = CraftTask.leftoverTable(current);
+            if (leftover != null) {
+                MegaBlockBot.LOGGER.info("{} takes up the crafting table it left standing at {}",
+                        current.getGameProfile().getName(), leftover.toShortString());
+                tidy = CraftTask.takeUp(leftover);
+                tidy.start(current);
+            }
+        }
+        if (tidy == null) return false;
+        TickResult result = tidy.tick(current);
+        if (result instanceof TickResult.Running) return true;
+        if (result instanceof TickResult.Failed failed) {
+            // Not a goal's failure: the table stays, remembered, and the next craft that needs one takes it up.
+            MegaBlockBot.LOGGER.warn("{} could not take up the crafting table it left standing: {}",
+                    current.getGameProfile().getName(), BotSpeech.reason(failed.failure()));
+        }
+        tidy = null;
+        return false;
+    }
+
+    private ReflexHold reflexHold(BotPlayer current) {
+        try {
+            ReflexHold hold = ReflexSources.current().holdFor(current);
+            return hold == null ? ReflexHold.NONE : hold;
+        } catch (RuntimeException e) {
+            // Logged with its stack trace, and the body is the executor's this tick: a reflex bug must not stop the server.
+            MegaBlockBot.LOGGER.error("The reflex source threw for {}; treating the body as free this tick",
+                    current.getGameProfile().getName(), e);
+            return ReflexHold.NONE;
+        }
+    }
+
+    @Override
+    public void onDeath(BotPlayer dead, DeathRecord death) {
+        attach(dead);
+        if (tidy != null) {
+            tidy.abort(dead, "died");
+            tidy = null;
+        }
+        List<Pos> drops = new ArrayList<>();
+        for (BlockPos drop : death.dropPositions()) drops.add(pos(drop));
+        executor.onDeath(new Failure.Died(death.dimension(), pos(death.pos()), drops, death.gameTime(),
+                "the body died at " + death.pos().toShortString()));
+    }
+
+    @Override
+    public void onRespawn(BotPlayer newBody) {
+        attach(newBody);
+        executor.onRespawn();
+    }
+
+    @Override
+    public boolean wantsToStayLoaded() {
+        return executor.active();
+    }
+
+    @Override
+    public void save(CompoundTag tag, HolderLookup.Provider registries) {
+        tag.putInt("schema", SAVE_SCHEMA);
+        tag.put("executor", NbtForm.toTag(executor.save()));
+        if (bodyId != null) tag.put("memory", BotMemory.of(bodyId).save());
+        else if (pendingMemory != null) tag.put("memory", pendingMemory.copy());
+    }
+
+    @Override
+    public void load(CompoundTag tag, HolderLookup.Provider registries) {
+        // A body saved with no brain of ours (or a brain that had nothing to say) has an empty compound.
+        if (tag.isEmpty()) return;
+        int schema = tag.getInt("schema");
+        if (schema != SAVE_SCHEMA) {
+            throw new IllegalArgumentException("the saved brain has schema " + schema + ", this build reads " + SAVE_SCHEMA);
+        }
+        if (tag.contains("memory", Tag.TAG_COMPOUND)) pendingMemory = tag.getCompound("memory").copy();
+        if (tag.contains("executor", Tag.TAG_COMPOUND)) {
+            // No body yet: the executor takes the live one with its first tick, and replans then (design 3.4).
+            executor.load(NbtForm.toMap(tag.getCompound("executor")), null);
+        }
+        // Whatever the last session was in the middle of, a table it had put down is still standing.
+        tidyArmed = true;
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // ExecutorHost
+    // ---------------------------------------------------------------------------------------------------------
+
+    @Override
+    public Snapshot snapshot(BotPlayer current, Goal goal) {
+        return SnapshotCollector.collect(current);
+    }
+
+    /** Where the body stands and what it carries: anything the stuck watchdog should count as progress changes it. */
+    @Override
+    public long progressSignature(BotPlayer current) {
+        long hash = current.blockPosition().asLong();
+        Inventory inventory = current.getInventory();
+        for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
+            ItemStack stack = inventory.getItem(slot);
+            if (stack.isEmpty()) continue;
+            hash = hash * 31 + BuiltInRegistries.ITEM.getId(stack.getItem());
+            hash = hash * 31 + stack.getCount();
+            hash = hash * 31 + slot;
+        }
+        return hash;
+    }
+
+    @Override
+    public Task<BotPlayer> createTask(NodeSpec leaf, Map<String, String> hints) {
+        // The registry answers a kind nobody registered with a task that fails at once, naming the kind.
+        Task<BotPlayer> task = TaskRegistry.create(leaf, hints);
+        currentTask = task;
+        return task;
+    }
+
+    @Override
+    public PlanTicket plan(PlanRequest request) {
+        return BotPlanner.plan(request);
+    }
+
+    @Override
+    public long inputFingerprint(Goal goal, Snapshot snapshot) {
+        return BotPlanner.inputFingerprint(goal, snapshot);
+    }
+
+    /** The death is in a dimension that is loaded and is not yet five minutes old: its drops may still be there. */
+    @Override
+    public boolean dropsRecoverable(Failure.Died death, Snapshot now) {
+        MinecraftServer server = body == null ? null : body.getServer();
+        if (server == null) return false;
+        ResourceLocation id = ResourceLocation.tryParse(death.dimension());
+        if (id == null || server.getLevel(ResourceKey.create(Registries.DIMENSION, id)) == null) return false;
+        return now.gameTime() - death.deathTime() < DROPS_RECOVERABLE_TICKS;
+    }
+
+    @Override
+    public void publish(GoalResult result) {
+        lastResult = result;
+        // A goal that ended early (a cancel, a failure) may have left a table standing: the next tick looks.
+        tidyArmed = true;
+        String name = body == null ? "?" : body.getGameProfile().getName();
+        MegaBlockBot.LOGGER.info("Goal result of {}: goal=[{}] status={} matched={}/{} failure=[{}]", name,
+                BotSpeech.goal(result.goal()), result.status(), result.matched(), result.required(),
+                result.failure() == null ? "none" : result.failure().kind() + ": " + result.failure().detail());
+        say(BotSpeech.result(result));
+    }
+
+    @Override
+    public Profile profile() {
+        return Profile.STRICT_SURVIVAL;
+    }
+
+    @Override
+    public void log(String message, @Nullable Throwable error) {
+        String name = body == null ? "?" : body.getGameProfile().getName();
+        if (error == null) MegaBlockBot.LOGGER.warn("Bot {}: {}", name, message);
+        else MegaBlockBot.LOGGER.error("Bot {}: {}", name, message, error);
+    }
+
+    private static Pos pos(BlockPos pos) {
+        return new Pos(pos.getX(), pos.getY(), pos.getZ());
+    }
+}

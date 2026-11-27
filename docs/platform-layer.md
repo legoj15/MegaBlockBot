@@ -41,10 +41,10 @@ runs wherever the command tree is built (a worker thread while data loads).
 
 - `configDir()`, `onServerStarted`, `onServerStopping`, `onServerTick` (end of each tick),
   `onRegisterCommands` (the dispatcher).
-- `onServerDataLoaded`, `onBlockBroken` and `onBlockPlaced` name NeoForge events that differ on 26.x
-  (`TagsUpdatedEvent` was split, `BlockEvent.BreakEvent` became `BreakBlockEvent`), so `NeoForgeLoaderServices`
-  implements them under `//? if bot {` and throws `UnsupportedOperationException` on every other node. Enabling
-  `bot_enabled` on a 26.x node fails to compile there until they are ported.
+- `onServerDataLoaded`, `onBlockBroken`, `onBlockPlaced` and `onChatMessage` name NeoForge events that differ on 26.x
+  (`TagsUpdatedEvent` was split, `BlockEvent.BreakEvent` became `BreakBlockEvent`; `ServerChatEvent` is unchecked
+  there), so `NeoForgeLoaderServices` implements them under `//? if bot {` and throws `UnsupportedOperationException`
+  on every other node. Enabling `bot_enabled` on a 26.x node fails to compile there until they are ported.
 - `onServerDataLoaded`: once at server start (NeoForge: `ServerStartingEvent`, the first moment after the data
   load that has a server) and after every `/reload` (`TagsUpdatedEvent` `SERVER_DATA_LOAD` at LOWEST priority, so
   after NeoForge rebuilt the villager trades; the server comes from `ServerLifecycleHooks`).
@@ -52,6 +52,9 @@ runs wherever the command tree is built (a worker thread while data loads).
   NeoForge 21.1 has no after-the-fact block events, so the implementation takes `BreakEvent` /
   `EntityPlaceEvent` at LOWEST priority (cancelled ones are skipped) and delivers at the end of the tick. Player
   breaks only: explosions, pistons and fluids are not reported.
+- `onChatMessage` with a `ChatListener`: a player's chat line (the raw text they typed), on the server thread. NeoForge
+  takes `ServerChatEvent` at LOWEST priority, so a line another handler cancelled is skipped; it only observes and never
+  cancels or edits the line. A body's own chat counts: a body is a player.
 - `registerGameTests(Class<?>...)`: vanilla `@GameTest` methods; no-op unless GameTests are enabled.
 
 ## The `bot` switch and the `game` package
