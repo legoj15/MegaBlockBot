@@ -17,7 +17,8 @@ import net.minecraft.gametest.framework.GameTestHelper;
 /**
  * The evaluator on tables written for the purpose, for what no vanilla table exercises: a pick chance beside an
  * uncertain entry, reference chains and webs far deeper than any pack writes, a count provider too big to enumerate, a
- * table that names more block states than are tried, a registry that throws. They sit in this package because
+ * table that names more block states than are tried, the budget of one read, the state a yield is read in for a mined
+ * block and for a harvested one, a registry that throws. They sit in this package because
  * {@link LootEval} is package-private, and run as GameTests because the unit-test source set is shared by nodes that
  * do not compile {@code game}. Each builds its own notes, so a test sees only its own.
  */
@@ -83,7 +84,7 @@ public final class LootEvalGameTests {
         LootEval eval = new LootEval(tables(Map.of("test:pick", json(table(
             pool(certain("stick", 3), chance("coal", 1, 0.5)),
             pool(certain("apple", 2), chance("bone", 1, 0.5), chance("flint", 1, 0.5)))))), notes);
-        List<LootEval.Route> routes = eval.routes("test:pick", EnumSet.of(LootEval.Tool.PLAIN), false);
+        List<LootEval.Route> routes = eval.routes("test:pick", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED);
         double stick = expected(helper, routes, "minecraft:stick");
         helper.assertTrue(Math.abs(stick - 0.875) < TOLERANCE, "stick is " + stick + ", expected 0.875");
         double coal = expected(helper, routes, "minecraft:coal");
@@ -107,7 +108,7 @@ public final class LootEvalGameTests {
         for (int k = 0; k < 13; k++) entries[k + 1] = chance("item_" + k, 1 << k, 0.5);
         BuildNotes notes = new BuildNotes();
         LootEval eval = new LootEval(tables(Map.of("test:many", json(table(pool(entries))))), notes);
-        double stick = expected(helper, eval.routes("test:many", EnumSet.of(LootEval.Tool.PLAIN), false), "minecraft:stick");
+        double stick = expected(helper, eval.routes("test:many", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED), "minecraft:stick");
         helper.assertTrue(Math.abs(stick - 1 / 4096.5) < TOLERANCE, "stick is " + stick + ", expected " + 1 / 4096.5);
         helper.assertTrue(!notes.lines().isEmpty(), "the approximation is not noted");
         helper.succeed();
@@ -133,10 +134,10 @@ public final class LootEvalGameTests {
         LootEval eval = new LootEval(tables(Map.of(
             "test:ages", json(table(pool(stateEntry("apple", "test:bush", "age", "3")), pool(stateEntry("apple", "test:bush", "age", "2")))),
             "test:many_faces", json(table(pool(faces))))), notes);
-        double apples = expected(helper, eval.routes("test:ages", EnumSet.of(LootEval.Tool.PLAIN), false), "minecraft:apple");
+        double apples = expected(helper, eval.routes("test:ages", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED), "minecraft:apple");
         helper.assertTrue(Math.abs(apples - 1.0) < TOLERANCE, "apples are " + apples + ", expected 1.0");
         helper.assertTrue(notes.lines().isEmpty(), "a table with two states is noted: " + notes.lines());
-        double face = expected(helper, eval.routes("test:many_faces", EnumSet.of(LootEval.Tool.PLAIN), false), "minecraft:face_0");
+        double face = expected(helper, eval.routes("test:many_faces", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED), "minecraft:face_0");
         helper.assertTrue(Math.abs(face - 1.0 / 9) < TOLERANCE, "a face is " + face + ", expected " + 1.0 / 9);
         helper.assertTrue(!notes.lines().isEmpty(), "a table with 512 states is not noted");
         helper.succeed();
@@ -169,14 +170,14 @@ public final class LootEvalGameTests {
     public static void aVeryDeepChainOfTableReferencesIsCutAndNoted(GameTestHelper helper) {
         BuildNotes shallowNotes = new BuildNotes();
         List<LootEval.Route> shallow = new LootEval(chain(10, "test:shallow/"), shallowNotes)
-            .routes("test:shallow/0", EnumSet.of(LootEval.Tool.PLAIN), false);
+            .routes("test:shallow/0", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED);
         double diamond = expected(helper, shallow, "minecraft:diamond");
         helper.assertTrue(Math.abs(diamond - 1.0) < TOLERANCE, "a chain of ten tables yields " + diamond + " diamonds, expected 1.0");
         helper.assertTrue(shallowNotes.lines().isEmpty(), "a chain of ten tables is noted: " + shallowNotes.lines());
 
         BuildNotes deepNotes = new BuildNotes();
         try {
-            new LootEval(chain(100_000, "test:deep/"), deepNotes).routes("test:deep/0", EnumSet.of(LootEval.Tool.PLAIN), false);
+            new LootEval(chain(100_000, "test:deep/"), deepNotes).routes("test:deep/0", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED);
         } catch (StackOverflowError e) {
             helper.fail("a chain of 100000 table references overflowed the stack");
         }
@@ -192,7 +193,7 @@ public final class LootEvalGameTests {
             + "\"count\":{\"type\":\"minecraft:binomial\",\"n\":2000,\"p\":0.0001}}]}";
         BuildNotes notes = new BuildNotes();
         LootEval eval = new LootEval(tables(Map.of("test:binomial", json(table(pool(binomial))))), notes);
-        List<LootEval.Route> routes = eval.routes("test:binomial", EnumSet.of(LootEval.Tool.PLAIN), false);
+        List<LootEval.Route> routes = eval.routes("test:binomial", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED);
         double diamonds = expected(helper, routes, "minecraft:diamond");
         helper.assertTrue(Math.abs(diamonds - 0.2) < TOLERANCE, "diamonds are " + diamonds + ", expected 0.2");
         helper.assertTrue(notedFor(notes, "test:binomial"), "a binomial beyond the size guard is not noted under its table: " + notes.lines());
@@ -223,10 +224,10 @@ public final class LootEvalGameTests {
         LootEval eval = new LootEval(tables(Map.of(
             "test:wide_uniform", json(table(pool(stick(setCount("{\"type\":\"minecraft:uniform\",\"min\":0,\"max\":5000}", false))))),
             "test:wide_sum", json(table(pool(stick(setCount(UNIFORM_0_TO_3000, false), setCount(UNIFORM_0_TO_3000, true))))))), notes);
-        double midpoint = expected(helper, eval.routes("test:wide_uniform", EnumSet.of(LootEval.Tool.PLAIN), false), "minecraft:stick");
+        double midpoint = expected(helper, eval.routes("test:wide_uniform", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED), "minecraft:stick");
         helper.assertTrue(Math.abs(midpoint - 2500) < TOLERANCE, "a uniform over 0..5000 is " + midpoint + ", expected 2500");
         helper.assertTrue(notedFor(notes, "test:wide_uniform"), "the replaced uniform is not noted under its table: " + notes.lines());
-        double sum = expected(helper, eval.routes("test:wide_sum", EnumSet.of(LootEval.Tool.PLAIN), false), "minecraft:stick");
+        double sum = expected(helper, eval.routes("test:wide_sum", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED), "minecraft:stick");
         helper.assertTrue(Math.abs(sum - 3000) < TOLERANCE, "the sum of two uniforms over 0..3000 is " + sum + ", expected 3000");
         helper.assertTrue(notedFor(notes, "test:wide_sum"), "the replaced sum is not noted under its table: " + notes.lines());
         helper.succeed();
@@ -243,10 +244,10 @@ public final class LootEvalGameTests {
         LootEval eval = new LootEval(tables(Map.of("test:loop", json(table(
             pool(stateEntry("a", "test:bush", "age", "1")), pool(stateEntry("b", "test:bush", "age", "2")),
             pool(stateEntry("c", "test:bush", "age", "3")), pool(self))))), notes);
-        eval.routes("test:loop", EnumSet.of(LootEval.Tool.PLAIN), false);
+        eval.routes("test:loop", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED);
         List<String> afterOneTool = notes.lines();
         helper.assertTrue(notedFor(notes, "test:loop"), "the loop is not noted under its table: " + afterOneTool);
-        eval.routes("test:loop", EnumSet.of(LootEval.Tool.SILK, LootEval.Tool.SHEARS), false);
+        eval.routes("test:loop", EnumSet.of(LootEval.Tool.SILK, LootEval.Tool.SHEARS), false, LootEval.StateRule.MINED);
         helper.assertTrue(afterOneTool.equals(notes.lines()), "the loop is counted again for each scenario: " + afterOneTool + " then " + notes.lines());
         helper.succeed();
     }
@@ -272,7 +273,7 @@ public final class LootEvalGameTests {
         BuildNotes notes = new BuildNotes();
         FutureTask<Timed> task = new FutureTask<>(() -> {
             long start = System.nanoTime();
-            List<LootEval.Route> routes = new LootEval(tables(byId), notes).routes(root, EnumSet.of(LootEval.Tool.PLAIN), false);
+            List<LootEval.Route> routes = new LootEval(tables(byId), notes).routes(root, EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED);
             return new Timed(routes, notes, (System.nanoTime() - start) / 1_000_000);
         });
         Thread worker = new Thread(task, "loot-eval-web");
@@ -306,6 +307,29 @@ public final class LootEvalGameTests {
         helper.succeed();
     }
 
+    // The work of one routes() call is bounded by a budget of table evaluations (LootEval.MAX_TABLE_EVALUATIONS),
+    // spent where the memo misses. A ladder of 200 tables (table i references i+1 and i+2) whose root names eight
+    // boolean block-state properties, 2^8 = 256 states, walks every state down the whole ladder, over two hundred
+    // thousand evaluations; unbounded it exhausts the heap before it ends. With the budget the read ends at once,
+    // what was computed stands, and the table asked for is named as cut for size.
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void aTablePastTheEvaluationBudgetIsCutInTimeAndNoted(GameTestHelper helper) {
+        Map<String, JsonObject> byId = new HashMap<>();
+        String[] gate = new String[8];
+        for (int k = 0; k < 8; k++) gate[k] = stateEntry("apple", "test:gated", "p" + k, "true");
+        byId.put("test:ladder/0", json(table(pool(gate), pool("{\"type\":\"minecraft:loot_table\",\"value\":\"test:ladder/1\"}"))));
+        for (int i = 1; i < 200; i++) {
+            String next = "{\"type\":\"minecraft:loot_table\",\"value\":\"test:ladder/" + (i + 1) + "\"}";
+            String after = "{\"type\":\"minecraft:loot_table\",\"value\":\"test:ladder/" + Math.min(i + 2, 199) + "\"}";
+            byId.put("test:ladder/" + i, json(i == 199 ? table(pool(certain("diamond", 1))) : table(pool(next), pool(after))));
+        }
+        Timed run = timed(helper, byId, "test:ladder/0");
+        helper.assertTrue(run.millis() < 1000, "a ladder of 200 tables over 256 states took " + run.millis() + " ms");
+        helper.assertTrue(notedFor(run.notes(), "test:ladder/0"), "the ladder cut for size is not named: " + run.notes().lines());
+        MegaBlockBot.LOGGER.info("resolver ladder of 200 tables over 256 states evaluated in {} ms", run.millis());
+        helper.succeed();
+    }
+
     // A table that nests another is rolled for the same block, so a state the nested one tests is one the block can be
     // in, and a pool of the nested table keyed on it is not dropped. The outer table tests the age for 3 (a stick); the
     // table it references tests the same property for 2 (an apple), which is a value only the nested table names.
@@ -316,7 +340,7 @@ public final class LootEvalGameTests {
             "test:outer", json(table(pool(stateEntry("stick", "test:bush", "age", "3")),
                 pool("{\"type\":\"minecraft:loot_table\",\"value\":\"test:inner\"}"))),
             "test:inner", json(table(pool(stateEntry("apple", "test:bush", "age", "2")))))), notes);
-        List<LootEval.Route> routes = eval.routes("test:outer", EnumSet.of(LootEval.Tool.PLAIN), false);
+        List<LootEval.Route> routes = eval.routes("test:outer", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED);
         double apple = expected(helper, routes, "minecraft:apple");
         helper.assertTrue(Math.abs(apple - 1.0) < TOLERANCE, "apples are " + apple + ", expected 1.0 (the age-2 state)");
         double stick = expected(helper, routes, "minecraft:stick");
@@ -352,14 +376,49 @@ public final class LootEvalGameTests {
         LootEval eval = new LootEval(env, notes);
         List<LootEval.Route> cursed = List.of();
         try {
-            cursed = eval.routes("test:cursed", EnumSet.of(LootEval.Tool.PLAIN), false);
+            cursed = eval.routes("test:cursed", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED);
         } catch (RuntimeException e) {
             helper.fail("the state lookup of one table threw out of routes(): " + e);
         }
         helper.assertTrue(cursed.isEmpty(), "the table whose states cannot be read has routes: " + cursed);
         helper.assertTrue(notedFor(notes, "test:cursed"), "the table whose states cannot be read is not named: " + notes.lines());
-        double stick = expected(helper, eval.routes("test:fine", EnumSet.of(LootEval.Tool.PLAIN), false), "minecraft:stick");
+        double stick = expected(helper, eval.routes("test:fine", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED), "minecraft:stick");
         helper.assertTrue(Math.abs(stick - 1.0) < TOLERANCE, "sticks are " + stick + ", expected 1.0");
+        helper.succeed();
+    }
+
+    // A throw while a referenced table's state values are collected costs the referenced table, named by itself, and
+    // not the table that references it: the referencer's own pool is still read. Here the referencer gives a stick of
+    // its own beside the reference to a table whose block the registry cannot look up.
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void aReferencedTableWhoseStateLookupThrowsCostsOnlyItself(GameTestHelper helper) {
+        Map<String, JsonObject> byId = Map.of(
+            "test:ref", json(table(pool(certain("stick", 1)), pool("{\"type\":\"minecraft:loot_table\",\"value\":\"test:bad\"}"))),
+            "test:bad", json(table(pool(stateEntry("apple", "test:bad_block", "age", "3")))));
+        LootEval.Environment env = new LootEval.Environment() {
+            @Override
+            public JsonObject table(String id) {
+                return byId.get(id);
+            }
+
+            @Override
+            public List<String> tagItems(String tagId) {
+                return List.of();
+            }
+
+            @Override
+            public List<String> stateValues(String block, String property) {
+                if (block.equals("test:bad_block")) throw new IllegalStateException("the registry has no such block");
+                return List.of();
+            }
+        };
+        BuildNotes notes = new BuildNotes();
+        List<LootEval.Route> routes = new LootEval(env, notes)
+            .routes("test:ref", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED);
+        double stick = expected(helper, routes, "minecraft:stick");
+        helper.assertTrue(Math.abs(stick - 1.0) < TOLERANCE, "the referencer's own sticks are " + stick + ", expected 1.0");
+        helper.assertTrue(notedFor(notes, "test:bad"), "the referenced table is not named: " + notes.lines());
+        helper.assertTrue(!notedFor(notes, "test:ref"), "the referencer is named for the referenced table's throw: " + notes.lines());
         helper.succeed();
     }
 
@@ -399,7 +458,7 @@ public final class LootEvalGameTests {
                     return registry ? "0" : null;
                 }
             };
-            List<LootEval.Route> routes = new LootEval(env, new BuildNotes()).routes("test:bush", EnumSet.of(LootEval.Tool.PLAIN), false);
+            List<LootEval.Route> routes = new LootEval(env, new BuildNotes()).routes("test:bush", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED);
             double leaves = expected(helper, routes, "minecraft:leaf");
             double wantedLeaves = registry ? 1.0 : 5.0;
             helper.assertTrue(Math.abs(leaves - wantedLeaves) < TOLERANCE, "leaves are " + leaves + ", expected " + wantedLeaves
@@ -407,6 +466,88 @@ public final class LootEvalGameTests {
             double berries = expected(helper, routes, "minecraft:berry");
             helper.assertTrue(Math.abs(berries - 3.0) < TOLERANCE, "berries are " + berries + ", expected 3.0 (the best state)");
         }
+        helper.succeed();
+    }
+
+    // Which state a yield is read in depends on the kind of source the table feeds. A harvested growable is left
+    // alone until it is grown, so its yield is the best state's, the ripe one; a mined block keeps the state it is
+    // placed in, so its yield is the default state's whenever that state yields the item at all. The same table read
+    // both ways: the leaf is 5 at age 3 and 1 in the default state, age 0.
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void aHarvestedBlockIsReadRipeAndAMinedOneAsPlaced(GameTestHelper helper) {
+        String age3 = "[{\"condition\":\"minecraft:block_state_property\",\"block\":\"test:bush\",\"properties\":{\"age\":\"3\"}}]";
+        String leaf = "{\"type\":\"minecraft:item\",\"name\":\"minecraft:leaf\",\"functions\":["
+            + "{\"function\":\"minecraft:set_count\",\"count\":5,\"conditions\":" + age3 + "}]}";
+        Map<String, JsonObject> byId = Map.of("test:bush", json(table(pool(leaf))));
+        LootEval.Environment env = new LootEval.Environment() {
+            @Override
+            public JsonObject table(String id) {
+                return byId.get(id);
+            }
+
+            @Override
+            public List<String> tagItems(String tagId) {
+                return List.of();
+            }
+
+            @Override
+            public List<String> stateValues(String block, String property) {
+                return List.of("0", "1", "2", "3");
+            }
+
+            @Override
+            public String defaultStateValue(String block, String property) {
+                return "0";
+            }
+        };
+        LootEval eval = new LootEval(env, new BuildNotes());
+        double mined = expected(helper, eval.routes("test:bush", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED), "minecraft:leaf");
+        helper.assertTrue(Math.abs(mined - 1.0) < TOLERANCE, "a mined block gives " + mined + " leaves, expected 1.0 (the default state)");
+        double harvested = expected(helper, eval.routes("test:bush", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.HARVESTED), "minecraft:leaf");
+        helper.assertTrue(Math.abs(harvested - 5.0) < TOLERANCE, "a harvested block gives " + harvested + " leaves, expected 5.0 (the ripe state)");
+        helper.succeed();
+    }
+
+    // A table that names more state combinations than are enumerated (nine boolean properties, 2^9 = 512, over the
+    // bound of 256) is read in the default state alone when the environment knows it, and the table says so: the
+    // best-state rule could not be applied. Every default here is false, so the ungated stick reads 1 and the apple
+    // gated on p0 true reads nothing at all, where reading every state-gated entry as present would give the apple
+    // 1/10 of the picks.
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void aTablePastTheStateLimitReadsTheDefaultStateAloneWhenKnown(GameTestHelper helper) {
+        String[] entries = new String[10];
+        entries[0] = certain("stick", 1);
+        for (int k = 0; k < 9; k++) entries[k + 1] = stateEntry("apple", "test:many_faces", "p" + k, "true");
+        Map<String, JsonObject> byId = Map.of("test:faces", json(table(pool(entries))));
+        LootEval.Environment env = new LootEval.Environment() {
+            @Override
+            public JsonObject table(String id) {
+                return byId.get(id);
+            }
+
+            @Override
+            public List<String> tagItems(String tagId) {
+                return List.of();
+            }
+
+            @Override
+            public List<String> stateValues(String block, String property) {
+                return List.of("true", "false");
+            }
+
+            @Override
+            public String defaultStateValue(String block, String property) {
+                return "false";
+            }
+        };
+        BuildNotes notes = new BuildNotes();
+        List<LootEval.Route> routes = new LootEval(env, notes)
+            .routes("test:faces", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED);
+        double stick = expected(helper, routes, "minecraft:stick");
+        helper.assertTrue(Math.abs(stick - 1.0) < TOLERANCE, "sticks are " + stick + ", expected 1.0 (the default state)");
+        helper.assertTrue(routes.stream().noneMatch(r -> r.item().equals("minecraft:apple")),
+            "the apple of a state the default is not in is yielded: " + routes);
+        helper.assertTrue(notedFor(notes, "test:faces"), "a table past the state limit is not noted: " + notes.lines());
         helper.succeed();
     }
 }

@@ -29,13 +29,15 @@ import java.util.TreeSet;
  * <p>A block has one state, so conditions that test one property of one block for different values (a sweet berry
  * bush's age 3 pool and its age 2 pool) can never hold together. The states a table names, and those of the tables it
  * references, are enumerated: one scenario for each combination of the values its {@code block_state_property}
- * conditions mention for each property (plus one for all the other values the block can have, if it has any). An item
- * is read in the block's <em>default state</em>, the one it is placed in, when that state yields it at all (one slab,
- * one candle, an unripe crop's first pool); only an item the default state yields none of is read in the state that
- * gives it the most (a ripe berry bush, a grown wheat crop). What a state decides is how many were placed, and the
- * planner prices a source by the figure: a figure too high makes a plan fall short, one too low only collects a little
- * too much. Without the default state (an environment that cannot say) the best state stands in for it. Beyond
- * {@link #MAX_STATES} combinations the conditions are read as unjudgeable.
+ * conditions mention for each property (plus one for all the other values the block can have, if it has any). Which
+ * of them a yield is read in depends on the kind of source ({@link StateRule}): a block that is mined is placed in
+ * one state and read in its <em>default state</em> when that yields the item at all (one slab, one candle) and in the
+ * state that gives the most only when it yields none (glow lichen on every face), because a figure too high makes a
+ * plan fall short where one too low only collects a little too much; a block that is harvested is left to grow and
+ * read in the state that yields the most, the ripe one (a carrot crop's 2, not the unripe plant's 1). Without the
+ * default state (an environment that cannot say) the best state stands in for it. Beyond {@link #MAX_STATES}
+ * combinations the table is read in the default state alone when that is known, noted because the best state could
+ * not be chosen, and its state conditions are read as unjudgeable when it is not.
  *
  * <p>Simplifications, all on the side of reporting an item as obtainable: a condition this class cannot judge is
  * tried both ways, and an item both readings yield keeps the larger expected count and the larger chance of each;
@@ -53,6 +55,15 @@ import java.util.TreeSet;
 final class LootEval {
     /** What the player holds when the table is rolled. */
     enum Tool { PLAIN, SILK, SHEARS }
+
+    /**
+     * Which state a yield is read in, by the kind of source the table feeds. A mined block keeps the state it is
+     * placed in: the default state when that yields the item at all, and the state that yields the most only when it
+     * yields none, because the planner prices a source by the figure and a figure above what the block holds when
+     * placed makes a plan fall short. A harvested growable is picked when it is grown, so its yield is the ripe
+     * state's, whatever an unripe plant would give.
+     */
+    enum StateRule { MINED, HARVESTED }
 
     /**
      * {@code state} maps "block|property" to the value the block has in this scenario ({@link #OTHER_STATE} for a
@@ -122,7 +133,8 @@ final class LootEval {
     private static final double EPS = 1e-9;
 
     // Most block-state combinations a table is enumerated over (vanilla's most is 64: glow lichen and sculk vein, one
-    // property per face); a table past it has its state conditions read as unjudgeable, and is noted.
+    // property per face); a table past it is read in the default state alone when that is known and its state
+    // conditions are read as unjudgeable when it is not, noted either way (the best-state rule could not be applied).
     static final int MAX_STATES = 256;
     // A value that no condition of the table names, so it matches none of them.
     static final String OTHER_STATE = "?";
@@ -138,6 +150,16 @@ final class LootEval {
     // that is bounded by keeping each result by table, scenario and depth left (see evalTableId), however many paths
     // lead to a table. The longest chain in vanilla is three tables.
     static final int MAX_TABLE_DEPTH = 128;
+
+    // The budget of one top-level routes() call: at most this many table evaluations (counted where the memo misses;
+    // hits cost nothing) before the rest of the table is left unevaluated and the table is noted as cut for size. The
+    // work multiplies tables by states by tools, which no real pack does: the widest vanilla table names 64 states
+    // (glow lichen, sculk vein), read two ways for the conditions this class cannot judge, with three tools, over the
+    // deepest chain there is, three tables, which is 64 * 2 * 3 * 3 = 1152 evaluations; this budget is an order of
+    // magnitude over that. A ladder of 200 tables whose root names eight boolean properties (256 states) was measured
+    // at 44 seconds unbounded by a reviewer, and run without the budget here it exhausted the heap before it ended;
+    // at this budget that ladder evaluates in about two hundred milliseconds.
+    static final int MAX_TABLE_EVALUATIONS = 16384;
 
     // Pool-level functions that change a count in a way this class does not model. The others are either modeled
     // (set_count), ignored on purpose as at entry level (apply_bonus at level 0, explosion_decay), or leave counts
@@ -167,6 +189,10 @@ final class LootEval {
     private int depth;
     // The table being evaluated, so a note can name it. An inline table belongs to the table that holds it.
     private String current = "?";
+    // The budget of the routes() call in progress: how many evaluations it has spent (memo misses) and whether it ran
+    // out. Reset per call, so one expensive table does not starve the next.
+    private int evaluations;
+    private boolean starved;
 
     LootEval(Environment env, BuildNotes notes) {
         this.env = env;
@@ -176,32 +202,39 @@ final class LootEval {
     // ---- routes ------------------------------------------------------------------------------------------------
 
     /**
-     * The routes by which the table yields items. {@code tools} are the tool scenarios to try (PLAIN first) and
-     * {@code playerKills} whether to try a player kill as well. An item that a less demanding scenario already yields
-     * gets no route for a more demanding one. Within a scenario the two readings of the conditions this class cannot
-     * judge are merged per item, each figure taking the more permissive of the two; of the states the block can be in,
-     * an item keeps the figures of the default state when that yields it, and else those of the state that yields the
-     * most of it. A table that cannot be read costs that table: it is named in the notes and has no routes.
+     * The routes by which the table yields items. {@code tools} are the tool scenarios to try (PLAIN first),
+     * {@code playerKills} whether to try a player kill as well, and {@code stateRule} which state a yield is read in
+     * (see {@link StateRule}). An item that a less demanding scenario already yields gets no route for a more
+     * demanding one. Within a scenario the two readings of the conditions this class cannot judge are merged per item,
+     * each figure taking the more permissive of the two; of the states the block can be in, an item keeps the figures
+     * the rule picks. A table that cannot be read costs that table: it is named in the notes and has no routes. The
+     * call spends at most {@link #MAX_TABLE_EVALUATIONS} table evaluations; past it what was computed stands and the
+     * table is noted as cut for size.
      */
-    List<Route> routes(String tableId, Set<Tool> tools, boolean playerKills) {
+    List<Route> routes(String tableId, Set<Tool> tools, boolean playerKills, StateRule stateRule) {
+        evaluations = 0;
+        starved = false;
         try {
-            return routesOf(tableId, tools, playerKills);
+            return routesOf(tableId, tools, playerKills, stateRule);
         } catch (RuntimeException e) {
             // The block states of the table are looked up here, outside the guard of evalTableId; a registry that throws
             // for one table must not take the rest of the section it is built in.
             notes.skipped("loot tables that threw while evaluated", tableId + " (" + e.getClass().getSimpleName() + ")");
             return List.of();
+        } finally {
+            if (starved) notes.skipped("loot tables cut for size (past " + MAX_TABLE_EVALUATIONS
+                + " table evaluations in one read; what was computed so far stands)", tableId);
         }
     }
 
-    private List<Route> routesOf(String tableId, Set<Tool> tools, boolean playerKills) {
+    private List<Route> routesOf(String tableId, Set<Tool> tools, boolean playerKills, StateRule stateRule) {
         StateSet states = states(tableId);
         List<Route> routes = new ArrayList<>();
         // item id -> routes already emitted for it, to find the dominated ones.
         Map<String, List<Route>> emitted = new HashMap<>();
         for (Tool tool : EnumSet.copyOf(tools)) {
             for (boolean byPlayer : playerKills ? new boolean[] {false, true} : new boolean[] {false}) {
-                for (Map.Entry<String, Drop> e : yields(tableId, states, tool, byPlayer).entrySet()) {
+                for (Map.Entry<String, Drop> e : yields(tableId, states, tool, byPlayer, stateRule).entrySet()) {
                     Drop drop = e.getValue();
                     if (!yields(drop)) continue;
                     List<Route> prior = emitted.computeIfAbsent(e.getKey(), k -> new ArrayList<>());
@@ -229,13 +262,15 @@ final class LootEval {
     // ---- block states ------------------------------------------------------------------------------------------
 
     /**
-     * What the table yields in one scenario: for each item the figures of the default state when it yields the item at
-     * all, and otherwise those of the state that yields the item the most. The unjudgeable conditions are read both
-     * ways within each state. A block is only ever in one state, so the figures of two states are never added.
+     * What the table yields in one scenario: for a harvested block, for each item the figures of the state that yields
+     * it the most (the ripe one, since harvesting waits for it); for a mined block, the figures of the default state
+     * when it yields the item at all, and otherwise those of the state that yields the item the most. The unjudgeable
+     * conditions are read both ways within each state. A block is only ever in one state, so the figures of two states
+     * are never added.
      */
-    private Map<String, Drop> yields(String tableId, StateSet states, Tool tool, boolean byPlayer) {
+    private Map<String, Drop> yields(String tableId, StateSet states, Tool tool, boolean byPlayer, StateRule rule) {
         Map<String, Drop> out = bestState(tableId, states.all(), tool, byPlayer);
-        if (states.byDefault() == null) return out;
+        if (rule == StateRule.HARVESTED || states.byDefault() == null) return out;
         out = new TreeMap<>(out);
         for (Map.Entry<String, Drop> e : bothReadings(tableId, tool, byPlayer, states.byDefault()).entrySet()) {
             if (yields(e.getValue())) out.put(e.getKey(), e.getValue());
@@ -278,15 +313,19 @@ final class LootEval {
      * {@code block_state_property} conditions name, for each property, and a value none of them names; the conditions of
      * the tables it references count as its own, since the block is the same. A table with no such condition has the one
      * state with nothing assigned. A property tested by a range instead of a value cannot be enumerated and is left
-     * unassigned, and so is every property of a table past {@link #MAX_STATES} combinations. {@code byDefault} is the
-     * state the block is placed in, from the environment, or null when the environment cannot say for every property.
+     * unassigned. A table past {@link #MAX_STATES} combinations is read in the default state alone when that is known
+     * (noted: the best state could not be chosen) and has every property left unassigned when it is not.
+     * {@code byDefault} is the state the block is placed in, from the environment, or null when the environment cannot
+     * say for every property.
      */
     private StateSet states(String tableId) {
         StateSet cached = stateCache.get(tableId);
         if (cached != null) return cached;
         Map<String, Set<String>> named = new TreeMap<>();
         Set<String> ranged = new HashSet<>();
-        collectStateTests(tableId, named, ranged);
+        // Which table first named each property, so a lookup that throws is noted against the table that named it.
+        Map<String, String> sources = new TreeMap<>();
+        collectStateTests(tableId, named, ranged, sources);
         named.keySet().removeAll(ranged);
         StateSet states = new StateSet(List.of(Map.of()), Map.of());
         if (!named.isEmpty()) {
@@ -300,7 +339,21 @@ final class LootEval {
                 String block = property.getKey().substring(0, separator);
                 String name = property.getKey().substring(separator + 1);
                 List<String> tried = new ArrayList<>();
-                List<String> all = env.stateValues(block, name);
+                List<String> all;
+                String has;
+                try {
+                    all = env.stateValues(block, name);
+                    has = env.defaultStateValue(block, name);
+                } catch (RuntimeException e) {
+                    // The property may have been named by a table this one references; the throw costs that table,
+                    // named by itself, and not the one being read. A property the table being read named itself still
+                    // costs it, as any other throw out of states() does.
+                    String owner = sources.getOrDefault(property.getKey(), tableId);
+                    if (owner.equals(tableId)) throw e;
+                    notes.skipped("loot tables whose block states could not be looked up", owner + " (" + e.getClass().getSimpleName() + ")");
+                    all = List.of();
+                    has = null;
+                }
                 if (all.isEmpty()) {
                     tried.addAll(property.getValue());
                     tried.add(OTHER_STATE);
@@ -311,13 +364,13 @@ final class LootEval {
                 values.put(property.getKey(), tried);
                 combinations = Math.min(combinations * tried.size(), MAX_STATES + 1L);
                 // A default value no condition names behaves as every other value no condition names.
-                String has = env.defaultStateValue(block, name);
                 if (has == null) defaultKnown = false;
                 else defaults.put(property.getKey(), property.getValue().contains(has) ? has : OTHER_STATE);
             }
             if (combinations > MAX_STATES) {
-                notes.skipped("loot tables with too many block-state combinations (their state conditions are tried both ways)", tableId);
-                states = new StateSet(List.of(Map.of()), null);
+                notes.skipped("loot tables with too many block-state combinations (read in the default state alone when it is known;"
+                    + " the best-state rule could not be applied)", tableId);
+                states = new StateSet(defaultKnown ? List.of(defaults) : List.of(Map.of()), null);
             } else {
                 List<Map<String, String>> all = List.of(Map.of());
                 for (Map.Entry<String, List<String>> property : values.entrySet()) {
@@ -341,17 +394,31 @@ final class LootEval {
     }
 
     // Every property a block_state_property condition tests in the table or in the tables it references, up to the depth
-    // the evaluation follows them, with the values it tests it for. Breadth first, so that a table reached by two paths
-    // is taken the first time at its shortest, and each table once however many paths lead to it.
-    private void collectStateTests(String tableId, Map<String, Set<String>> named, Set<String> ranged) {
+    // the evaluation follows them, with the values it tests it for, and which table first named each property. Breadth
+    // first, so that a table reached by two paths is taken the first time at its shortest, and each table once however
+    // many paths lead to it.
+    private void collectStateTests(String tableId, Map<String, Set<String>> named, Set<String> ranged, Map<String, String> sources) {
         Set<String> seen = new HashSet<>();
         List<String> level = List.of(tableId);
         for (int d = 0; d < MAX_TABLE_DEPTH && !level.isEmpty(); d++) {
             List<String> next = new ArrayList<>();
             for (String id : level) {
                 if (!seen.add(id)) continue;
-                StateTests tests = stateTestsOf(id);
-                tests.named().forEach((key, values) -> named.computeIfAbsent(key, k -> new TreeSet<>()).addAll(values));
+                StateTests tests;
+                try {
+                    tests = stateTestsOf(id);
+                } catch (RuntimeException e) {
+                    // A table whose tests cannot be collected while a referencing table is read costs that table, named
+                    // by itself; the table being read keeps its own pools. A throw out of the table being read itself
+                    // still costs it, as any other throw out of states() does.
+                    if (id.equals(tableId)) throw e;
+                    notes.skipped("loot tables whose state tests could not be collected", id + " (" + e.getClass().getSimpleName() + ")");
+                    continue;
+                }
+                tests.named().forEach((key, values) -> {
+                    named.computeIfAbsent(key, k -> new TreeSet<>()).addAll(values);
+                    sources.putIfAbsent(key, id);
+                });
                 ranged.addAll(tests.ranged());
                 next.addAll(tests.references());
             }
@@ -402,12 +469,19 @@ final class LootEval {
 
     // Each table is evaluated once for each scenario and each depth it is met at, however many references lead to it: a
     // web of tables that all reference the next, twice over, is as many evaluations as it has tables, not as many as it
-    // has paths. The depth is part of the key because the result under a depth cut is not the same as without one.
+    // has paths. The depth is part of the key because the result under a depth cut is not the same as without one. Each
+    // miss spends one unit of the budget of the routes() call in progress; past it the table yields nothing more, the
+    // miss is not memoized (a later call has a fresh budget) and routes() notes the table it was asked for.
     private Map<String, Drop> evalTableId(String id, Scenario s) {
         MemoKey key = new MemoKey(s, MAX_TABLE_DEPTH - depth);
         Map<MemoKey, Map<String, Drop>> byKey = memo.computeIfAbsent(id, k -> new HashMap<>());
         Map<String, Drop> cached = byKey.get(key);
         if (cached != null) return cached;
+        if (evaluations >= MAX_TABLE_EVALUATIONS) {
+            starved = true;
+            return Map.of();
+        }
+        evaluations++;
         if (!visiting.add(id)) {
             // Named, so that it counts once for the table however many states and tools meet it.
             notes.skipped("loot table loops back to itself, the inner reference is ignored", id);

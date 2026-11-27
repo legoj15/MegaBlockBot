@@ -163,40 +163,52 @@ public final class AcquisitionIndexBuilder {
 
     // ---- blocks ------------------------------------------------------------------------------------------------
 
+    // Many blocks share a table (drops_like), and the evaluation is per table and per state rule.
+    private record TableRule(String table, LootEval.StateRule rule) {}
+
     private void blocks(Map<String, OreRange> ores) {
-        // Many blocks share a table (drops_like), and the evaluation is per table.
-        Map<String, List<Route>> routesByTable = new HashMap<>();
+        Map<TableRule, List<Route>> routesByTable = new HashMap<>();
         List<Block> blocks = new ArrayList<>();
         BuiltInRegistries.BLOCK.forEach(blocks::add);
         blocks.sort(Comparator.comparing(b -> BuiltInRegistries.BLOCK.getKey(b).toString()));
 
         for (Block block : blocks) {
             String blockId = BuiltInRegistries.BLOCK.getKey(block).toString();
-            String table = block.getLootTable().location().toString();
-            List<Route> routes = routesByTable.computeIfAbsent(table,
-                t -> environment.table(t) == null ? List.of() : eval.routes(t, EnumSet.allOf(Tool.class), false));
-            if (routes.isEmpty()) continue;
-
-            BlockState state = block.defaultBlockState();
+            // A harvested growable is read in the state that yields the most (the ripe one: a harvest waits for it);
+            // a mined block in its default state, the one it is placed in, when that yields the item at all.
             boolean growable = isGrowable(block);
-            boolean toolRequired = state.requiresCorrectToolForDrops();
-            ToolClass toolClass = toolClassOf(state);
-            ToolTier tier = toolClass == null && !toolRequired ? ToolTier.HAND : tierOf(state);
+            LootEval.StateRule rule = growable ? LootEval.StateRule.HARVESTED : LootEval.StateRule.MINED;
+            try {
+                // Both lookups run inside this guard: a registry or codec that throws for one block's table costs that
+                // block, not the whole section.
+                String table = block.getLootTable().location().toString();
+                List<Route> routes = routesByTable.computeIfAbsent(new TableRule(table, rule),
+                    k -> environment.table(k.table()) == null ? List.of()
+                        : eval.routes(k.table(), EnumSet.allOf(Tool.class), false, k.rule()));
+                if (routes.isEmpty()) continue;
 
-            for (Route route : routes) {
-                ItemKey item = ItemKey.of(route.item());
-                if (growable) {
-                    if (route.tool() != Tool.PLAIN) continue; // the silk-touch form of a crop is not a harvest
-                    index.addSource(new Source.Harvest("harvest:" + blockId, item, blockId, plantOf(block), true,
-                        route.expected(), route.random()));
-                    continue;
+                BlockState state = block.defaultBlockState();
+                boolean toolRequired = state.requiresCorrectToolForDrops();
+                ToolClass toolClass = toolClassOf(state);
+                ToolTier tier = toolClass == null && !toolRequired ? ToolTier.HAND : tierOf(state);
+
+                for (Route route : routes) {
+                    ItemKey item = ItemKey.of(route.item());
+                    if (growable) {
+                        if (route.tool() != Tool.PLAIN) continue; // the silk-touch form of a crop is not a harvest
+                        index.addSource(new Source.Harvest("harvest:" + blockId, item, blockId, plantOf(block), true,
+                            route.expected(), route.random()));
+                        continue;
+                    }
+                    boolean silk = route.tool() == Tool.SILK;
+                    boolean shears = route.tool() == Tool.SHEARS;
+                    String id = "mine:" + blockId + (silk ? "#silk_touch" : shears ? "#shears" : "");
+                    index.addSource(new Source.MineBlock(id, item, blockId,
+                        shears ? ToolClass.SHEARS : toolClass, shears ? ToolTier.HAND : tier, toolRequired, silk, shears,
+                        route.expected(), route.random(), ores.get(blockId)));
                 }
-                boolean silk = route.tool() == Tool.SILK;
-                boolean shears = route.tool() == Tool.SHEARS;
-                String id = "mine:" + blockId + (silk ? "#silk_touch" : shears ? "#shears" : "");
-                index.addSource(new Source.MineBlock(id, item, blockId,
-                    shears ? ToolClass.SHEARS : toolClass, shears ? ToolTier.HAND : tier, toolRequired, silk, shears,
-                    route.expected(), route.random(), ores.get(blockId)));
+            } catch (RuntimeException e) {
+                notes.skipped("blocks whose loot table could not be read", blockId + " (" + e.getClass().getSimpleName() + ")");
             }
         }
     }
@@ -253,7 +265,7 @@ public final class AcquisitionIndexBuilder {
             String entityId = BuiltInRegistries.ENTITY_TYPE.getKey(type).toString();
             String table = type.getDefaultLootTable().location().toString();
             if (environment.table(table) == null) continue;
-            for (Route route : eval.routes(table, EnumSet.of(Tool.PLAIN), true)) {
+            for (Route route : eval.routes(table, EnumSet.of(Tool.PLAIN), true, LootEval.StateRule.MINED)) {
                 index.addSource(new Source.KillMob("kill:" + entityId, ItemKey.of(route.item()), entityId, route.byPlayer(),
                     route.expected(), route.random()));
             }
@@ -272,7 +284,7 @@ public final class AcquisitionIndexBuilder {
             return;
         }
         // The per-cast chance of each item comes out of the weights of the table and the tables it nests.
-        for (Route route : eval.routes(FISHING_TABLE, EnumSet.of(Tool.PLAIN), false)) {
+        for (Route route : eval.routes(FISHING_TABLE, EnumSet.of(Tool.PLAIN), false, LootEval.StateRule.MINED)) {
             index.addSource(new Source.Fishing("fish:" + FISHING_TABLE, ItemKey.of(route.item()), FISHING_TABLE, route.expected()));
         }
     }
@@ -280,7 +292,7 @@ public final class AcquisitionIndexBuilder {
     private void chests() {
         for (String table : environment.tableIds()) {
             if (!"minecraft:chest".equals(environment.type(table))) continue;
-            for (Route route : eval.routes(table, EnumSet.of(Tool.PLAIN), false)) {
+            for (Route route : eval.routes(table, EnumSet.of(Tool.PLAIN), false, LootEval.StateRule.MINED)) {
                 index.addSource(new Source.ChestLoot("chest:" + table, ItemKey.of(route.item()), table, route.expected()));
             }
         }
@@ -301,7 +313,7 @@ public final class AcquisitionIndexBuilder {
         }
         notes.always("global loot modifiers are not evaluated (" + globalLootModifierCount() + " registered)");
         notes.always("drops a mob's code adds outside its loot table (a wither's nether star) are not seen");
-        notes.always("a block's yield is that of its default state, the one it is placed in (one slab, one candle, an unripe crop's first pool); an item that state does not yield at all is read in the state that yields the most of it (ripe sweet berries, grown wheat, glow lichen on every face), not in the state the block is found in");
+        notes.always("the yield of a block that is mined is that of its default state, the one it is placed in (one slab, one candle); an item that state does not yield at all is read in the state that yields the most of it (glow lichen on every face); the yield of a harvested growable is that of the state a player waits for, the grown one (a ripe carrot, a full cocoa pod)");
         notes.always("a block drops its loot-table items whether or not it can exist in the world, so a block that never generates still counts as a source of its own item");
         notes.always("recipes of special crafting types (armor dyeing, firework rockets, tipped arrows, ...) report no result item ("
             + noResultRecipes + " loaded), so what only they make is not in craftable() and shows as unobtainable");

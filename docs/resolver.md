@@ -31,20 +31,25 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
   never hold together. The table is evaluated once per state it names (for each property, each value its conditions
   mention that the block can have, from the block's own state definition, and one more state for all the others), and
   the states tested inside the tables it references through `loot_table` entries count too (bounded like the chain of
-  references). Which state a yield is read in: **the block's default state when that state yields the item at all, the
-  state that yields it the most only when the default state yields none of it.** Tall grass is 2 short grass with
-  shears, not 4 (a lower and an upper half are two pools of which one is the block's, and the default state is the
-  lower half). A sweet berry bush is 2.5 berries, not 2.5 + 1.5 (age 3 plus age 2): its default state, age 0, yields
-  none, so the best state, age 3, is read; likewise wheat from a wheat crop (1 at age 7; the default state gives only
-  seeds) and a glow lichen with shears (6, a lichen on every face; the default state has no face and gives nothing). A
-  slab is 1, not 2 (only a double slab gives two), a candle block 1 (not 4), a sea pickle 1 (not 4), pink petals 1 (not
-  4), snowballs from snow 1 (not 8 layers), cocoa 1 (not 3), nether wart 1 (not 3), carrots 1 (not 2). The reason is the
-  planner's: it prices a source by this number, so a figure above what the block holds when placed makes a plan fall
-  short (four candles counted on, one found), where a low one only collects a little more than needed. No `Source`
-  says which state; the lint prints one standing note instead. Where the environment cannot say what the default state
-  is (a test's, or a block the registry lacks) the best state is read for everything. Past 256 combinations of states
-  (vanilla's most is 64: the six faces of glow lichen and sculk vein) a table's state conditions are read as
-  unjudgeable, both ways, and the table is noted; a property tested by a range instead of a value is never enumerated.
+  references). Which state a yield is read in depends on the kind of source: **a block that is mined (`MineBlock`) is
+  read in its default state when that state yields the item at all, the state that yields it the most only when the
+  default state yields none of it; a block that is harvested (`Harvest`: whatever the builder makes one, a crop, a berry
+  bush, cocoa, nether wart) is read in the state that yields it the most**, because harvesting waits for the plant to
+  grow, so an unripe figure is never what a bot picks. Tall grass is 2 short grass with shears, not 4 (a lower and an
+  upper half are two pools of which one is the block's, and the default state is the lower half). Mined: a slab is 1,
+  not 2 (only a double slab gives two), a candle block 1 (not 4), a sea pickle 1 (not 4), pink petals 1 (not 4),
+  snowballs from snow 1 (not 8 layers), and a glow lichen with shears 6 (a lichen on every face; the default state has
+  no face and gives nothing). Harvested, the grown figure: a carrot crop 2 (1 in every state and another at age 7; the
+  unripe plant's 1 is not read), a potato crop 2 the same way, a full cocoa pod 3 (1 before age 2), nether wart 3
+  (uniform 2..4 at age 3; 1 before), sweet berries 2.5 (not 2.5 + 1.5: age 3 and age 2 are alternatives) and wheat 1
+  (only age 7 gives it). The reason is the planner's: it prices a source by this number, and for a mined block a figure
+  above what the block holds when placed makes a plan fall short (four candles counted on, one found) where a low one
+  only collects a little more than needed. No `Source` says which state; the lint prints one standing note instead.
+  Where the environment cannot say what the default state is (a test's, or a block the registry lacks) the best state is
+  read for everything. Past 256 combinations of states (vanilla's most is 64: the six faces of glow lichen and sculk
+  vein) the default state alone is read when it is known and the table is noted, because the best-state rule could not
+  be applied; when the default is not known the state conditions are read as unjudgeable, both ways, and the table is
+  noted the same way. A property tested by a range instead of a value is never enumerated.
 - Counts come from `set_count` (constant, uniform and binomial providers, exact) on the entry and then on its pool, in
   the game's order, only when the function's conditions hold under both readings (one that cannot hold in the state
   being tried is simply not there). Three providers too big to enumerate are replaced, and each replacement is noted
@@ -54,8 +59,10 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
   `set_count` is not applied over a nested `loot_table` entry, and neither are table-level count functions; both, and the
   pool-level functions that change counts in other ways (`limit_count`, `enchanted_count_increase` and the wrappers
   `sequence`, `filtered`, `reference`), are named in the notes. One table that throws while it is evaluated, or whose
-  block states cannot be looked up, costs that table, named in the notes. A `loot_table` entry with no readable value is
-  noted with the table that holds it, and so is a table that loops back to itself (once per table, not once per state).
+  block states cannot be looked up, costs that table, named in the notes; a throw while a referenced table's state tests
+  or state values are collected costs the referenced table, not the table that references it. A `loot_table` entry with
+  no readable value is noted with the table that holds it, and so is a table that loops back to itself (once per table,
+  not once per state).
 - A pool's pick: one roll takes one entry among those that are there, by weight. Beside entries that are only there
   some of the time (a `random_chance` on the entry) an entry's share is averaged over which of them are there: weight 3
   beside a weight 1 that is there half the time gets 1/2 * 3/3 + 1/2 * 3/4 = 0.875, not 3/3.5. The average runs over the
@@ -68,7 +75,13 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
   table's result is kept by scenario and by how much depth is left where it was met, so a web of tables that reference
   each other many times over (64 tables with two pools each referencing the next is 2^63 paths) costs as many
   evaluations as it has tables and depths, not as many as paths. Without that, a result under a cut was not kept and the
-  same web took longer than 25 seconds where it took 90 ms before the bound.
+  same web took longer than 25 seconds where it took 90 ms before the bound. The work of one top-level read is budgeted
+  as well: at most `LootEval.MAX_TABLE_EVALUATIONS` (16384) table evaluations, counted where the memo misses, per
+  `routes()` call. Tables times states times tools is not a shape vanilla writes (64 states x 2 readings x 3 tools x a
+  chain of 3 tables is 1152, an order of magnitude under it), but a ladder of 200 tables whose root names eight boolean
+  properties, 256 states, is past two hundred thousand evaluations: 44 seconds measured by a reviewer, and without the
+  budget it exhausted the heap outright here. Past the budget the read stops, what was computed stands, and the table is
+  noted as cut for size by its own name.
 - Tool class from `mineable/*`, tier from the lowest `incorrect_for_*_tool` tag that lacks the block (HAND when no tool
   speeds the block up and none is required; shears routes are SHEARS/HAND).
 - Ore ranges: every biome's placed features, `height_range` read from the encoded placement, targets from the
@@ -91,5 +104,5 @@ Global loot modifiers, mob drops coded outside loot tables, loot tables of type 
 equipment, blocks that drop their own item but never exist naturally, and trades rarer than about 1 in 20 per listing.
 Recipes of special crafting types (armor dyeing, firework rockets, tipped arrows) report no result item, so what only
 they make is not in `craftable()`. With the `trade_rebalance` feature on, villagers and the wandering trader use the
-experimental per-biome trade lists, which are not sampled. Yields are level-0 (no fortune, looting or luck), and a yield
-that block state decides is the default state's (see Block state above), which is the low side for a crop.
+experimental per-biome trade lists, which are not sampled. Yields are level-0 (no fortune, looting or luck); a yield that
+block state decides is the default state's for a mined block and the grown state's for a harvest (see Block state above).

@@ -177,9 +177,9 @@ public final class ResolverGameTests {
 
     // blocks/sweet_berry_bush.json has two pools, one for age 3 (set_count uniform 2..3, mean 2.5) and one for age 2
     // (uniform 1..2, mean 1.5), each set on the pool and not on the entry. A bush has one age, so the pools are
-    // alternatives. The default state, age 0, gives no berries, so the state that gives the most is read, the ripe one,
-    // 2.5. The pools used to be added, 2.5 + 1.5 = 4.0. Without the pool-level function every pick counted 1, and the
-    // figure was 1.0.
+    // alternatives. A bush is harvested when it is ripe, so the state that gives the most is read, age 3, 2.5 (the
+    // default state, age 0, gives none, so the old mined rule read the same figure). The pools used to be added,
+    // 2.5 + 1.5 = 4.0. Without the pool-level function every pick counted 1, and the figure was 1.0.
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
     public static void sweetBerryPoolsOfDifferentAgesAreAlternatives(GameTestHelper helper) {
         AcquisitionIndex index = index(helper);
@@ -209,24 +209,26 @@ public final class ResolverGameTests {
         helper.succeed();
     }
 
-    // A yield a block's state decides is the block's default state's, the one it has when placed, when that state yields
-    // the item at all; only an item the default state gives none of is read in the state that gives the most. The
-    // planner prices a source by this number, and a high one makes a plan fall short (it counts on four candles from a
-    // block that was placed with one) where a low one only collects a little too much. The default state of each of
-    // these is the first value of its property: a slab is a bottom slab, candles are 1, pickles 1, snow 1 layer, petals
-    // 1, cocoa and nether wart age 0, a carrot age 0.
-    // oak_slab.json: set_count 2 only when type is double: 1. candle.json: set_count 2, 3, 4 for that many candles: 1 with
-    // one. sea_pickle.json: the same for 2, 3, 4 pickles: 1. pink_petals.json: set_count 1..4 for flower_amount 1..4: 1.
-    // snow.json: set_count 1..8 snowballs for that many layers, 1 at one layer, and its plain branch never gives the
-    // snow block, which only the silk-touch branch gives for layers 8. cocoa.json: set_count 3 only when age is 2, so 1
-    // at age 0. nether_wart.json: set_count uniform 2..4 only when age is 3, so 1 at age 0. carrots.json: the first pool
-    // gives 1 carrot in every state and the second another at age 7: 1, where the best state gives 2.
-    // What the default state does not give at all is read in the best state: glow_lichen.json with shears starts the
-    // stack at 1, adds 1 for each of the six faces that has lichen and then adds -1, so the default state, which has no
-    // face, gives 0 and a lichen on every face gives 1 + 6 - 1 = 6. The wheat of wheat.json is only given at age 7, 1.
+    // The state a yield is read in depends on the kind of source. A block that is mined keeps the state it was placed
+    // in: the planner prices a source by the figure, and a high one makes a plan fall short (it counts on four candles
+    // from a block that was placed with one) where a low one only collects a little too much, so the default state is
+    // read whenever it yields the item at all, and only an item it gives none of is read in the state that gives the
+    // most. A harvested growable is picked when it is grown, so its yield is the ripe state's, whatever an unripe plant
+    // would give.
+    // Mined, default state first: oak_slab.json set_count 2 only when type is double: 1. candle.json set_count 2, 3, 4
+    // for that many candles: 1 with one. sea_pickle.json the same for 2, 3, 4 pickles: 1. pink_petals.json set_count
+    // 1..4 for flower_amount 1..4: 1. snow.json set_count 1..8 snowballs for that many layers, 1 at one layer, and its
+    // plain branch never gives the snow block, which only the silk-touch branch gives for layers 8. Mined, the default
+    // state gives none so the best state is read: glow_lichen.json with shears starts the stack at 1, adds 1 for each
+    // of the six faces that has lichen and then adds -1, so the default state, which has no face, gives 0 and a lichen
+    // on every face gives 1 + 6 - 1 = 6.
+    // Harvested, grown: cocoa.json set_count 3 at age 2: 3. nether_wart.json set_count uniform 2..4 at age 3: mean 3.
+    // carrots.json pool 1 gives 1 carrot in every state and pool 2 another at age 7: 2 (the unripe plant's 1 used to be
+    // read). potatoes.json is carrots.json with the name swapped: 2. beetroot.json gives the beetroot only in the age-3
+    // branch of its alternatives (the seed otherwise): 1. wheat.json gives the wheat only at age 7: 1.
     // Each figure is collected and the test fails once with every one that is off, so a run shows them all.
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
-    public static void aYieldThatBlockStateDecidesIsTheDefaultStatesUnlessItGivesNothing(GameTestHelper helper) {
+    public static void aMinedYieldIsReadAsPlacedAndAHarvestWhenGrown(GameTestHelper helper) {
         AcquisitionIndex index = index(helper);
         List<String> off = new ArrayList<>();
         check(off, "oak slab per oak slab", sourceYield(index, "minecraft:oak_slab", Source.MineBlock.class, m -> m.block().equals("minecraft:oak_slab")), 1.0);
@@ -234,11 +236,13 @@ public final class ResolverGameTests {
         check(off, "sea pickles per sea pickle block", sourceYield(index, "minecraft:sea_pickle", Source.MineBlock.class, m -> m.block().equals("minecraft:sea_pickle")), 1.0);
         check(off, "pink petals per pink petals block", sourceYield(index, "minecraft:pink_petals", Source.MineBlock.class, m -> m.block().equals("minecraft:pink_petals")), 1.0);
         check(off, "snowballs per snow block", sourceYield(index, "minecraft:snowball", Source.MineBlock.class, m -> m.block().equals("minecraft:snow") && !m.needsSilkTouch()), 1.0);
-        check(off, "cocoa beans per pod", sourceYield(index, "minecraft:cocoa_beans", Source.Harvest.class, h -> h.block().equals("minecraft:cocoa")), 1.0);
-        check(off, "nether wart per plant", sourceYield(index, "minecraft:nether_wart", Source.Harvest.class, h -> h.block().equals("minecraft:nether_wart")), 1.0);
-        check(off, "carrots per carrot crop", sourceYield(index, "minecraft:carrot", Source.Harvest.class, h -> h.block().equals("minecraft:carrots")), 1.0);
         check(off, "glow lichen per block, with shears", sourceYield(index, "minecraft:glow_lichen", Source.MineBlock.class,
             m -> m.block().equals("minecraft:glow_lichen") && m.needsShears()), 6.0);
+        check(off, "cocoa beans per pod", sourceYield(index, "minecraft:cocoa_beans", Source.Harvest.class, h -> h.block().equals("minecraft:cocoa")), 3.0);
+        check(off, "nether wart per plant", sourceYield(index, "minecraft:nether_wart", Source.Harvest.class, h -> h.block().equals("minecraft:nether_wart")), 3.0);
+        check(off, "carrots per carrot crop", sourceYield(index, "minecraft:carrot", Source.Harvest.class, h -> h.block().equals("minecraft:carrots")), 2.0);
+        check(off, "potatoes per potato crop", sourceYield(index, "minecraft:potato", Source.Harvest.class, h -> h.block().equals("minecraft:potatoes")), 2.0);
+        check(off, "beetroot per beetroot crop", sourceYield(index, "minecraft:beetroot", Source.Harvest.class, h -> h.block().equals("minecraft:beetroots")), 1.0);
         check(off, "wheat per wheat crop", sourceYield(index, "minecraft:wheat", Source.Harvest.class, h -> h.block().equals("minecraft:wheat")), 1.0);
         if (find(index, "minecraft:snow_block", Source.MineBlock.class, m -> m.block().equals("minecraft:snow") && !m.needsSilkTouch()).isPresent()) {
             off.add("a plain tool gets the snow block from snow");
