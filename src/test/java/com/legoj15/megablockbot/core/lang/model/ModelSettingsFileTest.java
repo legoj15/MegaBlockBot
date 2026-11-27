@@ -87,6 +87,10 @@ class ModelSettingsFileTest {
                 "{ \"provider\": \"anthropic\", " + withKey + ", \"maxRoundTrips\": 0 }",
                 "{ \"provider\": \"anthropic\", " + withKey + ", \"maxOutputTokens\": 1.5 }",
                 "{ \"provider\": \"anthropic\", " + withKey + ", \"timout\": 5 }",              // a typo
+                "{ \"provider\": \"anthropic\", \"apiKeyEnv\": \"" + KEY + "\" }",              // the key where a NAME goes
+                "{ \"provider\": \"" + KEY + "\" }",                                            // the key as the provider
+                "{ \"provider\": \"anthropic\", \"" + KEY + "\": \"\" }",                       // the key as a setting's name
+                "{ \"" + KEY + "\": 1 2 }",                                                    // the same in a file that does not parse
                 "{ \"provider\": \"anthropic\", " + withKey + ",",                              // cut off
                 "[1, 2]"}) {
             IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
@@ -103,6 +107,30 @@ class ModelSettingsFileTest {
 
         assertEquals(ModelSettingsFile.DEFAULT_TEXT, Files.readString(file, StandardCharsets.UTF_8));
         assertEquals(ModelSettings.none(), ModelSettingsFile.loadOrCreate(file, NO_ENV));
+    }
+
+    @Test
+    void theLogLineNamesTheServerButNotItsSecrets(@TempDir Path dir) throws IOException {
+        Path file = dir.resolve("language.json");
+        Files.writeString(file, "{ \"provider\": \"openai\", \"baseUrl\": \"" + ModelFixtures.SECRET_ADDRESS
+                + "\", \"model\": \"m\", \"apiKey\": \"" + KEY + "\" }");
+
+        try (LogCapture logs = new LogCapture(ModelSettingsFile.class.getName())) {
+            assertEquals(ModelSettings.Provider.OPENAI, ModelSettingsFile.loadOrCreate(file, NO_ENV).provider());
+
+            String logged = String.join("\n", logs.lines());
+            assertTrue(logged.contains("models.example.test"), "the line should say which server: " + logged);
+            for (String secret : ModelFixtures.ADDRESS_SECRETS) assertFalse(logged.contains(secret), logged);
+            assertFalse(logged.contains(KEY), logged);
+        }
+
+        // The key pasted one field too high, as the model name: the file loads, and the line must still not hold it.
+        Files.writeString(file, "{ \"provider\": \"openai\", \"baseUrl\": \"http://models.example.test/v1\", \"model\": \""
+                + KEY + "\" }");
+        try (LogCapture logs = new LogCapture(ModelSettingsFile.class.getName())) {
+            assertEquals(ModelSettings.Provider.OPENAI, ModelSettingsFile.loadOrCreate(file, NO_ENV).provider());
+            assertFalse(String.join("\n", logs.lines()).contains(KEY));
+        }
     }
 
     @Test

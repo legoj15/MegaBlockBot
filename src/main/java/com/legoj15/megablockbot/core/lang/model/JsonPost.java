@@ -4,29 +4,38 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * One JSON POST with a hard deadline, shared by both backends. Asynchronous throughout: the future completes on
- * the HTTP client's own threads, never the caller's, and it never completes with anything but a JSON object or a
- * {@link ChatBackend.ChatException} whose message is already scrubbed of the API key.
+ * One JSON POST with a hard deadline and a size limit on what it reads back ({@link #MAX_RESPONSE_BYTES}), shared by
+ * both backends. Asynchronous throughout: the future completes on the HTTP client's own threads, never the caller's,
+ * and it never completes with anything but a JSON object or a {@link ChatBackend.ChatException} whose message is
+ * already scrubbed of the API key and of the secrets an address can carry.
  */
 final class JsonPost {
 
     /** Longest slice of a server's error body that goes into an exception message (and so into a log line). */
     private static final int MAX_BODY_IN_MESSAGE = 300;
+
+    /** The most bytes of a response body the layer reads: a chat answer is a few KB, so 1 MiB is generous. */
+    static final int MAX_RESPONSE_BYTES = 1 << 20;
 
     private final ModelSettings settings;
     // HTTP/1.1 only: the JDK client otherwise offers an h2c upgrade on plain http, which local servers
@@ -63,8 +72,7 @@ final class JsonPost {
                     new ChatBackend.ChatException("the model address is not usable: " + describe(badRequest)));
         }
 
-        CompletableFuture<HttpResponse<String>> http = client.sendAsync(
-                request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        CompletableFuture<HttpResponse<byte[]>> http = client.sendAsync(request, info -> new BoundedBody());
         // The request timeout stops waiting for headers; this one also covers a body that stalls after them.
         CompletableFuture<JsonObject> parsed = http.thenApply(this::parse)
                 .orTimeout(settings.timeout().toMillis(), TimeUnit.MILLISECONDS);
@@ -81,9 +89,58 @@ final class JsonPost {
         return out;
     }
 
-    private JsonObject parse(HttpResponse<String> response) {
+    /**
+     * The body, read only up to {@link #MAX_RESPONSE_BYTES}. Past that the read is cancelled (which closes the
+     * connection) and the exchange fails like any other transport failure, so a server that answers with gigabytes
+     * costs the bot the limit and no more, however it is sent.
+     */
+    private static final class BoundedBody implements HttpResponse.BodySubscriber<byte[]> {
+        private final CompletableFuture<byte[]> body = new CompletableFuture<>();
+        private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        private Flow.Subscription subscription;
+
+        @Override
+        public CompletionStage<byte[]> getBody() {
+            return body;
+        }
+
+        @Override
+        public void onSubscribe(Flow.Subscription subscription) {
+            this.subscription = subscription;
+            subscription.request(Long.MAX_VALUE);
+        }
+
+        @Override
+        public void onNext(List<ByteBuffer> buffers) {
+            // Buffers may still arrive after the cancel below; they are not looked at.
+            if (body.isDone()) return;
+            for (ByteBuffer buffer : buffers) {
+                if ((long) bytes.size() + buffer.remaining() > MAX_RESPONSE_BYTES) {
+                    subscription.cancel();
+                    body.completeExceptionally(new ChatBackend.ChatException(
+                            "the model server's answer is larger than " + MAX_RESPONSE_BYTES + " bytes"));
+                    return;
+                }
+                byte[] chunk = new byte[buffer.remaining()];
+                buffer.get(chunk);
+                bytes.write(chunk, 0, chunk.length);
+            }
+        }
+
+        @Override
+        public void onError(Throwable error) {
+            body.completeExceptionally(error);
+        }
+
+        @Override
+        public void onComplete() {
+            body.complete(bytes.toByteArray());
+        }
+    }
+
+    private JsonObject parse(HttpResponse<byte[]> response) {
         int status = response.statusCode();
-        String body = response.body() == null ? "" : response.body();
+        String body = response.body() == null ? "" : new String(response.body(), StandardCharsets.UTF_8);
         if (status < 200 || status > 299) {
             throw new ChatBackend.ChatException("the model server answered HTTP " + status + ": " + shorten(body), status, null);
         }
@@ -100,11 +157,14 @@ final class JsonPost {
 
     /** Any failure of the exchange as the one exception type the layer understands, scrubbed of the key. */
     private ChatBackend.ChatException asChatException(Throwable error) {
+        // The JDK client may wrap what the body subscriber failed with, so look down the whole chain for ours.
+        for (Throwable link = error; link != null; link = link.getCause() == link ? null : link.getCause()) {
+            if (link instanceof ChatBackend.ChatException chat) return chat;
+        }
         Throwable cause = error;
         while ((cause instanceof CompletionException || cause instanceof ExecutionException) && cause.getCause() != null) {
             cause = cause.getCause();
         }
-        if (cause instanceof ChatBackend.ChatException) return (ChatBackend.ChatException) cause;
         if (cause instanceof HttpTimeoutException || cause instanceof TimeoutException) {
             return new ChatBackend.ChatException("the model did not answer within " + settings.timeout().toSeconds() + " s");
         }
@@ -115,13 +175,13 @@ final class JsonPost {
     }
 
     private String shorten(String body) {
-        String clean = settings.redact(body.strip().replaceAll("\\s+", " "));
+        String clean = settings.scrub(body.strip().replaceAll("\\s+", " "));
         return clean.length() <= MAX_BODY_IN_MESSAGE ? clean : clean.substring(0, MAX_BODY_IN_MESSAGE) + "...";
     }
 
-    /** The exception's class and message, with the key scrubbed out of the message. */
+    /** The exception's class and message, with the key and the address's secrets scrubbed out of the message. */
     String describe(Throwable error) {
         String message = error.getMessage();
-        return error.getClass().getSimpleName() + (message == null ? "" : " " + settings.redact(message));
+        return error.getClass().getSimpleName() + (message == null ? "" : " " + settings.scrub(message));
     }
 }

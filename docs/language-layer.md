@@ -8,7 +8,11 @@ no-model implementation; `ModelLanguageLayer` is the one that asks a language mo
 
 - `core/lang/model/` (Minecraft-free: JDK, Gson and `core` only; plain JUnit in `src/test/java/.../core/lang/model/`):
   - `ModelSettings`: provider (`none`, `openai`, `anthropic`), base URL, model, key, request timeout, round-trip cap
-    (default 4), output-token cap (default 4096). `toString` never prints the key; `redact(text)` scrubs it.
+    (default 4), output-token cap (default 4096). `toString` never prints the key and prints the base URL as
+    `safeBaseUrl()` only (scheme, host, port, path: no user name, password, query or fragment). `redact(text)` is an
+    exact match on the key and nothing more: every occurrence of the key's own text becomes `***`, the key in any other
+    shape (URL-encoded, cut short, hashed) is not recognised. `scrub(text)` is `redact` plus the configured address
+    replaced by its safe form; the layers use it on every exception message before it reaches a log.
   - `ModelSettingsFile`: the config file's text to `ModelSettings`, and the commented default written when it is missing.
   - `ChatBackend` (one round trip: messages + tool specs in, text + tool calls out) with `OpenAiChatBackend` and
     `AnthropicChatBackend`; `JsonPost` is their shared async POST with a hard deadline.
@@ -28,7 +32,9 @@ The model is consulted at two decision points only, never per tick, and a slow o
 1. **Goal intake** (`interpret`). The grammar goes first: when it understands the whole message (no `Unknown` among
    its intents) those intents are the answer and no request is made. Otherwise the model gets the message with a short
    system prompt (who it is, what the tools mean, the bot's status paragraph, the dimension, the owner's and the bot's
-   positions, the blueprint names, the enchantment ids the game knows, the limits) and these tools:
+   positions, the blueprint names (the first 50, then "and N more"), the enchantment ids the game knows (the first
+   120, likewise), the limits, and, when the grammar understood part of the message, which parts: "already understood
+   and queued, deal only with the rest") and these tools:
 
    | Tool | Arguments | Becomes |
    |---|---|---|
@@ -39,13 +45,27 @@ The model is consulted at two decision points only, never per tick, and a slow o
    | `say` | `text` | `Say(text)` |
 
    A plain text answer with no tool call is a `Say`. Text that comes with tool calls is dropped (the prompt says to
-   use `say`). Calls become intents in the order made.
+   use `say`). Calls become intents in the order made. Whichever way the model's words reach the owner (a plain answer,
+   a `say`, an explanation) they go through one rule: `<think>` blocks removed, trimmed, cut at 600 characters
+   (`ModelLanguageLayer.MAX_OWNER_TEXT`); a `say` with nothing left is refused like an empty one.
+
+   **What the grammar understood is never lost.** A message may be half understood ("get 2 stone; sing me a song":
+   a goal and an `Unknown`). The answer is always: the grammar's intents that are not `Unknown`, first and in their
+   order; then the model's intents; nothing twice. A goal the model sets that the grammar already set is acknowledged
+   to the model and not queued again (the grammar's goals seed the accepted set). A `status`, `pause`, `resume` or
+   `cancel` from the model is dropped when it restates one the grammar gave or repeats the model's own last intent;
+   pause, resume, pause from the model are three things and all stay. The grammar's `Unknown` is dropped once the model
+   has contributed anything (a goal, a `say`, a plain answer, a refusal reason; a repeat of what the grammar already
+   queued is not a contribution, and neither is a `say` the model fumbled: that refusal is never shown to the owner)
+   and kept, with the "language model did not come up with something" note, when the model contributed nothing.
 2. **Failure explanation** (`explain`). For a failed, partial or cancelled goal the model is given the typed result as
    lines of facts (goal, status, matched of required, unmet keys, the failure kind and every one of its fields; no
    exception message or stack trace) and asked for one or two plain sentences, with no tools. A satisfied goal needs
    no model. If the call fails or the answer is empty the owner gets a built-in sentence, one per `Failure.Kind`
    (`ResultText.builtIn`; the `switch`es there are exhaustive over the sealed types, so a new kind will not compile
-   until it has one).
+   until it has one). `explain` never throws, whatever the result holds: everything runs inside one guard, and a
+   result the built-in text cannot describe (a null position in a failure, say) gets one generic sentence
+   (`ModelLanguageLayer.UNEXPLAINABLE`).
 
 It is not asked to plan (the planner expands goals), to choose strategies (`choose_strategy` is a later issue), or to
 act: it never touches the world, only proposes tool calls that the checks then accept or refuse.
@@ -64,6 +84,10 @@ far better. `GoalArguments.check` is the only place model-named values become a 
 | `build` | `blueprint`, `position` | blueprint in `context.blueprints()` ignoring case and extra spaces (the goal carries the listed spelling) |
 | `go_to` | `position` or `to_owner`, optional `radius` | radius 0 to 256; default 2 for a position, 3 for the owner |
 
+An item, enchantment or blueprint named as `""` or as blanks is refused as such ("needs a name"), before anything is
+made of it: an enchantment `""` would otherwise become `minecraft:`, which is taken as named while the game's
+enchantments are not known yet.
+
 A call that fails a check, names an unknown tool, or has arguments that are not a JSON object is sent back to the model
 once as a tool error (`is_error` on Anthropic, the text on OpenAI) saying what was wrong, so it can `search_items` and
 correct itself. If the model's next calls fail too, each failing call becomes an `Unknown` the owner can read. The
@@ -72,23 +96,38 @@ A call that passed stays accepted even when another call in the same reply faile
 ones that passed, so order can differ from the owner's in that case). A repeat of an accepted goal is acknowledged to
 the model and not queued twice.
 
+A refusal that was sent back and that the model never settled reaches the owner anyway. "Settled" is per tool: a later
+call of the same tool that gets somewhere (a goal accepted, a `say` said, a search answered) pays the earlier refusal
+of that tool. When the conversation ends first (the round-trip cap, a plain answer, a failed round trip) the refusal's
+reason is added to the answer as an `Unknown`, the same text a second refusal gives, and it takes the place of the
+grammar's `Unknown` and the "did not come up with something" note. A refused `say` is the exception: its reason is
+about how the model used its own tool, not about anything the owner asked, so it is never shown.
+
 ### Budgets and failure
 
 - At most `maxRoundTrips` requests per message (default 4): each `search_items` answer or correction is another trip.
   When the cap ends a model that is still asking, the result is what the grammar said plus a note.
 - A timeout (`timeoutSeconds`, enforced on the whole exchange, not only the headers), a refused connection, a non-2xx
-  answer, a body that is not JSON or not shaped like the protocol's answer: `interpret` completes with what the grammar
-  said (its `Unknown`, and any clauses it did understand) and one line added to the first `Unknown` that the model could
-  not be reached. Goals the model had already given and the checks had passed are kept if a later trip fails.
-  `interpret` never throws and `explain` never fails.
+  answer, a body that is not JSON or not shaped like the protocol's answer, a body over the size limit: `interpret`
+  completes with what the grammar said (its `Unknown`, and any clauses it did understand) and one line added to the
+  first `Unknown` that the model could not be reached. Goals the model had already given and the checks had passed are
+  kept if a later trip fails. `interpret` never throws and `explain` never fails.
+- A response body is read only up to 1 MiB (`JsonPost.MAX_RESPONSE_BYTES`; a chat answer is a few KB). The reader counts
+  as the body streams in and cancels at the limit, which closes the connection, so a server that sends gigabytes (or
+  never stops) costs at most the limit in memory and fails the round trip like any other transport failure.
 - With provider `none` the layer is the grammar and `explain` returns nothing, as `FixedGrammar` does.
 
 ## Pointing it at a server
 
 The file is `<config dir>/megablockbot/language.json` (server-side; nothing in it is sent to clients). When it is
 missing the bot writes a commented default with provider `none`. Comments (`//`) are allowed. A file that cannot be
-used (invalid JSON, an unknown setting, a missing key) is logged without its values and means provider `none`: a typo
-never stops the bot and never turns a model on.
+used (invalid JSON, an unknown setting, a missing key) means provider `none`: a typo never stops the bot and never turns
+a model on. The warning holds the file's path and a sentence naming the problem. The sentence names the settings the bot
+knows and can quote a number that is out of range; it never quotes text the file gave for a setting's name, the provider,
+`apiKey`, `apiKeyEnv` or the address (a key pasted in the wrong place must not reach a log), and for a file that does not
+parse it gives only the line and column. The one line logged on a good load names the provider and the address in its
+safe form, and says only whether a model and a key are set: the model name sits beside the key in the file, and a key
+pasted one field too high must not be logged on every start.
 
 | Setting | Meaning |
 |---|---|
@@ -101,6 +140,10 @@ never stops the bot and never turns a model on.
 | `maxRoundTrips` | per owner message, 1 to 20, default 4 |
 | `maxOutputTokens` | per reply, default 4096: a model that thinks first spends part of it on thinking, so keep it generous |
 
+The range checks on the three numbers (`timeoutSeconds` 1 to 600, `maxRoundTrips` 1 to 20, `maxOutputTokens` 16 to
+200000) are skipped when the provider is `none`: the file is then read no further than the provider, so an out-of-range
+number there is not an error (an unknown setting name and an invalid provider still are).
+
 Examples (all with `"provider": "openai"` unless said):
 
 - llama.cpp `llama-server --jinja`: `"baseUrl": "http://localhost:8080/v1"`, any `model`. Tool calls need `--jinja`
@@ -112,7 +155,12 @@ Examples (all with `"provider": "openai"` unless said):
 
 The key is read once at load, lives only in `ModelSettings`, goes only into a request header (`Authorization: Bearer`
 or `x-api-key`) and is never in a request body, a log line, `toString` or returned text. Anything that might echo it
-(an error body from a gateway) goes through `ModelSettings.redact` before it can reach a log. It is never in chat.
+(an error body from a gateway, a JDK complaint about a bad request) goes through `ModelSettings.scrub` before it can
+reach a log: that replaces every exact occurrence of the key's text (`redact`; the key in another shape would not be
+recognised) and the configured address by its safe form. The address is printed as scheme, host, port and path only, so
+a password before the host or a token in the query never reaches a log. A secret carried in the path itself is printed:
+put secrets in the key setting, not in the address. The key is never in chat. A refused call's reason, which can quote
+what the model sent, is cut at the same length as everything else the owner reads.
 A key sent to an `http://` address travels unencrypted: use `https://` for anything that is not your own machine or LAN.
 
 What leaves the server: the owner's chat message, the status paragraph, the dimension, the owner's and the bot's
@@ -152,9 +200,12 @@ understands cost nothing.
   plays back scripted answers; the layer's real HTTP client talks to it) and `ModelSettingsFileTest`. They protect that a
   model's answer can only become a goal the checks allow, and that a bad or missing model never costs the owner their
   command: no request for a grammar message, search-then-goal on both formats, each refused call sent back once and then
-  `Unknown`, timeout / refused connection / HTTP 500 / non-JSON each completing with the grammar's answer, the round-trip
-  cap, `explain` with a sentence and with the server down, and a scan of every log line, `toString` and returned text for
-  the key (the fake echoes it back in a 401 body).
+  `Unknown` (and a refusal the model never settled still reaching the owner), blank names refused, a half-understood
+  message keeping the grammar's part in five ways the model can answer, timeout / refused connection / HTTP 500 /
+  non-JSON / a body over the size limit (including one that never ends) each completing with the grammar's answer, the
+  round-trip cap, `explain` with a sentence, with the server down and with a result that holds nulls, a capped blueprint
+  list in the prompt, and a scan of every log line, `toString` and returned text for the key and for the secrets an
+  address can carry (the fake echoes the key back in a 401 body).
 - `LiveModelProbe` is skipped unless `-Dmbb.liveProbe=<base URL>` is passed (the build forwards `mbb.*` properties to
   the test JVM): `./gradlew :1.21.1:test --tests '*LiveModelProbe*' -Dmbb.liveProbe=http://host:8000/v1
   [-Dmbb.liveProbe.model=<name>]`. It sends about twenty loosely phrased messages and writes a table (tools called,

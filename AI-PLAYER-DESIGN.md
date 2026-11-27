@@ -343,7 +343,10 @@ Executor-inserted nodes survive a replan: they stay at the front of the new tree
 finish or fail.
 
 The **goal** has its own states: `RUNNING`, `PAUSED`, `SATISFIED`, `GAVE_UP`, `CANCELLED`.
-`PAUSED` is set and cleared only by the owner's pause/resume command (§3.1; not a model tool);
+`PAUSED` is set and cleared only by the owner's pause/resume command (§3.1). The model-backed
+language layer has `pause` and `resume` among its tools only to turn the owner's own loose words
+("hold on a moment") into that command: it is asked when the owner speaks and at no other time,
+so it never pauses or resumes on its own (decided in #20);
 the active task is paused, and the goal still counts as active for respawn at server start. A
 reflex preemption (below) pauses only the task; the goal stays RUNNING.
 

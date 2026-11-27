@@ -26,18 +26,29 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 final class FakeModelServer implements AutoCloseable {
 
-    /** One scripted answer: an HTTP status, a body, and how long to sit on the request first. */
-    record Answer(int status, String body, long delayMillis) {
+    /**
+     * One scripted answer: an HTTP status, a body, how long to sit on the request first, and how long to leave the
+     * response open after the body has been sent (0 for an answer that ends with its body).
+     */
+    record Answer(int status, String body, long delayMillis, long stallMillis) {
         static Answer ok(String json) {
-            return new Answer(200, json, 0);
+            return new Answer(200, json, 0, 0);
         }
 
         static Answer status(int status, String body) {
-            return new Answer(status, body, 0);
+            return new Answer(status, body, 0, 0);
         }
 
         Answer after(long millis) {
-            return new Answer(status, body, millis);
+            return new Answer(status, body, millis, stallMillis);
+        }
+
+        /**
+         * This answer's body sent as a chunked response that is then left open for {@code millis}: a client that
+         * reads to the end of the body waits that long, one that stops at a size limit does not.
+         */
+        Answer thenStalls(long millis) {
+            return new Answer(status, body, delayMillis, millis);
         }
     }
 
@@ -111,9 +122,14 @@ final class FakeModelServer implements AutoCloseable {
             if (answer.delayMillis() > 0) Thread.sleep(answer.delayMillis());
             byte[] bytes = answer.body().getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json");
-            exchange.sendResponseHeaders(answer.status(), bytes.length);
+            // A length of 0 asks for chunked encoding, where the body ends only when the response is closed.
+            exchange.sendResponseHeaders(answer.status(), answer.stallMillis() > 0 ? 0 : bytes.length);
             try (OutputStream out = exchange.getResponseBody()) {
                 out.write(bytes);
+                if (answer.stallMillis() > 0) {
+                    out.flush();
+                    Thread.sleep(answer.stallMillis());
+                }
             }
         } catch (IOException | InterruptedException clientGaveUp) {
             // A client that timed out has already hung up; nothing to answer.

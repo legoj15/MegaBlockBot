@@ -28,6 +28,10 @@ final class ModelFixtures {
     /** The API key every test configures; it must reach the server's headers and nowhere else. */
     static final String SECRET = "sk-test-SECRET-9f8e7d6c5b4a";
 
+    /** An address that carries secrets besides the key: a password before the host, a token in the query, a fragment. */
+    static final String SECRET_ADDRESS = "http://uinfo-USER:uinfo-PASS@models.example.test:8080/v1?token=QUERY-SECRET#frag-SECRET";
+    static final List<String> ADDRESS_SECRETS = List.of("uinfo-USER", "uinfo-PASS", "QUERY-SECRET", "frag-SECRET");
+
     /** About fifty real registry ids with their display names. */
     static final Map<String, String> ITEMS = new LinkedHashMap<>();
 

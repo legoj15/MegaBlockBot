@@ -88,6 +88,10 @@ final class GoalArguments {
             if (level != null) throw new Refusal("'level' only goes with an 'enchantment'");
             return new Goal.HaveItem(key, count);
         }
+        // Before it is namespaced: "" would become "minecraft:", which an empty set of known ids takes as named.
+        if (enchantment.isBlank()) {
+            throw new Refusal("an enchantment needs a name: an id like minecraft:efficiency");
+        }
         String id = namespaced(enchantment.strip().toLowerCase(Locale.ROOT));
         Set<String> known = context.enchantments();
         // An empty set means the game's enchantments are not known yet: the id is taken as named.
@@ -139,6 +143,7 @@ final class GoalArguments {
     private static Goal build(JsonObject arguments, LanguageContext context) {
         String named = text(arguments, "blueprint");
         if (named == null) throw new Refusal("build needs a 'blueprint', one of " + listed(context.blueprints()));
+        if (named.isBlank()) throw new Refusal("a blueprint needs a name, one of " + listed(context.blueprints()));
         Pos anchor = position(arguments);
         String blueprint = blueprintNamed(named, context);
         if (blueprint == null) {
@@ -167,6 +172,10 @@ final class GoalArguments {
     }
 
     private static ItemKey itemById(String id, LanguageContext context) {
+        // A blank id is not looked up: a registry may read "" as its namespace alone.
+        if (id.isBlank()) {
+            throw new Refusal("an item needs a name: a registry id like minecraft:stone_pickaxe (search_items finds it)");
+        }
         return context.items().byId(id.strip()).orElseThrow(() -> new Refusal(
                 "item '" + id + "' does not exist; call search_items to find its registry id"));
     }

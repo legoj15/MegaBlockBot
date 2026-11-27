@@ -157,6 +157,12 @@ public final class BotTalk {
         }
     }
 
+    /** The language layer's sentence for a goal that did not work out, or empty when it has none (no model). */
+    static CompletableFuture<java.util.Optional<String>> explain(BotPlayer body, BotRuntime runtime,
+                                                                  com.legoj15.megablockbot.core.exec.GoalResult result) {
+        return LanguageLayers.current().explain(result, context(body, runtime));
+    }
+
     /** What the layer may read for one message (design 3.3): where everyone is, the status, the game's enchantments. */
     private static LanguageContext context(BotPlayer body, BotRuntime runtime) {
         ServerPlayer owner = runtime.ownerOnline();

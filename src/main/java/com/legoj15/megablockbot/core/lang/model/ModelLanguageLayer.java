@@ -32,20 +32,33 @@ import java.util.regex.Pattern;
  * is asked, with a short system prompt (see {@link ModelPrompts}) and the tools of {@link ToolSchemas}.
  * {@link #explain} puts a failed, partial or cancelled goal into a sentence. Everything else is the body's.
  *
+ * <p><strong>What the grammar understood is never lost.</strong> A message may be half understood ("get 2 stone; sing me
+ * a song"). The grammar's intents that are not {@code Unknown} are always the start of the answer, in their order, and
+ * the model is told they are already queued so that it deals with the rest only. The model's intents follow, and
+ * nothing appears twice: a goal the model sets that the grammar (or it) already set is acknowledged to the model and not
+ * queued again, and so is a repeated {@code status}, {@code pause}, {@code resume} or {@code cancel}. The grammar's
+ * {@code Unknown} is dropped once the model has answered for it, and kept, with a note, when the model contributed
+ * nothing.
+ *
  * <p><strong>The model proposes, the checks decide.</strong> {@code search_items} is answered here from the context's
  * item registry and the answer goes back to the model, up to {@link ModelSettings#maxRoundTrips()} requests per
  * message. {@code set_goal} goes through {@link GoalArguments}: a call that fails a check is sent back once, as a
  * tool error, so the model can search and correct itself; if the corrected call (or any later one) fails too, the owner
- * gets an {@link Intent.Unknown} saying what was wrong. A goal the checks did not pass never becomes an intent.
- * A repeat of a goal already accepted in the same message is not queued twice, and text that comes with tool calls
- * is dropped (the model is told to use {@code say}); text with no calls is an {@link Intent.Say}.
+ * gets an {@link Intent.Unknown} saying what was wrong. A refusal that was sent back and that the model then never
+ * settled (the conversation ended on the round-trip cap, a plain answer or a failed round trip) reaches the owner the
+ * same way. A goal the checks did not pass never becomes an intent. Text that comes with tool calls is dropped (the
+ * model is told to use {@code say}); text with no calls is an {@link Intent.Say}. Whichever way the model's words
+ * reach the owner (a plain answer, {@code say}, an explanation) they lose their thinking blocks and are cut at
+ * {@link #MAX_OWNER_TEXT}.
  *
  * <p><strong>A bad or missing model costs the owner nothing.</strong> {@code interpret} never throws and never
  * blocks the caller: the future completes on the HTTP client's threads. A timeout, a refused connection, a non-2xx
- * answer or an unparseable body completes with what the grammar said (its {@code Unknown}) plus one line saying the
- * model could not be reached; goals the model had already given and the checks passed are kept. {@code explain}
- * falls back to a built-in sentence per failure kind. With provider {@code none} the layer is the grammar and makes
- * no request. The API key reaches only the request headers: it is in no log line and no returned text.
+ * answer, a body over the size limit or an unparseable body completes with what the grammar said (its
+ * {@code Unknown}) plus one line saying the model could not be reached; goals the model had already given and the
+ * checks passed are kept. {@code explain} never throws either: it falls back to a built-in sentence per failure kind,
+ * and to one generic sentence for a result the built-in text cannot describe. With provider {@code none} the layer is
+ * the grammar and makes no request. The API key reaches only the request headers: it is in no log line and no
+ * returned text.
  */
 public final class ModelLanguageLayer implements LanguageLayer {
 
@@ -60,8 +73,11 @@ public final class ModelLanguageLayer implements LanguageLayer {
     /** What a refused call's reason is told to the owner as, once the model has had its one chance to correct. */
     private static final String REFUSED_PREFIX = "I could not turn that into something I can do: ";
 
-    /** Longest explanation passed on to the owner. */
-    private static final int MAX_EXPLANATION = 600;
+    /** The explanation of a result the built-in text cannot describe (a null where it expected a position, say). */
+    static final String UNEXPLAINABLE = "That goal ended without being completed, and I cannot say more about why.";
+
+    /** Longest text from the model passed on to the owner, whichever way it arrives (an explanation, a say, an answer). */
+    static final int MAX_OWNER_TEXT = 600;
 
     private static final int SEARCH_DEFAULT_LIMIT = 8, SEARCH_MAX_LIMIT = 15;
 
@@ -123,10 +139,15 @@ public final class ModelLanguageLayer implements LanguageLayer {
         private final String text;
         private final LanguageContext context;
         private final List<Intent> fromGrammar;
+        /** What the grammar understood of the message (all but its {@code Unknown}s): always the start of the answer. */
+        private final List<Intent> understood;
         private final String system;
         private final List<ChatBackend.Message> messages = new ArrayList<>();
+        /** What the model contributed that the owner is to get, in the order it came. */
         private final List<Intent> intents = new ArrayList<>();
         private final Set<Goal> accepted = new HashSet<>();
+        /** Refusals sent back to the model that no later call of the same tool settled. */
+        private final List<Refusal> unsettled = new ArrayList<>();
         private int roundTrips;
         /** Whether the model has already had its one chance to correct a refused call. */
         private boolean corrected;
@@ -135,7 +156,12 @@ public final class ModelLanguageLayer implements LanguageLayer {
             this.text = text;
             this.context = context;
             this.fromGrammar = fromGrammar;
-            this.system = ModelPrompts.interpret(context);
+            this.understood = fromGrammar.stream().filter(intent -> !(intent instanceof Intent.Unknown)).toList();
+            // The grammar's goals are already queued, so the model setting one again is a repeat, not a second goal.
+            for (Intent intent : understood) {
+                if (intent instanceof Intent.SetGoal set) accepted.add(set.goal());
+            }
+            this.system = ModelPrompts.interpret(context, understood);
         }
 
         CompletableFuture<List<Intent>> run() {
@@ -158,11 +184,14 @@ public final class ModelLanguageLayer implements LanguageLayer {
                     .thenCompose(next -> next);
         }
 
-        /** The round trip failed: keep what the checks already passed, else the grammar's answer plus the note. */
+        /**
+         * The round trip failed: keep what the model already gave and what it was refused for, else the grammar's
+         * answer plus the note.
+         */
         private CompletableFuture<List<Intent>> onFailure(Throwable error) {
-            if (!intents.isEmpty()) {
-                LOG.log(System.Logger.Level.WARNING, "language model failed after goals were accepted: " + describe(error));
-                return CompletableFuture.completedFuture(List.copyOf(intents));
+            if (!intents.isEmpty() || !owed().isEmpty()) {
+                LOG.log(System.Logger.Level.WARNING, "language model failed after it had answered: " + describe(error));
+                return CompletableFuture.completedFuture(answer());
             }
             return CompletableFuture.completedFuture(fallback(fromGrammar, UNREACHABLE_NOTE, error));
         }
@@ -170,8 +199,9 @@ public final class ModelLanguageLayer implements LanguageLayer {
         private CompletableFuture<List<Intent>> onReply(ChatBackend.Reply reply) {
             messages.add(reply.asMessage());
             if (reply.toolCalls().isEmpty()) {
-                String said = visibleText(reply.text());
-                // A plain answer is for the owner, unless goals were already queued: then it is chatter after the fact.
+                String said = ownerText(reply.text());
+                // A plain answer is for the owner, unless the model already queued something: then it is chatter
+                // after the fact. What the grammar understood does not count: that is no answer of the model's.
                 if (!said.isEmpty() && intents.isEmpty()) intents.add(new Intent.Say(said));
                 return CompletableFuture.completedFuture(finish(UNDECIDED_NOTE));
             }
@@ -182,7 +212,7 @@ public final class ModelLanguageLayer implements LanguageLayer {
             for (ChatBackend.ToolCall call : reply.toolCalls()) {
                 Handled handled = handle(call, mayCorrect);
                 results.add(new ChatBackend.Message.ToolResult(call.id(), handled.result(), handled.refused()));
-                if (handled.intent() != null) intents.add(handled.intent());
+                note(call, handled);
                 needsAnswer |= handled.needsAnswer();
                 sentBack |= handled.refused() && handled.needsAnswer();
             }
@@ -190,6 +220,21 @@ public final class ModelLanguageLayer implements LanguageLayer {
             if (!needsAnswer) return CompletableFuture.completedFuture(finish(UNDECIDED_NOTE));
             messages.addAll(results);
             return step();
+        }
+
+        /**
+         * Books what a call came to: its intent joins the answer, and the refusals still owed to the owner are kept
+         * up to date. A refusal sent back is owed until a later call of the same tool gets somewhere (a goal
+         * accepted, a say said, a search answered); one that became an {@code Unknown} is paid by that intent.
+         */
+        private void note(ChatBackend.ToolCall call, Handled handled) {
+            if (handled.refused() && handled.needsAnswer()) {
+                unsettled.add(new Refusal(call.name(), handled.result()));
+            } else if (handled.refused() || handled.intent() != null || handled.needsAnswer()) {
+                // Either the call got somewhere or its refusal is final: an earlier refusal of this tool is paid.
+                unsettled.removeIf(earlier -> earlier.tool().equals(call.name()));
+            }
+            if (handled.intent() != null) intents.add(handled.intent());
         }
 
         /** What the layer does with one call. {@code intent} may be null; {@code needsAnswer} asks for another round trip. */
@@ -209,11 +254,10 @@ public final class ModelLanguageLayer implements LanguageLayer {
                 return switch (call.name()) {
                     case ToolSchemas.SEARCH_ITEMS -> search(arguments);
                     case ToolSchemas.SET_GOAL -> setGoal(arguments, mayCorrect);
-                    case ToolSchemas.CANCEL -> Handled.done("Cancelled.",
-                            new Intent.Cancel(GoalArguments.flagged(arguments, "all")));
-                    case ToolSchemas.STATUS -> Handled.done("The owner will be told the status.", new Intent.Status());
-                    case ToolSchemas.PAUSE -> Handled.done("Paused.", new Intent.Pause());
-                    case ToolSchemas.RESUME -> Handled.done("Resumed.", new Intent.Resume());
+                    case ToolSchemas.CANCEL -> control("Cancelled.", new Intent.Cancel(GoalArguments.flagged(arguments, "all")));
+                    case ToolSchemas.STATUS -> control("The owner will be told the status.", new Intent.Status());
+                    case ToolSchemas.PAUSE -> control("Paused.", new Intent.Pause());
+                    case ToolSchemas.RESUME -> control("Resumed.", new Intent.Resume());
                     case ToolSchemas.SAY -> say(arguments, mayCorrect);
                     default -> refuse("there is no tool called '" + call.name() + "'; use only the tools you were given",
                             mayCorrect);
@@ -255,12 +299,23 @@ public final class ModelLanguageLayer implements LanguageLayer {
                     + ". Do not set it again.", new Intent.SetGoal(outcome.goal()));
         }
 
+        /**
+         * A control (status, pause, resume, cancel). One the grammar already gave is not queued again when the model
+         * restates it, and neither is the model's own immediate repeat; but pause, resume, pause from the model are
+         * three things the owner asked for in that order, and all three stay. The model is answered either way.
+         */
+        private Handled control(String result, Intent intent) {
+            boolean queued = understood.contains(intent)
+                    || (!intents.isEmpty() && intents.get(intents.size() - 1).equals(intent));
+            return Handled.done(queued ? "That is already queued; do not repeat it." : result, queued ? null : intent);
+        }
+
         private Handled say(JsonObject arguments, boolean mayCorrect) {
             JsonElement said = arguments.get("text");
-            if (said == null || !said.isJsonPrimitive() || said.getAsString().isBlank()) {
-                return refuse("say needs non-empty 'text'", mayCorrect);
-            }
-            return Handled.done("Said.", new Intent.Say(said.getAsString().strip()));
+            // A say that is nothing but thinking says nothing: refused like an empty one.
+            String text = said == null || !said.isJsonPrimitive() ? "" : ownerText(said.getAsString());
+            if (text.isEmpty()) return refuse("say needs non-empty 'text'", mayCorrect);
+            return Handled.done("Said.", new Intent.Say(text));
         }
 
         /**
@@ -269,14 +324,43 @@ public final class ModelLanguageLayer implements LanguageLayer {
          */
         private Handled refuse(String problem, boolean mayCorrect) {
             if (mayCorrect) return new Handled(problem, true, null, true);
-            return new Handled(problem, true,
-                    new Intent.Unknown(REFUSED_PREFIX + problem + " (say 'help' for the commands I understand)"), false);
+            return new Handled(problem, true, new Intent.Unknown(refusedText(problem)), false);
         }
 
-        /** The model's intents, or when it settled on none the grammar's answer with a note. */
+        /**
+         * The end of the conversation: what the grammar understood, then what the model gave, then the reasons of
+         * any refusal that was sent back and never settled. The grammar's own {@code Unknown} stays, with the note,
+         * only when the model contributed nothing at all.
+         */
         private List<Intent> finish(String note) {
-            return intents.isEmpty() ? fallback(fromGrammar, note, null) : List.copyOf(intents);
+            if (intents.isEmpty() && owed().isEmpty()) return fallback(fromGrammar, note, null);
+            return answer();
         }
+
+        private List<Intent> answer() {
+            List<Intent> all = new ArrayList<>(understood);
+            all.addAll(intents);
+            for (Refusal refusal : owed()) all.add(new Intent.Unknown(refusedText(refusal.reason())));
+            return List.copyOf(all);
+        }
+
+        /**
+         * The refusals the owner is told about. A fumbled say is never one of them: it is about how the model used
+         * its own tool, not about anything the owner asked for, so with nothing else to tell the owner gets the
+         * grammar's answer and the note.
+         */
+        private List<Refusal> owed() {
+            return unsettled.stream().filter(refusal -> !ToolSchemas.SAY.equals(refusal.tool())).toList();
+        }
+    }
+
+    /** A call the model made that was refused and sent back to it: which tool, and why. */
+    private record Refusal(String tool, String reason) {}
+
+    /** What the owner reads of a refused call: the reason, and where to find what the bot does understand. */
+    private static String refusedText(String problem) {
+        // The reason can quote what the model sent (an item id, a tool name): cut like everything the owner reads.
+        return REFUSED_PREFIX + ownerText(problem) + " (say 'help' for the commands I understand)";
     }
 
     /** The arguments of a call were not usable at all (not JSON, not an object): refused like any failed check. */
@@ -302,38 +386,64 @@ public final class ModelLanguageLayer implements LanguageLayer {
     @Override
     public CompletableFuture<Optional<String>> explain(GoalResult result, LanguageContext context) {
         if (backend == null) return grammar.explain(result, context);
-        // A satisfied goal has nothing to explain, and a model has nothing to add to it.
-        if (result.status() == GoalResult.Status.SATISFIED) return CompletableFuture.completedFuture(Optional.empty());
-        String builtIn = ResultText.builtIn(result);
+        // Everything is inside the try: a result with a null in it must cost the owner a sentence, not an exception.
         try {
+            // A satisfied goal has nothing to explain, and a model has nothing to add to it.
+            if (result.status() == GoalResult.Status.SATISFIED) return CompletableFuture.completedFuture(Optional.empty());
+            String builtIn = builtInSentence(result);
             ChatBackend.Request request = new ChatBackend.Request(ModelPrompts.EXPLAIN,
                     List.of(new ChatBackend.Message.User(ResultText.facts(result))), List.of());
-            return backend.send(request).handle((reply, error) -> {
-                if (error != null) {
-                    LOG.log(System.Logger.Level.WARNING, "language model could not explain a goal: " + describe(error));
-                    return Optional.of(builtIn);
-                }
-                String sentence = visibleText(reply.text());
-                if (sentence.isEmpty()) return Optional.of(builtIn);
-                return Optional.of(sentence.length() <= MAX_EXPLANATION ? sentence : sentence.substring(0, MAX_EXPLANATION));
-            });
+            return backend.send(request).handle((reply, error) -> explained(reply, error, builtIn));
         } catch (RuntimeException e) {
             LOG.log(System.Logger.Level.WARNING, "language model could not explain a goal: " + describe(e));
-            return CompletableFuture.completedFuture(Optional.of(builtIn));
+            return CompletableFuture.completedFuture(Optional.of(builtInSentence(result)));
+        }
+    }
+
+    /** The model's sentence, else the built-in one. Never throws, so the future {@code explain} returns never fails. */
+    private Optional<String> explained(ChatBackend.Reply reply, Throwable error, String builtIn) {
+        if (error != null) {
+            LOG.log(System.Logger.Level.WARNING, "language model could not explain a goal: " + describe(error));
+            return Optional.of(builtIn);
+        }
+        try {
+            String sentence = ownerText(reply.text());
+            return Optional.of(sentence.isEmpty() ? builtIn : sentence);
+        } catch (RuntimeException e) {
+            LOG.log(System.Logger.Level.WARNING, "language model could not explain a goal: " + describe(e));
+            return Optional.of(builtIn);
+        }
+    }
+
+    /** The built-in sentence for a result, or {@link #UNEXPLAINABLE} when the result holds what it cannot describe. */
+    private String builtInSentence(GoalResult result) {
+        try {
+            return ResultText.builtIn(result);
+        } catch (RuntimeException e) {
+            LOG.log(System.Logger.Level.WARNING, "a goal result could not be described: " + describe(e));
+            return UNEXPLAINABLE;
         }
     }
 
     // ── small pieces ──────────────────────────────────────────────────────────────────────────────
 
-    /** The model's text without any thinking it left in, trimmed. */
-    private static String visibleText(String text) {
-        return THINK_BLOCK.matcher(text == null ? "" : text).replaceAll("").strip();
+    /**
+     * The model's words as the owner may read them: without any thinking it left in, trimmed, and cut at
+     * {@link #MAX_OWNER_TEXT}. One rule for a plain answer, a {@code say} and an explanation.
+     */
+    static String ownerText(String text) {
+        String visible = THINK_BLOCK.matcher(text == null ? "" : text).replaceAll("").strip();
+        if (visible.length() <= MAX_OWNER_TEXT) return visible;
+        int end = MAX_OWNER_TEXT;
+        // Never cut a surrogate pair in half: the half left over would print as a broken character.
+        if (Character.isHighSurrogate(visible.charAt(end - 1))) end--;
+        return visible.substring(0, end).stripTrailing();
     }
 
     /**
      * A failure as one log-safe line: the exception's class and message. The backends have already scrubbed the key
-     * from their messages; it is scrubbed again here because this is the last stop before a log, and the stack trace
-     * is left out (it is the same wherever the key might hide).
+     * and the server's address from their messages; they are scrubbed again here because this is the last stop before
+     * a log, and the stack trace is left out (it is the same wherever a secret might hide).
      */
     private String describe(Throwable error) {
         Throwable cause = error;
@@ -342,6 +452,6 @@ public final class ModelLanguageLayer implements LanguageLayer {
         }
         String message = cause.getMessage();
         String line = cause.getClass().getSimpleName() + (message == null ? "" : ": " + message);
-        return settings.redact(line);
+        return settings.scrub(line);
     }
 }

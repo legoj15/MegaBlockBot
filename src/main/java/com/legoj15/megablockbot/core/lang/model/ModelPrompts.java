@@ -2,6 +2,7 @@ package com.legoj15.megablockbot.core.lang.model;
 
 import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.lang.FixedGrammar;
+import com.legoj15.megablockbot.core.lang.Intent;
 import com.legoj15.megablockbot.core.lang.LanguageContext;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,11 +18,15 @@ final class ModelPrompts {
     /** Longest enchantment list put in the prompt; the checks do not depend on the model having seen them all. */
     private static final int MAX_LISTED_ENCHANTMENTS = 120;
 
+    /** Longest blueprint list put in the prompt, for the same reason: a server may hold hundreds of them. */
+    static final int MAX_LISTED_BLUEPRINTS = 50;
+
     /**
      * Who the model is, what the tools mean, and the facts of this moment: the bot's status paragraph, the
-     * dimension, where the owner and the bot stand, the blueprints, the enchantments the game knows.
+     * dimension, where the owner and the bot stand, the blueprints, the enchantments the game knows, and the parts of
+     * this message that the fixed grammar already understood and queued (none for a message it understood nothing of).
      */
-    static String interpret(LanguageContext context) {
+    static String interpret(LanguageContext context, List<Intent> understood) {
         StringBuilder prompt = new StringBuilder();
         prompt.append("You are the language front end of MegaBlockBot, a Minecraft player that its owner controls "
                 + "through chat. You do not act in the world yourself: you read the owner's message and call tools, "
@@ -43,8 +48,11 @@ final class ModelPrompts {
         prompt.append("Dimension: ").append(context.dimension()).append('\n');
         prompt.append("Owner stands at ").append(at(context.ownerPos())).append(". The bot stands at ")
                 .append(at(context.botPos())).append(". (x y z block coordinates)\n");
+        List<String> blueprints = context.blueprints();
+        int listed = Math.min(blueprints.size(), MAX_LISTED_BLUEPRINTS);
         prompt.append("Blueprints it can build: ")
-                .append(context.blueprints().isEmpty() ? "none" : String.join(", ", context.blueprints())).append('\n');
+                .append(blueprints.isEmpty() ? "none" : String.join(", ", blueprints.subList(0, listed)))
+                .append(blueprints.size() > listed ? ", and " + (blueprints.size() - listed) + " more" : "").append('\n');
         if (!context.enchantments().isEmpty()) {
             List<String> sorted = new ArrayList<>(new TreeSet<>(context.enchantments()));
             int shown = Math.min(sorted.size(), MAX_LISTED_ENCHANTMENTS);
@@ -55,7 +63,29 @@ final class ModelPrompts {
                 .append(", an enchantment level 1 to ").append(FixedGrammar.MAX_LEVEL)
                 .append(", a go_to radius ").append(FixedGrammar.MIN_RADIUS).append(" to ").append(FixedGrammar.MAX_RADIUS)
                 .append(". Keep replies to the owner short.");
+        if (!understood.isEmpty()) {
+            List<String> parts = new ArrayList<>();
+            for (Intent intent : understood) parts.add(describe(intent));
+            // The fixed grammar read some clauses of the message by itself and the bot has queued them already.
+            prompt.append("\n\nAlready understood from this message and queued by the bot: ")
+                    .append(String.join("; ", parts))
+                    .append(". Do not call a tool for these again; deal only with the rest of the message.");
+        }
         return prompt.toString();
+    }
+
+    /** One intent the grammar gave, in a phrase for the model. No default: a new kind of intent must be worded here. */
+    private static String describe(Intent intent) {
+        return switch (intent) {
+            case Intent.SetGoal set -> "set_goal: " + ResultText.describe(set.goal(), true);
+            case Intent.Cancel cancel -> cancel.all() ? "cancel, with all the waiting goals" : "cancel";
+            case Intent.Status status -> "status";
+            case Intent.Pause pause -> "pause";
+            case Intent.Resume resume -> "resume";
+            case Intent.Say say -> "a reply to the owner";
+            // Never passed in: the grammar's Unknowns are what the model is asked about.
+            case Intent.Unknown unknown -> "something it could not read";
+        };
     }
 
     /** For {@code explain}: no tools, one or two sentences, only the facts given. */

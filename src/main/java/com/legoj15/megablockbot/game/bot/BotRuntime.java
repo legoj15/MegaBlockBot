@@ -389,6 +389,28 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
                 BotSpeech.goal(result.goal()), result.status(), result.matched(), result.required(),
                 result.failure() == null ? "none" : result.failure().kind() + ": " + result.failure().detail());
         say(BotSpeech.result(result));
+        explain(result);
+    }
+
+    /**
+     * For a goal that failed or ended partly done, the language layer's own words follow the built-in line when it has
+     * any (design 3.3: a model is consulted at decision points, and the end of a goal is one). The built-in line is
+     * said first and at once, so the owner is never left waiting on a model; with no model nothing more is said.
+     */
+    private void explain(GoalResult result) {
+        BotPlayer current = body;
+        if (current == null || current.getServer() == null) return;
+        if (result.status() != GoalResult.Status.FAILED && result.status() != GoalResult.Status.PARTIAL) return;
+        MinecraftServer server = current.getServer();
+        try {
+            BotTalk.explain(current, this, result).whenComplete((sentence, error) -> {
+                // The layer answers on its own thread: the words are said on the server's.
+                if (error == null && sentence != null && sentence.isPresent()) server.execute(() -> say(sentence.get()));
+            });
+        } catch (RuntimeException e) {
+            // The contract says a layer never throws; if it does, the owner already has the built-in line.
+            MegaBlockBot.LOGGER.error("The language layer threw while explaining a result", e);
+        }
     }
 
     @Override

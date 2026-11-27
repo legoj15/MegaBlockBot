@@ -2,33 +2,26 @@ A Minecraft bot that can be controlled by chat, using an LLM to set tasks and re
 
 ## Talking to the bot in your own words
 
-Out of the box the bot understands a short list of commands. Tell it `help` in chat to see them. That works with no
-setup and sends nothing anywhere.
+The bot works with no AI model at all. Out of the box it understands a short list of commands (type `help` to it in
+chat to see them), and nothing is sent anywhere.
 
-If you would like it to understand ordinary sentences ("could you grab me a couple of stone picks", "what are you up
-to?"), you can connect it to an AI model. You need one of these:
+To let it understand ordinary sentences ("could you grab me a couple of stone picks", "what are you up to?"), connect
+it to an AI model: one running on your own computer or home network (llama.cpp, Ollama and LM Studio all work), or an
+account with an online service such as Anthropic. On the machine that runs the Minecraft server:
 
-- an AI program running on your own computer or another one at home (such as llama.cpp, Ollama or LM Studio), or
-- an account with an online AI service.
+1. Start the server once. It creates `language.json` in the `megablockbot` folder inside the server's `config` folder.
+2. Open it in a text editor; the comments explain each line. Change `"provider": "none"` to `"openai"` (a program on
+   your own network) or `"anthropic"`, then fill in the address and the model name.
+3. The key for an online service goes in the same file, in `apiKey`. Better: put the name of a computer setting that
+   holds the key (an environment variable) in `apiKeyEnv`. The file stays on the server and the bot never shows the
+   key in chat or in its logs.
+4. Restart the server.
 
-Then, on the machine that runs the Minecraft server:
+Good to know:
 
-1. Start the server once. It creates a file called `language.json` in the `megablockbot` folder inside the server's
-   `config` folder.
-2. Open that file in a text editor. The comments in it explain each line. Set `provider` to `openai` for a program on
-   your own network, or `anthropic` for the Anthropic service, and fill in the address and the model name (or your
-   key).
-3. Restart the server.
-
-Keep in mind:
-
-- What you type to the bot, and a short description of what it is doing, is sent to the model. With an online service
-  that means it leaves your server, and the service may charge for it.
-- If you use an online service, put your key in the file or, better, name an environment variable that holds it. The
-  file stays on the server and the bot never shows the key in chat or in its logs.
-- A model running on your own computer uses a lot of memory: from a few gigabytes for a small one to well over ten for
-  a good one, and more if it runs on the same graphics card as the game. A second computer or an online service avoids
-  that.
+- What you type to the bot, and a short note on what it is doing, goes to the model. With an online service that
+  leaves your server, and the service may charge for it.
+- A model on your own computer needs a lot of memory: a few gigabytes for a small one, well over ten for a good one.
 - If the model is slow or cannot be reached, the bot carries on with the plain commands.
 
-The longer technical notes are in `docs/language-layer.md`.
+The technical notes are in `docs/language-layer.md`.

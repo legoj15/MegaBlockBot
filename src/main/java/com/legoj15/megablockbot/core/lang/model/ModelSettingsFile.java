@@ -82,11 +82,14 @@ public final class ModelSettingsFile {
             if (!parsed.isJsonObject()) throw new IllegalArgumentException("the file must hold one JSON object");
             root = parsed.getAsJsonObject();
         } catch (JsonParseException notJson) {
-            throw new IllegalArgumentException("the file is not valid JSON (" + firstLine(notJson.getMessage()) + ")");
+            // Only where: the parser's own message quotes the names it had read ("path $.<name>"), and a key
+            // pasted as a name would ride into the log on it.
+            throw new IllegalArgumentException("the file is not valid JSON" + where(notJson.getMessage()));
         }
         for (String key : root.keySet()) {
             if (!KEYS.contains(key)) {
-                throw new IllegalArgumentException("unknown setting '" + key + "'; the settings are "
+                // The name is not quoted either: a key pasted as a setting's name would be in the log.
+                throw new IllegalArgumentException("a setting name the bot does not know; the settings are "
                         + String.join(", ", KEYS));
             }
         }
@@ -127,7 +130,10 @@ public final class ModelSettingsFile {
             LOG.log(System.Logger.Level.INFO, "language layer: " + settings);
             return settings;
         } catch (IOException | RuntimeException e) {
-            // The message names the problem and the file, never a value from it.
+            // The line holds the file's path and the sentence naming the problem. That sentence names the settings
+            // the bot knows and may quote a number that is out of range; it never quotes text the file gave for a
+            // name, a provider, apiKey, apiKeyEnv or the address (a key pasted in the wrong place must not reach a
+            // log).
             LOG.log(System.Logger.Level.WARNING, "language layer config " + file
                     + " is not usable, so the bot understands only the fixed commands: " + e.getMessage());
             return ModelSettings.none();
@@ -155,8 +161,9 @@ public final class ModelSettingsFile {
         String fromEnv = env.apply(variable);
         if (fromEnv != null && !fromEnv.isBlank()) return fromEnv.strip();
         if (!inline.isEmpty()) return inline;
-        throw new IllegalArgumentException("apiKeyEnv names the environment variable " + variable
-                + ", which is not set, and there is no apiKey");
+        // The variable's name is not quoted: when the key was pasted where a name belongs, quoting it would log the key.
+        throw new IllegalArgumentException("apiKeyEnv names an environment variable that is not set, and there is "
+                + "no apiKey");
     }
 
     private static String string(JsonObject root, String field, String fallback) {
@@ -183,9 +190,11 @@ public final class ModelSettingsFile {
         return value;
     }
 
-    private static String firstLine(String message) {
-        if (message == null) return "unreadable";
-        int newline = message.indexOf('\n');
-        return newline < 0 ? message : message.substring(0, newline);
+    private static final java.util.regex.Pattern POSITION = java.util.regex.Pattern.compile("line ([0-9]+) column ([0-9]+)");
+
+    /** " (line N, column M)" when the parser said where, else nothing. Never any of the file's own text. */
+    private static String where(String message) {
+        java.util.regex.Matcher at = POSITION.matcher(message == null ? "" : message);
+        return at.find() ? " (line " + at.group(1) + ", column " + at.group(2) + ")" : "";
     }
 }

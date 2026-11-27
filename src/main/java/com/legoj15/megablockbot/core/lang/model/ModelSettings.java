@@ -1,5 +1,7 @@
 package com.legoj15.megablockbot.core.lang.model;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Objects;
@@ -10,7 +12,9 @@ import java.util.Objects;
  * server's config directory.
  *
  * <p>The API key lives here and nowhere else in the layer's output: {@link #toString()} never prints it, and
- * {@link #redact} scrubs it out of any text (an error body a gateway echoed back) before it is logged.
+ * {@link #redact} replaces every exact occurrence of it in a text (an error body a gateway echoed back) before it is
+ * logged. The address is printed as {@link #safeBaseUrl()} only: scheme, host, port and path, no user name, password,
+ * query or fragment.
  *
  * @param provider        the wire format, or {@link Provider#NONE} for no model at all
  * @param baseUrl         the server root: {@code http://host:port/v1} for {@code openai} (the layer appends
@@ -43,7 +47,8 @@ public record ModelSettings(Provider provider, String baseUrl, String model, Str
             for (Provider provider : values()) {
                 if (provider.id().equals(text.strip().toLowerCase(Locale.ROOT))) return provider;
             }
-            throw new IllegalArgumentException("provider must be none, openai or anthropic, not '" + text + "'");
+            // What was written is not quoted: a key pasted into the wrong field must not reach a log.
+            throw new IllegalArgumentException("provider must be none, openai or anthropic");
         }
     }
 
@@ -85,16 +90,73 @@ public record ModelSettings(Provider provider, String baseUrl, String model, Str
         return provider != Provider.NONE;
     }
 
-    /** {@code text} with every occurrence of the API key replaced, for log lines and anything else that may leave. */
+    /** What {@link #safeBaseUrl} prints for an address it cannot make sense of (and so cannot vouch for). */
+    private static final String UNUSABLE_ADDRESS = "<not a usable address>";
+
+    /**
+     * {@code text} with every exact occurrence of the API key replaced by {@code ***}. That is all it does: the key
+     * in any other shape (URL-encoded, quoted differently, cut short, hashed) is not recognised, and nothing else in
+     * the text is touched. Callers that may be handed the server's address too use {@link #scrub}.
+     */
     public String redact(String text) {
         if (text == null || apiKey.isEmpty()) return text;
         return text.replace(apiKey, "***");
     }
 
-    /** Never prints the key: only whether one is set. */
+    /**
+     * The server address as it may be printed: scheme, host, port and path. The user name and password that can
+     * precede the host, and the query and fragment (where some gateways expect a token), are left out, as is
+     * everything of an address that cannot be read as {@code scheme://host...}.
+     */
+    public String safeBaseUrl() {
+        if (baseUrl.isEmpty()) return "";
+        try {
+            URI uri = new URI(baseUrl);
+            if (uri.getScheme() == null || uri.getHost() == null) return UNUSABLE_ADDRESS;
+            return uri.getScheme() + "://" + uri.getHost() + (uri.getPort() >= 0 ? ":" + uri.getPort() : "")
+                    + (uri.getRawPath() == null ? "" : uri.getRawPath());
+        } catch (URISyntaxException notAnAddress) {
+            return UNUSABLE_ADDRESS;
+        }
+    }
+
+    /**
+     * {@code text} made fit for a log line or a message to the owner: the address of the server, where it appears
+     * (a JDK complaint about a bad request quotes it), is replaced by {@link #safeBaseUrl}, and the key as
+     * {@link #redact} does.
+     */
+    public String scrub(String text) {
+        if (text == null) return redact(null);
+        String cleaned = text;
+        if (!baseUrl.isEmpty()) {
+            // The request URL is the base without trailing slashes plus a path, so that is the form to look for.
+            String raw = withoutTrailingSlashes(baseUrl);
+            String safe = withoutTrailingSlashes(safeBaseUrl());
+            if (!raw.isEmpty() && !raw.equals(safe)) cleaned = cleaned.replace(raw, safe);
+        }
+        // A server that does not know the model quotes its name back. A name as long as a key may be one, pasted a
+        // field too high; a short name is only a name, and replacing it would chew up ordinary words.
+        if (model.length() >= KEY_LIKE_LENGTH) cleaned = cleaned.replace(model, "<model>");
+        return redact(cleaned);
+    }
+
+    /** From this length on, the model setting's text is treated as a possible key in what is logged. */
+    static final int KEY_LIKE_LENGTH = 20;
+
+    private static String withoutTrailingSlashes(String url) {
+        int end = url.length();
+        while (end > 0 && url.charAt(end - 1) == '/') end--;
+        return url.substring(0, end);
+    }
+
+    /**
+     * Never prints the key, nor the secrets an address can carry, nor the model name as written: only whether each
+     * is set. The model name sits beside the key in the file, and a key pasted one field too high would otherwise be
+     * logged on every start. The file itself says which model was asked for.
+     */
     @Override
     public String toString() {
-        return "ModelSettings[provider=" + provider.id() + ", baseUrl=" + baseUrl + ", model=" + model
+        return "ModelSettings[provider=" + provider.id() + ", baseUrl=" + safeBaseUrl() + ", model=" + (model.isEmpty() ? "<none>" : "<set>")
                 + ", apiKey=" + (apiKey.isEmpty() ? "<none>" : "<set>") + ", timeout=" + timeout
                 + ", maxRoundTrips=" + maxRoundTrips + ", maxOutputTokens=" + maxOutputTokens + "]";
     }

@@ -3,7 +3,6 @@ package com.legoj15.megablockbot.core.lang.model;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -19,6 +18,7 @@ import com.legoj15.megablockbot.core.goal.ComponentCheck;
 import com.legoj15.megablockbot.core.goal.Goal;
 import com.legoj15.megablockbot.core.lang.FixedGrammar;
 import com.legoj15.megablockbot.core.lang.Intent;
+import com.legoj15.megablockbot.core.lang.LanguageContext;
 import com.legoj15.megablockbot.core.lang.model.FakeModelServer.Answer;
 import com.legoj15.megablockbot.core.lang.model.Wire.Call;
 import com.legoj15.megablockbot.core.lang.model.Wire.ToolResultSeen;
@@ -33,6 +33,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -306,6 +307,210 @@ class ModelLanguageLayerTest {
         assertEquals(new Goal.HaveItem(ItemKey.of("stone_pickaxe"), 2), soleSetGoal(interpret(layer, LOOSE)).goal());
     }
 
+    // ── a clause the grammar understood is never lost ─────────────────────────────────────────────
+
+    /** The grammar reads the first clause and not the second, so the model is asked about the message. */
+    private static final String MIXED = "get 2 bread; sing me a song";
+    private static final Goal BREAD = new Goal.HaveItem(ItemKey.of("bread"), 2);
+    private static final String BREAD_ARGS = "{\"kind\":\"have_item\",\"item\":\"bread\",\"count\":2}";
+    private static final String AXE_ARGS = "{\"kind\":\"have_item\",\"item\":\"iron_axe\"}";
+
+    /** Every way a model can answer for the clause the grammar could not read, with what the owner must end up with. */
+    static Stream<Arguments> modelAnswersToAHalfUnderstoodMessage() {
+        Intent bread = new Intent.SetGoal(BREAD);
+        Intent said = new Intent.Say("I cannot sing, sorry.");
+        // The model contributed nothing new, so the grammar's own complaint stays, with the note.
+        String complaint = ((Intent.Unknown) grammarSays(MIXED).get(1)).reason();
+        Intent kept = new Intent.Unknown(complaint + " " + ModelLanguageLayer.UNDECIDED_NOTE);
+        List<Arguments> rows = new ArrayList<>();
+        for (Wire wire : Wire.values()) {
+            rows.add(Arguments.of(wire, "plain text", wire.text("I cannot sing, sorry."), List.of(bread, said)));
+            rows.add(Arguments.of(wire, "only say", wire.toolCalls(1, Call.of("say", "{\"text\":\"I cannot sing, sorry.\"}")),
+                    List.of(bread, said)));
+            rows.add(Arguments.of(wire, "only status", wire.toolCalls(1, Call.of("status", "{}")),
+                    List.of(bread, new Intent.Status())));
+            rows.add(Arguments.of(wire, "the same goal again", wire.toolCalls(1, setGoal(BREAD_ARGS)), List.of(bread, kept)));
+            rows.add(Arguments.of(wire, "a second goal", wire.toolCalls(1, setGoal(AXE_ARGS)),
+                    List.of(bread, new Intent.SetGoal(new Goal.HaveItem(ItemKey.of("iron_axe"), 1)))));
+        }
+        return rows.stream();
+    }
+
+    @ParameterizedTest(name = "{0}: {1}")
+    @MethodSource("modelAnswersToAHalfUnderstoodMessage")
+    void aClauseTheGrammarUnderstoodIsNeverLost(Wire wire, String how, Answer answer, List<Intent> expected)
+            throws Exception {
+        ModelLanguageLayer layer = layer(wire, answer);
+
+        List<Intent> intents = interpret(layer, MIXED);
+
+        assertEquals(expected, intents, how);
+        assertEquals(1, intents.stream().filter(new Intent.SetGoal(BREAD)::equals).count(), how);
+    }
+
+    @ParameterizedTest
+    @EnumSource(Wire.class)
+    void theModelIsToldWhatWasAlreadyUnderstood(Wire wire) throws Exception {
+        ModelLanguageLayer layer = layer(wire, wire.text("I cannot sing."));
+        assertEquals(new Intent.SetGoal(BREAD), grammarSays(MIXED).get(0));
+
+        interpret(layer, MIXED);
+        interpret(layer, "sing me a song");
+
+        // The request must tell the model that the bread goal is queued already, and only for the message that had
+        // one. Where in the request it says so is the layer's choice, so the whole body is searched.
+        assertTrue(server.requests().get(0).body().contains("minecraft:bread"));
+        assertFalse(server.requests().get(1).body().contains("minecraft:bread"));
+    }
+
+    @ParameterizedTest
+    @EnumSource(Wire.class)
+    void aControlTheGrammarGaveIsNotQueuedASecondTime(Wire wire) throws Exception {
+        // The model repeats the pause and adds a plain cancel, which is a different intent from the grammar's
+        // "cancel all" and is kept on purpose: the grammar's two stay, the repeated pause does not.
+        ModelLanguageLayer layer = layer(wire, wire.toolCalls(1, Call.of("pause", "{}"), Call.of("cancel", "{}"),
+                Call.of("status", "{}")));
+
+        List<Intent> intents = interpret(layer, "pause; cancel all; sing me a song");
+
+        // Cancel(false) is not the Cancel(true) the grammar gave, so it stays.
+        assertEquals(List.of(new Intent.Pause(), new Intent.Cancel(true), new Intent.Cancel(false), new Intent.Status()),
+                intents);
+    }
+
+    @ParameterizedTest
+    @EnumSource(Wire.class)
+    void aSayTheModelFumbledIsNotShownToTheOwner(Wire wire) throws Exception {
+        // The say is refused and sent back; the model then answers in plain text. The owner gets the answer, and no
+        // line about a tool the owner never heard of.
+        ModelLanguageLayer layer = layer(wire,
+                wire.toolCalls(1, Call.of("say", "{\"text\":\"<think>hm</think>\"}")),
+                wire.text("Hello there."));
+
+        assertEquals(List.of(new Intent.Say("Hello there.")), interpret(layer, LOOSE));
+        assertEquals(2, server.requests().size());
+    }
+
+    @ParameterizedTest
+    @EnumSource(Wire.class)
+    void pauseResumePauseFromTheModelAreThreeThings(Wire wire) throws Exception {
+        // "hold on; ok carry on; hold on again": dropping the second pause as a repeat would leave the bot running.
+        ModelLanguageLayer layer = layer(wire, wire.toolCalls(1, Call.of("pause", "{}"), Call.of("resume", "{}"),
+                Call.of("pause", "{}")));
+
+        assertEquals(List.of(new Intent.Pause(), new Intent.Resume(), new Intent.Pause()), interpret(layer, LOOSE));
+    }
+
+    @Test
+    void theGrammarsIntentsComeFirstInTheirOrderThenTheModelsOwn() throws Exception {
+        ModelLanguageLayer layer = layer(Wire.OPENAI, Wire.OPENAI.toolCalls(1, setGoal(BREAD_ARGS), setGoal(AXE_ARGS)));
+
+        List<Intent> intents = interpret(layer, "get 2 bread; sing me a song; pause");
+
+        assertEquals(List.of(new Intent.SetGoal(BREAD), new Intent.Pause(),
+                new Intent.SetGoal(new Goal.HaveItem(ItemKey.of("iron_axe"), 1))), intents);
+    }
+
+    // ── a refusal the model never corrected reaches the owner ─────────────────────────────────────
+
+    private static final String NO_SUCH_ITEM = "{\"kind\":\"have_item\",\"item\":\"minecraft:stone_pick\",\"count\":2}";
+
+    @ParameterizedTest
+    @EnumSource(Wire.class)
+    void aRefusalTheRoundTripCapLeftUncorrectedReachesTheOwner(Wire wire) throws Exception {
+        // What a second refusal tells the owner: the reference the capped run must give as well.
+        String second;
+        try (FakeModelServer repeating = new FakeModelServer(wire.toolCalls(1, setGoal(NO_SUCH_ITEM)))) {
+            second = soleUnknown(interpret(new ModelLanguageLayer(wire.settings(repeating.url())), LOOSE)).reason();
+        }
+        server = new FakeModelServer(wire.toolCalls(1, setGoal(NO_SUCH_ITEM)));
+        ModelLanguageLayer capped = new ModelLanguageLayer(wire.settings(server.url(), Duration.ofSeconds(10), 1));
+
+        List<Intent> intents = interpret(capped, LOOSE);
+
+        assertEquals(1, server.requests().size());
+        assertTrue(second.contains("minecraft:stone_pick"), second);
+        assertEquals(second, soleUnknown(intents).reason());
+    }
+
+    @ParameterizedTest
+    @EnumSource(Wire.class)
+    void aRefusalFollowedByAPlainAnswerStillReachesTheOwner(Wire wire) throws Exception {
+        ModelLanguageLayer layer = layer(wire, wire.toolCalls(1, setGoal(NO_SUCH_ITEM)),
+                wire.text("Sorry, there is no such pickaxe."));
+
+        List<Intent> intents = interpret(layer, LOOSE);
+
+        assertEquals(2, intents.size(), intents.toString());
+        assertEquals(new Intent.Say("Sorry, there is no such pickaxe."), intents.get(0));
+        assertTrue(assertInstanceOf(Intent.Unknown.class, intents.get(1)).reason().contains("minecraft:stone_pick"));
+    }
+
+    @ParameterizedTest
+    @EnumSource(Wire.class)
+    void aRefusalFollowedByAFailedRoundTripStillReachesTheOwner(Wire wire) throws Exception {
+        ModelLanguageLayer layer = layer(wire, wire.toolCalls(1, setGoal(NO_SUCH_ITEM)), Answer.status(500, "{}"));
+
+        List<Intent> intents = interpret(layer, LOOSE);
+
+        assertTrue(soleUnknown(intents).reason().contains("minecraft:stone_pick"), intents.toString());
+    }
+
+    // ── what the owner reads from the model is treated one way ────────────────────────────────────
+
+    @ParameterizedTest
+    @EnumSource(Wire.class)
+    void aSayToolsTextLosesItsThinkingLikeAPlainAnswer(Wire wire) throws Exception {
+        ModelLanguageLayer layer = layer(wire, wire.toolCalls(1,
+                Call.of("say", "{\"text\":\"<think>they want a song</think>I cannot sing.\"}")));
+
+        assertEquals(List.of(new Intent.Say("I cannot sing.")), interpret(layer, LOOSE));
+    }
+
+    @ParameterizedTest
+    @EnumSource(Wire.class)
+    void aSayWithNothingButThinkingInItIsSentBack(Wire wire) throws Exception {
+        ModelLanguageLayer layer = layer(wire,
+                wire.toolCalls(1, Call.of("say", "{\"text\":\"<think>hm</think>\"}")),
+                wire.toolCalls(2, Call.of("say", "{\"text\":\"Hi.\"}")));
+
+        assertEquals(List.of(new Intent.Say("Hi.")), interpret(layer, LOOSE));
+        assertEquals(2, server.requests().size());
+    }
+
+    @ParameterizedTest
+    @EnumSource(Wire.class)
+    void textForTheOwnerIsCutAtTheMaximumLength(Wire wire) throws Exception {
+        String endless = "x".repeat(ModelLanguageLayer.MAX_OWNER_TEXT + 100);
+        for (Answer answer : List.of(wire.text(endless), wire.toolCalls(1, Call.of("say", "{\"text\":\"" + endless + "\"}")))) {
+            try (FakeModelServer one = new FakeModelServer(answer)) {
+                List<Intent> intents = interpret(new ModelLanguageLayer(wire.settings(one.url())), LOOSE);
+
+                assertEquals(1, intents.size(), intents.toString());
+                String said = assertInstanceOf(Intent.Say.class, intents.get(0)).text();
+                assertEquals(ModelLanguageLayer.MAX_OWNER_TEXT, said.length());
+                assertTrue(endless.startsWith(said));
+            }
+        }
+    }
+
+    @Test
+    void aLongBlueprintListIsCappedInThePrompt() throws Exception {
+        int total = ModelPrompts.MAX_LISTED_BLUEPRINTS + 150;
+        List<String> many = IntStream.range(0, total).mapToObj(i -> "blueprint %03d".formatted(i)).toList();
+        LanguageContext context = new LanguageContext(new ModelFixtures.Items(), ModelFixtures.DIMENSION,
+                ModelFixtures.OWNER_POS, ModelFixtures.BOT_POS, ModelFixtures.STATUS, many, ModelFixtures.ENCHANTMENTS);
+        server = new FakeModelServer(Wire.OPENAI.text("hello"));
+
+        new ModelLanguageLayer(Wire.OPENAI.settings(server.url())).interpret(LOOSE, context).get(20, TimeUnit.SECONDS);
+
+        String system = Wire.OPENAI.systemPrompt(server.requests().get(0).json());
+        assertTrue(system.contains("blueprint 000"));
+        assertTrue(system.contains("blueprint %03d".formatted(ModelPrompts.MAX_LISTED_BLUEPRINTS - 1)));
+        assertFalse(system.contains("blueprint %03d".formatted(ModelPrompts.MAX_LISTED_BLUEPRINTS)));
+        assertTrue(system.contains("and 150 more"), "the cut-off list must say how many were left out");
+    }
+
     // ── what the model may name: set_goal, kind by kind ───────────────────────────────────────────
 
     static Stream<Arguments> goalsTheChecksAllow() {
@@ -364,6 +569,18 @@ class ModelLanguageLayerTest {
 
     // ── what the model may not name ───────────────────────────────────────────────────────────────
 
+    @Test
+    void aBlankEnchantmentIsRefusedEvenWhileTheGameKnowsNoneYet() throws Exception {
+        // With no known enchantments an id is taken as named, which is why "" must be caught before it is namespaced.
+        server = new FakeModelServer(Wire.OPENAI.toolCalls(1, setGoal(
+                "{\"kind\":\"have_item\",\"item\":\"diamond_pickaxe\",\"enchantment\":\"  \"}")));
+        ModelLanguageLayer layer = new ModelLanguageLayer(Wire.OPENAI.settings(server.url()));
+
+        List<Intent> intents = layer.interpret(LOOSE, ModelFixtures.context(Set.of())).get(20, TimeUnit.SECONDS);
+
+        assertTrue(soleUnknown(intents).reason().contains("needs a name"), intents.toString());
+    }
+
     /** Each row: the tool, its arguments, and the thing in them that the error and the owner's Unknown must name. */
     static Stream<Arguments> goalsTheChecksRefuse() {
         List<Arguments> rows = new ArrayList<>();
@@ -411,6 +628,23 @@ class ModelLanguageLayerTest {
                 Arguments.of(Wire.OPENAI, "set_goal",
                         "{\"kind\":\"stockpile\",\"item\":\"cobblestone\",\"count\":10001,\"position\":" + POSITION + "}",
                         "count"),
+                // A name that is empty or blank is refused as such, before anything is made of it (never "minecraft:").
+                Arguments.of(Wire.OPENAI, "set_goal", "{\"kind\":\"have_item\",\"item\":\"\"}", "needs a name"),
+                Arguments.of(Wire.OPENAI, "set_goal", "{\"kind\":\"have_item\",\"item\":\"   \"}", "needs a name"),
+                Arguments.of(Wire.OPENAI, "set_goal",
+                        "{\"kind\":\"have_item\",\"item\":\"diamond_pickaxe\",\"enchantment\":\"\"}", "needs a name"),
+                Arguments.of(Wire.OPENAI, "set_goal",
+                        "{\"kind\":\"have_item\",\"item\":\"diamond_pickaxe\",\"enchantment\":\"  \",\"level\":2}",
+                        "needs a name"),
+                Arguments.of(Wire.OPENAI, "set_goal",
+                        "{\"kind\":\"stockpile\",\"item\":\"\",\"count\":5,\"position\":" + POSITION + "}", "needs a name"),
+                Arguments.of(Wire.OPENAI, "set_goal", "{\"kind\":\"equip\",\"items\":[\"iron_helmet\",\" \"]}",
+                        "needs a name"),
+                Arguments.of(Wire.OPENAI, "set_goal", "{\"kind\":\"equip\",\"item\":\"\"}", "needs a name"),
+                Arguments.of(Wire.OPENAI, "set_goal",
+                        "{\"kind\":\"build\",\"blueprint\":\"\",\"position\":" + POSITION + "}", "needs a name"),
+                Arguments.of(Wire.OPENAI, "set_goal",
+                        "{\"kind\":\"build\",\"blueprint\":\"   \",\"position\":" + POSITION + "}", "needs a name"),
                 Arguments.of(Wire.OPENAI, "set_goal", "{\"kind\":\"teleport\"}", "teleport"),
                 Arguments.of(Wire.OPENAI, "set_goal", "{\"item\":\"stone\"}", "kind"),
                 Arguments.of(Wire.OPENAI, "set_goal", "{oops", "arguments"),
@@ -533,6 +767,72 @@ class ModelLanguageLayerTest {
         assertTrue(unknown.reason().length() > said.reason().length(), "no line said the model could not be reached");
     }
 
+    /** {@code answer} with a throw-away JSON field added so that its body is exactly {@code bytes} long (all ASCII). */
+    private static Answer paddedTo(Answer answer, int bytes) {
+        String body = answer.body();
+        String head = body.substring(0, body.length() - 1) + ",\"padding\":\"";
+        String tail = "\"}";
+        String padded = head + "x".repeat(bytes - head.length() - tail.length()) + tail;
+        assertEquals(bytes, padded.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+        return new Answer(answer.status(), padded, answer.delayMillis(), answer.stallMillis());
+    }
+
+    @ParameterizedTest
+    @EnumSource(Wire.class)
+    void aResponseBodyOverTheLimitFailsTheRoundTripLikeAnyOther(Wire wire) throws Exception {
+        Answer good = wire.toolCalls(1, setGoal("{\"kind\":\"have_item\",\"item\":\"stone_pickaxe\"}"));
+        ModelLanguageLayer layer = layer(wire, paddedTo(good, JsonPost.MAX_RESPONSE_BYTES + 1));
+
+        List<Intent> intents = interpret(layer, LOOSE);
+
+        Intent.Unknown said = soleUnknown(grammarSays(LOOSE));
+        Intent.Unknown unknown = soleUnknown(intents);
+        assertTrue(unknown.reason().startsWith(said.reason()), unknown.reason());
+        assertTrue(unknown.reason().length() > said.reason().length(), "no line said the model could not be reached");
+
+        // The limit is that size and no smaller: a body of exactly that many bytes is read.
+        server.script(paddedTo(good, JsonPost.MAX_RESPONSE_BYTES));
+        assertEquals(new Goal.HaveItem(ItemKey.of("stone_pickaxe"), 1), soleSetGoal(interpret(layer, LOOSE)).goal());
+    }
+
+    @ParameterizedTest
+    @EnumSource(Wire.class)
+    void aBodyIsNotReadOnPastTheLimit(Wire wire) throws Exception {
+        // The server sends well over the limit and then leaves the response open for 8 s. A client that held the
+        // whole body before looking at its size would sit there until the stall ends.
+        Answer good = wire.toolCalls(1, setGoal("{\"kind\":\"have_item\",\"item\":\"stone_pickaxe\"}"));
+        ModelLanguageLayer layer = layer(wire, paddedTo(good, 2 * JsonPost.MAX_RESPONSE_BYTES).thenStalls(8000));
+        long start = System.nanoTime();
+
+        List<Intent> intents = layer.interpret(LOOSE, ModelFixtures.context()).get(5, TimeUnit.SECONDS);
+
+        assertTrue(Duration.ofNanos(System.nanoTime() - start).toMillis() < 4000, "the limit did not end the read");
+        Intent.Unknown said = soleUnknown(grammarSays(LOOSE));
+        assertTrue(soleUnknown(intents).reason().length() > said.reason().length(), intents.toString());
+    }
+
+    static Stream<GoalResult> resultsTheBuiltInTextCannotDescribe() {
+        Goal goal = new Goal.HaveItem(ItemKey.of("diamond"), 3);
+        return Stream.of(
+                new GoalResult(goal, GoalResult.Status.FAILED, 0, 3, List.of(),
+                        new Failure.Protected(null, "container", "x")),
+                new GoalResult(goal, GoalResult.Status.PARTIAL, 1, 3, List.of(),
+                        new Failure.Hazard("lava", ModelFixtures.DIMENSION, null, "x")),
+                new GoalResult(null, GoalResult.Status.FAILED, 0, 3, List.of(), null));
+    }
+
+    @ParameterizedTest
+    @MethodSource("resultsTheBuiltInTextCannotDescribe")
+    void explainNeverThrowsWhateverTheResultHolds(GoalResult result) throws Exception {
+        ModelLanguageLayer up = layer(Wire.OPENAI, Wire.OPENAI.text("It stopped."));
+        Optional<String> whileUp = up.explain(result, ModelFixtures.context()).get(5, TimeUnit.SECONDS);
+        assertTrue(whileUp.isPresent() && !whileUp.get().isBlank(), whileUp.toString());
+
+        ModelLanguageLayer down = new ModelLanguageLayer(Outage.REFUSED.settingsFor(Wire.OPENAI, this));
+        Optional<String> whileDown = down.explain(result, ModelFixtures.context()).get(5, TimeUnit.SECONDS);
+        assertTrue(whileDown.isPresent() && !whileDown.get().isBlank(), whileDown.toString());
+    }
+
     @ParameterizedTest
     @EnumSource(Wire.class)
     void theUnderstoodPartOfAMessageSurvivesAMissingModel(Wire wire) throws Exception {
@@ -615,11 +915,6 @@ class ModelLanguageLayerTest {
         assertTrue(unknown.reason().startsWith(said.reason()), unknown.reason());
     }
 
-    @Test
-    void theDefaultCapIsFourRoundTrips() {
-        assertEquals(4, ModelSettings.none().maxRoundTrips());
-    }
-
     // ── explain ───────────────────────────────────────────────────────────────────────────────────
 
     private static GoalResult failedResult() {
@@ -698,9 +993,9 @@ class ModelLanguageLayerTest {
 
         // The failed endings differ in kind, so their sentences must too; two cancelled/partial ones may share a goal.
         assertEquals(endings.size(), sentences.size(), sentences.toString());
-        // The sentence says which goal and how far it got, so the owner is not told "failed" and nothing else.
+        // The sentence names the goal in its own words, so the owner is not told "failed" and nothing else.
         String partial = layer.explain(endings.get(endings.size() - 1), ModelFixtures.context()).get(10, TimeUnit.SECONDS).get();
-        assertTrue(partial.contains("1") && partial.contains("3"), partial);
+        assertTrue(partial.contains("iron ingot"), partial);
     }
 
     @ParameterizedTest
@@ -761,15 +1056,39 @@ class ModelLanguageLayerTest {
             // Not a vacuous scan: the failures above must have logged something.
             assertFalse(logs.lines().isEmpty(), "nothing was logged, so the scan proves nothing");
         }
-        assertFalse(produced.isEmpty());
         for (String text : produced) assertFalse(text.contains(ModelFixtures.SECRET), text);
-        assertNotEquals("", ModelSettings.none().toString());
     }
 
     @Test
-    void settingsNeverPrintTheKey() {
+    void settingsNeverPrintTheKeyOrTheSecretsInTheAddress() {
         ModelSettings settings = Wire.ANTHROPIC.settings("https://api.anthropic.com");
         assertFalse(settings.toString().contains(ModelFixtures.SECRET));
         assertFalse(settings.redact("echoed: " + ModelFixtures.SECRET).contains(ModelFixtures.SECRET));
+
+        ModelSettings addressed = new ModelSettings(ModelSettings.Provider.OPENAI, ModelFixtures.SECRET_ADDRESS, "m",
+                ModelFixtures.SECRET, Duration.ofSeconds(10), 4, 512);
+        String printed = addressed.toString();
+        for (String secret : ModelFixtures.ADDRESS_SECRETS) assertFalse(printed.contains(secret), printed);
+        // What is left says where the server is: scheme, host, port and path.
+        assertTrue(printed.contains("http://models.example.test:8080/v1"), printed);
+    }
+
+    @Test
+    void anAddressThatCannotBeUsedIsLoggedWithoutItsSecrets() throws Exception {
+        // A space in the host makes the address unparseable; the JDK's complaint about it quotes the address.
+        ModelSettings settings = new ModelSettings(ModelSettings.Provider.OPENAI,
+                "http://uinfo-USER:uinfo-PASS@bad host.example.test/v1?token=QUERY-SECRET", "m", ModelFixtures.SECRET,
+                Duration.ofSeconds(10), 4, 512);
+        try (LogCapture logs = new LogCapture(ModelLanguageLayer.class.getPackageName())) {
+            List<Intent> intents = interpret(new ModelLanguageLayer(settings), LOOSE);
+
+            assertTrue(soleUnknown(intents).reason().length() > soleUnknown(grammarSays(LOOSE)).reason().length());
+            assertFalse(logs.lines().isEmpty(), "nothing was logged, so the scan proves nothing");
+            List<String> produced = new ArrayList<>(logs.lines());
+            produced.add(intents.toString());
+            for (String text : produced) {
+                for (String secret : ModelFixtures.ADDRESS_SECRETS) assertFalse(text.contains(secret), text);
+            }
+        }
     }
 }
