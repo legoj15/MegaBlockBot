@@ -83,7 +83,7 @@ What the navigation tasks need from this runtime:
   task that ended; it still clears its own on pause and abort.
 - `BlockSafety.of(server).mayBreak/ noteBotPlaced` and `BotMemory.notePlaced/forgetPlaced` are the contract for any block
   the bot places or breaks (see `CraftTask.placeTable`).
-- The snapshot reads `BotMemory` for stations and containers; a `deposit` task must `noteContainer` what it saw.
+- The snapshot reads `BotMemory` for stations and containers; a `deposit` task notes what it saw (`ContainerAccess.note`), as `withdraw` and `look_inside` do.
 - `Failure.Died` is reported through `onDeath`; a task whose body died does not also fail with `Died`.
 
 ## `craft`
@@ -123,40 +123,62 @@ Leaf params: `recipe` (the game recipe id), `times`, `station` (empty or `minecr
   face within `blockInteractionRange`). That is all the game asks (`BlockItem.useOn`, `BlockPlaceContext`): a sturdy face is
   not needed, so a table goes on leaves. Two things are asked beyond the game: the block below the spot has a collision
   shape (so the table's item comes to rest beside the body when the table is broken, not down a drop) and
-  `BlockSafety.mayBreak` allows breaking it again. The click is made sneaking (`BodyInput.sneak`, one tick to take effect;
+  `BlockSafety.mayBreak` allows breaking it again (so no spot inside a protected area is ever offered). The click is made sneaking (`BodyInput.sneak`, one tick to take effect;
   released a tick before the table is used), as a player builds against a chest or a door, because the click on an
-  interactive block would use it instead. `interactBlock` then does what the packet handler does (reach, `mayInteract`,
+  interactive block would use it instead. The look that finds the sites and the click use the same eye (the sneaking one,
+  `TableSites.sneakingEye`). `interactBlock` then does what the packet handler does (reach, `mayInteract`,
   `ServerPlayerGameMode.useItemOn`) and the world's answer decides: the first site whose spot becomes a table is the one.
 - No usable spot within reach: the body walks, with `BotNavigator.goTo`, to the nearest place it can stand (feet and head
   free, a full-height floor) that has a usable spot beside it, searched shell by shell outward within
   `TableSites.DEFAULT_RADIUS` (12) blocks in every direction, and looks again from where it arrives. Up to
-  `CraftTask.WALKS_ALLOWED` (4) walks; a walk that fails (`NO_PATH`, `STUCK`) makes the next nearest place the next try.
-  `TableSites.setRadius(bodyUuid, n)` narrows the search for one body (a test builds "nowhere" in a 16-block arena that way).
+  `CraftTask.WALKS_ALLOWED` (4) walks; a walk that fails (`NO_PATH`, `STUCK`, or a navigator that stops three times) makes
+  the next nearest place the next try, and a walk that gets there clears the remembered failure.
+- Leaving a protected area. Inside the protected square around the owner's respawn point or the world spawn block safety
+  refuses every spot, since the table could not be taken up again. When the search found candidates and every one of them was
+  refused, it goes on over the shells beyond the normal radius out to `TableSites.WIDE_RADIUS` (`PROTECTED_RADIUS + 1 +` the
+  sideways reach of a look, 20 with the square at 16: far enough to stand beyond the far edge of the square, and to put the
+  table down beside that stand, from its middle) and the body walks there. The search over the cube costs the cheap block-safety
+  question first and the entity query and the rays only for spots that pass it. `Protected` is never the answer for "nowhere
+  to put my own table"; with no place even within the wide radius the answer is `NoPlace`.
+  `TableSites.setRadii(bodyUuid, radius, wideRadius)` narrows both for one body (a test builds "nowhere" and "a way out that
+  is not 17 blocks long" in a 16-block arena that way; the arenas of other tests stand five blocks off).
 - The table is opened with a use, the craft made, the menu closed, and the table broken the way a client does (with the hotbar slot
   that breaks it fastest, else one that cannot wear out, so the pickaxe just made keeps its durability;
-  `START_DESTROY_BLOCK`, per-tick progress, `STOP_DESTROY_BLOCK` at 1.0), then up to 100 ticks for the item. The item hops
+  `START_DESTROY_BLOCK`, per-tick progress, `STOP_DESTROY_BLOCK` at 1.0), then up to 200 ticks for the item. The item hops
   about and now and then rests outside the body's pickup box (a block on each side), so from 20 ticks after the break the
-  body walks toward a table item within 4 blocks by its movement input (not navigation; reset when the item is in or the
-  task lets go). A table the body did not place is left standing; a table is the body's when this task placed it or
+  body goes to a table item within `CraftTask.DROP_SEARCH_RADIUS` (12) blocks of where the table stood: through
+  `BotNavigator.goTo` while the item is more than `NEAR_DROP` (2.5) away, by its movement input for the last steps (or all of
+  them when the navigator will not go; the input is reset when the item is in or the task lets go). A table the body did not place is left standing; a table is the body's when this task placed it or
   `BotMemory` says an earlier one did. The task records what it placed in `BotMemory` (and `BlockSafety.noteBotPlaced`). A
   remembered table that is gone when the task looks for it or opens it is forgotten (`BotMemory.forgetPlaced`).
+- Interruptions. A reflex holds the body, which pauses the task, and may carry it several blocks off in the middle of a craft
+  or of the take-up. Resume looks again from the top (`PREPARE`): a table of this task's (the one it placed, found or was
+  given in the checkpoint) that stands out of reach is walked back to with `goTo(table, 2)` within `RETURN_RADIUS` (24) blocks
+  (up to `RETURNS_ALLOWED` (3) walks that end with it still out of reach, then `Unreachable`), before the menu is opened or the
+  break begun again. A table already broken is not forgotten: its item is looked for within `DROP_SEARCH_RADIUS` of where the
+  table stood, and walked to wherever in that radius it lies; none there, nothing to take. A body pushed out of reach of the
+  table while it is being broken is walked back the same way. Covered by `aCraftInterruptedAtItsTableWalksBackToIt`,
+  `aTableBeingTakenUpWhenTheBodyIsCarriedOffIsWalkedBackTo` and `aTableItemFarFromTheBodyIsWalkedTo` (the goal is paused at the
+  moment, the body walked off through its input until the table is out of reach, the goal resumed).
 - A break the rules refuse (`BlockSafety.mayBreak` now says no: a claim arrived while the craft ran) does not fail the craft:
   the craft's result is what the goal asked for, so the task completes, the table stays standing and stays in `BotMemory` as
   the body's, and the log says why (`MegaBlockBot` info line "leaves the crafting table at ... standing"). The tidy step and the
   next craft that finds it try again. Covered by `aRefusedTableBreakStillCompletesTheCraft`.
 - Failures: `MissingInput` (an ingredient or the table item is not carried), `TargetGone` (unknown recipe id; a table that
-  would not open), `Protected` (every candidate spot is one the body may not break again), `Unreachable` (the walks to a
-  place with a spot all failed, the game refused every click that would put the table down, or it would not start breaking), `NoProgress` (no room for the whole result),
-  `TimedOut` (the break or the pickup), and, with no place at all within the radius, `Internal` with no exception, whose detail
-  says how far the task looked. A failure with a table placed leaves the table standing, remembered; the next craft that needs
-  one finds it.
-- Why that last one is `Internal`. The executor's answer to `Unreachable`, `TargetGone`, `NoProgress`, `TimedOut` is one retry
+  would not open), `NoPlace` (the body found nowhere to put the table down: no place within the radius, none out of a protected
+  area within the wide radius, or the walks it allows all failed; the failure carries `what` ("put a crafting table down") and
+  the widest `radius` looked over), `Unreachable` (the game refused every click that would put the table down, it could not walk
+  back to the table it had put down, or the game would not start breaking it), `NoProgress` (no room for the whole result),
+  `TimedOut` (the break or the pickup). A failure with a table placed leaves the table standing, remembered; the next craft
+  that needs one finds it. Every exit, a completion included, goes through `BodyTask.release`.
+- Why `NoPlace` gives up at once. The executor's answer to `Unreachable`, `TargetGone`, `NoProgress`, `TimedOut` is one retry
   with a fresh task and then a replan; to `MissingInput`, `MissingTool`, `NoSource`, `Protected`, `Hazard` a replan. Nothing in
   a craft leaf, in `Exclusions` or in the snapshot tells the planner where a table fits, so every one of those replans is the
-  same plan again, and the goal ends after three of them (the live run: three replans, each failing the same way) with the
-  same failure. Only `Internal` and `PreemptStalled` give up at once, and `Internal` is the one whose meaning is nearest
-  ("this goal cannot go on"); `BotSpeech` says "gave up" for an `Internal` with no exception instead of "hit an internal
-  error". It is a stand-in. The proper fix is a failure kind (or a planner input) for "no plan can work from here", in `core`.
+  same plan again, and the goal ends after three of them (the live runs: three replans, each failing the same way, a canopy
+  and then the world spawn's protected square) with the same failure. `NoPlace` (`Failure.Kind.NO_PLACE`, design 3.4) is the
+  kind for "the body looked for somewhere to do this within `radius` blocks and found nowhere, and a new plan would find the
+  same": the executor gives the goal up at once with it as the result's reason, no retry and no replan, like `PreemptStalled`.
+  `Internal` means a bug again, and `BotSpeech` says so.
 
 ### A table left standing
 
@@ -172,7 +194,7 @@ and looks again at the next goal's end). Covered by `BotRuntimeGameTests.aTableL
 ## Supply containers, `look_inside` and `withdraw`
 
 The owner names the containers a body may take from (design 3.5): `use chest at <x> <y> <z>` (the position in the
-dimension the words were read in; any container block, whatever the word), `forget chest at ...`, `chests`. `BotTalk`
+dimension the words were read in; the command word is always `chest`, the block there may be any container), `forget chest at ...`, `chests`. `BotTalk`
 carries the three `Intent`s out through `BotSupply`, which answers in a sentence: the dimension must be the body's, the
 position loaded, and a container with slots must stand there (`SupplyChests.find`: a double chest named by either half is
 one inventory, its two halves recorded as one `BotMemory.SupplyContainer` together with the block that was named).
@@ -189,16 +211,28 @@ executor's `Postconditions` in `BotRuntime`) reads the snapshot: the container's
 the body has a note of it; a container nobody names any more has nothing to look at and counts as done, and in another
 dimension it cannot be done.
 
+The same leaf is the whole plan of a stockpile goal whose target the snapshot has no sight of (the body has never been
+inside it): `SolverPlanner.stockpilePlan` plans the look and nothing else (`LookInside.leafBeforeDeposit`, whose goal says
+`for=stockpile`: there, no sight at all means "not looked at yet", not "nobody names it"), and the container is the goal's
+word for the look as it is for the deposit. With the note made the goal is judged (a chest that already holds enough ends
+it), and when it is not met the tree has run out unsatisfied, so the executor replans and the deposit is planned knowing what
+is in the container. Without this the postcondition of a container nobody has opened is UNKNOWN for ever (the executor's one
+`Reach` does not tell the body what is inside), and no deposit starts.
+
 `BotMemory` keeps the list (saved with the body, the `supply` list of its compound, each entry with its block; an entry
 with no block is skipped on load; saves from before the list load as none). Notes of what a container held are per
 inventory: a double chest is one note (with its second half), whichever half the leaf named, and noting an inventory
 replaces whatever was noted under any of its blocks, so naming a chest that has since become half of a double chest
 leaves one note for the pair. `BlockSafety.mayUseContainer` lets a named container through the container and workstation
-rules for that block, never the claim rule; `mayBreak` never reads the list. Using a container is not subject to the
+rules for that block, never the claim rule, and only while the block that stands there is the one that was named (the
+same rule as the tasks, below); `mayBreak` never reads the list. Using a container is not subject to the
 protected radius, and the same holds here: a named chest inside the radius is used, and still cannot be broken.
 
 The snapshot shows each container the body may take from (placed by it, or named) as one `ContainerSight` with
-`mayTakeFrom`. What a sight holds is the body's note, never read from the world, and it is `remembered` (in range or out of
+`mayTakeFrom`. A double chest is one sight, kept at the half with the lower position hash and carrying the other half
+(`ContainerSight.other`): `Snapshot.containerAt` answers for either half, so a stockpile goal that names the far half is
+about the same inventory (its postcondition, its plan, the exemption of its own target from the supplies and the
+fingerprint all use that one lookup). What a sight holds is the body's note, never read from the world, and it is `remembered` (in range or out of
 it) until the body opens the container again. A named container the body has not opened is listed with nothing and not
 `remembered`. A container whose chunk is loaded and no longer holds that block (both blocks, for a pair) is shown with
 nothing and may not be taken from. The planner (`SolverPlanner`, "Containers the body may take from") counts what such a
@@ -210,15 +244,23 @@ items it reads the stock of and the tools that could stand in for the ones it ne
 taken as carried), in each container the body may take from.
 
 `ContainerTask` is what `withdraw` and `look_inside` share: walk to within 2 blocks, look at the container, then (when it
-is about to open it, since a position far away is not loaded) ask what the world says: the block recorded when the
-container was named has to stand at the position (both halves of a pair), a position that is not loaded is not decided
-(`Unreachable`, and the word and the note stay: the executor goes there), and block safety is asked; then it uses the block
-so that the container's own rules decide whether it opens. The menu is closed on every exit, which empties the cursor.
+is about to open it, since a position far away is not loaded) ask what the world says, by the one rule for every record of a
+container (`SupplyChests.stand(level, memory, pos)`, the same one block safety and the snapshot use): the owner's word and the
+body's note of what is inside are each of a block, and that block has to stand at the position (both halves of a pair). So a
+container the body placed and has been inside is its own only while it stands as it was, not only a named one. Another
+block there drops the record (`SupplyChests.forget`: the word, the note and the claim on the spot) and the task fails
+`TargetGone`; a position that is not loaded is not decided (`Unreachable`, and the record stays: the executor goes there);
+then block safety is asked, and the task uses the block so that the container's own rules decide whether it opens. The menu
+is closed on every exit, which empties the cursor.
 
 `withdraw` (`WithdrawTask`): leaf params `container`, `dimension`, `count`; the item and the absolute count the body should
 hold afterwards are the leaf goal's. It moves items with slot clicks on the menu (a shift-click for a whole stack, one
-right-click per item for part of one). Before it takes anything it counts the item in the container's slots: fewer than the
-leaf needs is `MissingInput` with nothing taken. Whatever it saw is noted in `BotMemory` (before the failure, and after a
+right-click per item for part of one: lift the stack, set the items down, put the rest back). A slot that does not take the
+rest back (a furnace's result slot: a named furnace can be withdrawn from) leaves it on the cursor, which the task never
+leaves: it goes to the inventory as closing the menu would send it (`MenuHand.putBack`), and to the ground only when the
+inventory is full too; the count a take reports is what the inventory gained, so it can be more than the leaf asked for.
+Before it takes anything it counts the item in the container's slots: fewer than the leaf needs is `MissingInput` with
+nothing taken. Whatever it saw is noted in `BotMemory` (before the failure, and after a
 take), so the replan counts the truth. `look_inside` (`LookTask`): leaf params `container`, `dimension`; it notes what is in
 the menu and closes it, and moves nothing.
 
@@ -232,15 +274,24 @@ the menu and closes it, and moves nothing.
   anything.
 - `deposit` asks block safety before it opens the container too (`DepositTask`, "Block safety"): the stockpile goal's target
   is the owner's word for that goal, which reaches the check as an `Allowance` over exactly that container (both halves)
-  open for the one question. It lifts the container rule, never a claim, a bed or a job site: a barrel the body did not place
-  is stocked once the owner has named it with `use chest at`.
+  open for the one question (`ContainerAccess.askAsGoalsWord`, which the look a stockpile plan makes of its target uses
+  too). It lifts the container rule, never a claim, a bed or a job site: a barrel the body did not place is stocked once the
+  owner has named it with `use chest at`. When the items are in it notes what the container holds, so what it put in is
+  remembered and the goal can be judged.
 - `SupplyChestGameTests`: a named chest supplies a craft, after the body has looked inside it; nothing is known of a chest
   before; what it holds is taken and the rest gathered; a double chest is one inventory, also when a lone chest joined by a
   second half is named again; a chest emptied after the plan is not counted again; a chest that will not open is left out of
   the plan and the goal gathers instead; a chest replaced by another block before the body arrives is not opened; a chest
-  nobody named, or taken back, is never opened; only the owner or the console can name one; a named chest is usable
-  inside the protected radius and never breakable; a stockpile goal fills its own chest and is refused by a claim; what the
-  world says of a named container (stands, another block, not loaded).
+  nobody named, or taken back, is never opened (and stands within the body's sight, so it is the owner's word that keeps the
+  body out, not distance); only the owner or the console can name one; a named chest is usable inside the protected radius
+  and never breakable; another block where a named chest stood is refused by block safety too; a chest the body placed and
+  was inside, replaced by another container, is not opened and is forgotten; a stockpile goal fills its own chest (one the
+  body has not been inside: it looks first) and is refused by a claim; a stockpile goal naming the other half of a double
+  chest than the one noted fills the one inventory; what the world says of a named container (stands, another block, not
+  loaded).
+- `WithdrawGameTests` (in `game.task`, as it drives `WithdrawTask`'s clicks on a menu the test opened): a partial take
+  from a furnace's result slot leaves the cursor empty, loses nothing, and counts what the inventory gained, with the
+  ground getting only what a full inventory cannot hold.
 
 ## `equip`
 
@@ -253,6 +304,7 @@ the cursor back. Main hand: select the hotbar slot that holds it, or swap it in 
 - A body that dies with a table standing (or is cancelled mid-craft) takes it up after the goal ends only when it is
   still within reach; a table out of reach stays in `BotMemory` and is picked up by the next craft that finds it. A
   `retrieve`-style task for the navigation work to walk back to it does not exist.
-- Nothing yet makes the planner or the executor aware of where a table fits (see "Why that last one is `Internal`" above).
+- Nothing makes the planner or the executor aware of where a table fits; `NoPlace` is the executor's answer to that (see "Why
+  `NoPlace` gives up at once" above), not a way for the planner to avoid the place.
 - `LanguageLayer.explain` is not called: results are worded by `BotSpeech`.
 - No reflex source is registered; `ReflexSources.set` is where the reflex layer plugs in.

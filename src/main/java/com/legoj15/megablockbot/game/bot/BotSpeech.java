@@ -84,9 +84,8 @@ public final class BotSpeech {
             case Failure.NoProgress f -> "made no progress for " + f.ticksUsed() + " ticks";
             case Failure.Died f -> "died at " + position(f.deathPos());
             case Failure.PreemptStalled f -> "was held up too long by " + f.reflexCause();
-            // An Internal with no exception is a condition a task stated and could do nothing about, not a crash: the detail
-            // that follows says which.
-            case Failure.Internal f -> f.exception() == null ? "gave up" : "hit an internal error";
+            case Failure.NoPlace f -> "found nowhere within " + f.radius() + " blocks to " + f.what();
+            case Failure.Internal f -> "hit an internal error";
         };
         String detail = failure.detail();
         return detail == null || detail.isBlank() ? what : what + ": " + detail;

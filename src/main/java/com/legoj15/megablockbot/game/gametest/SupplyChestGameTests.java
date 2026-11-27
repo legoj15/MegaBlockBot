@@ -62,10 +62,11 @@ import net.minecraft.world.phys.Vec3;
  * the real menu. What these protect: a chest the owner named supplies a craft once the body has looked in it (and the rest
  * is gathered), and nothing is known of it before; a chest nobody named is never opened; a chest that was emptied
  * meanwhile costs nothing and is not counted again; a chest that will not open, or was replaced by another block, is left
- * out and the goal gathers; a forgotten chest is left alone; a double chest is one inventory, also when a lone chest
- * became half of one; only the owner may name one; a named chest may be used and never broken; a stockpile goal fills its
- * own chest and is refused by a claim. A task that opens a chest it was not given, takes more than it needs, counts an
- * inventory twice or leaves a menu open fails one of them.
+ * out and the goal gathers, whether the owner named it or the body placed it, and block safety agrees; a forgotten chest
+ * is left alone; a double chest is one inventory, also when a lone chest became half of one and whichever half a goal
+ * names; only the owner may name one; a named chest may be used and never broken; a stockpile goal fills its own chest
+ * (the body looks inside it first, and the deposit notes what it put in) and is refused by a claim. A task that opens a
+ * chest it was not given, takes more than it needs, counts an inventory twice or leaves a menu open fails one of them.
  *
  * <p>Each test builds a walled room, puts a chest across it from the body, and gives its goals as the owner would:
  * {@code /aiplayer goal <name> use chest at ...}. Filling a chest and emptying it is test setup (the owner's, or another
@@ -428,8 +429,9 @@ public final class SupplyChestGameTests {
 
     /**
      * A stockpile goal names its chest, and that is the owner's word for it: the body puts into a chest it did not place
-     * and nobody named as a supply. (What the goal ends as is not measured: nothing notes the target's contents after a
-     * deposit, so the postcondition cannot be read once the planks are in; the chest is what is measured.)
+     * and nobody named as a supply, one it has never been inside (so it knows nothing of what is there beforehand). The
+     * deposit notes what the chest holds when it is done, so that the goal can be judged and what was put in is
+     * remembered.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600)
     public static void aStockpileGoalsOwnChestIsFilledWithoutBeingNamed(GameTestHelper helper) {
@@ -438,12 +440,59 @@ public final class SupplyChestGameTests {
         ChestBlockEntity chest = chest(helper, CHEST);
         Rig rig = Rig.spawnOwned(helper, "deposit", 600);
         rig.body().getInventory().add(new ItemStack(Items.OAK_PLANKS, 5));
-        rig.noteEmpty(CHEST);
         rig.say("stockpile 5 oak_planks at " + at(helper, CHEST));
         rig.onEachTick(() -> {
-            if (holds(chest, Items.OAK_PLANKS) < 5) return;
+            GoalResult result = rig.itemResult();
+            if (result == null) return;
+            helper.assertTrue(result.status() == GoalResult.Status.SATISFIED, "the goal ended " + BotSpeech.result(result));
+            helper.assertTrue(holds(chest, Items.OAK_PLANKS) == 5, "the chest holds " + holds(chest, Items.OAK_PLANKS) + " planks, not 5");
             helper.assertTrue(rig.count(Items.OAK_PLANKS) == 0, "the body still holds " + rig.count(Items.OAK_PLANKS) + " planks");
-            helper.assertTrue(BotMemory.of(rig.id()).supply().isEmpty(), "the goal's chest was made a supply container");
+            BotMemory memory = BotMemory.of(rig.id());
+            helper.assertTrue(memory.supply().isEmpty(), "the goal's chest was made a supply container");
+            BotMemory.RememberedContainer noted = memory.containerAt(dimension(helper), helper.absolutePos(CHEST));
+            helper.assertTrue(noted != null && noted.contents().getOrDefault(PLANKS, 0) == 5, "the body does not remember what it put in the chest: " + noted);
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * The owner types the other half of a double chest than the one the body has a note of: it is the same inventory, and
+     * the goal is met through the pair's one note. (The sight is kept at one half, the one with the lower position hash;
+     * a goal that names the other must not be "no sight", which is UNKNOWN for ever and never deposits.)
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 900)
+    public static void aStockpileGoalThatNamesTheOtherHalfOfADoubleChestFillsTheOneInventory(GameTestHelper helper) {
+        room(helper, 3);
+        BlockPos leftHalf = new BlockPos(13, FLOOR_Y + 1, 1);
+        BlockPos rightHalf = new BlockPos(14, FLOOR_Y + 1, 1);
+        helper.setBlock(leftHalf, Blocks.CHEST.defaultBlockState().setValue(ChestBlock.FACING, Direction.NORTH).setValue(ChestBlock.TYPE, ChestType.LEFT));
+        helper.setBlock(rightHalf, Blocks.CHEST.defaultBlockState().setValue(ChestBlock.FACING, Direction.NORTH).setValue(ChestBlock.TYPE, ChestType.RIGHT));
+        ChestBlockEntity left = chest(helper, leftHalf);
+        ChestBlockEntity right = chest(helper, rightHalf);
+        boolean leftIsLow = helper.absolutePos(leftHalf).asLong() < helper.absolutePos(rightHalf).asLong();
+        BlockPos low = leftIsLow ? leftHalf : rightHalf;
+        BlockPos high = leftIsLow ? rightHalf : leftHalf;
+        Rig rig = Rig.spawnOwned(helper, "farhalf", 900);
+        rig.body().getInventory().add(new ItemStack(Items.OAK_PLANKS, 5));
+        rig.say("use chest at " + at(helper, low));
+        boolean[] asked = {false};
+        rig.onEachTick(() -> {
+            if (!asked[0]) {
+                if (!rig.hasLookedInside(low)) return;
+                rig.say("stockpile 5 oak_planks at " + at(helper, high));
+                asked[0] = true;
+                return;
+            }
+            GoalResult result = rig.itemResult();
+            if (result == null) return;
+            helper.assertTrue(result.status() == GoalResult.Status.SATISFIED, "the goal ended " + BotSpeech.result(result));
+            helper.assertTrue(holds(left, Items.OAK_PLANKS) + holds(right, Items.OAK_PLANKS) == 5,
+                "the halves hold " + holds(left, Items.OAK_PLANKS) + " and " + holds(right, Items.OAK_PLANKS) + " planks, not 5 in all");
+            helper.assertTrue(rig.count(Items.OAK_PLANKS) == 0, "the body still holds " + rig.count(Items.OAK_PLANKS) + " planks");
+            BotMemory memory = BotMemory.of(rig.id());
+            helper.assertTrue(memory.containers().size() == 1, "the body remembers the pair once: " + memory.containers());
+            helper.assertTrue(memory.containers().get(0).contents().getOrDefault(PLANKS, 0) == 5, "the note is " + memory.containers());
             rig.assertHandsEmpty();
             rig.pass();
         });
@@ -461,7 +510,6 @@ public final class SupplyChestGameTests {
         Rig rig = Rig.spawnOwned(helper, "claimed", 900);
         rig.atEnd(() -> BlockSafety.unregisterClaimProvider(claim));
         rig.body().getInventory().add(new ItemStack(Items.OAK_PLANKS, 5));
-        rig.noteEmpty(CHEST);
         rig.say("stockpile 5 oak_planks at " + at(helper, CHEST));
         Watch watch = new Watch();
         rig.onEachTick(() -> {
@@ -473,6 +521,7 @@ public final class SupplyChestGameTests {
                 "the goal ended " + (result == null ? "with no result" : BotSpeech.result(result)));
             helper.assertTrue(rig.count(Items.OAK_PLANKS) == 5, "the body holds " + rig.count(Items.OAK_PLANKS) + " planks, it held 5");
             helper.assertTrue(!watch.sawMenu, "a menu was opened on a claimed chest");
+            helper.assertTrue(BotMemory.of(rig.id()).containers().isEmpty(), "the body noted the inside of a claimed chest");
             rig.assertHandsEmpty();
             rig.pass();
         });
@@ -483,16 +532,22 @@ public final class SupplyChestGameTests {
     // ---------------------------------------------------------------------------------------------------------
 
     /**
-     * The same chest with the same planks, and no word from the owner. The body has been inside it before (it remembers
-     * eight planks), which is not the same as being told to use it. In a sealed room the goal ends however its plan ends;
-     * what is measured is the chest: not opened, not planned from, unchanged, and no planks on the body.
+     * A chest with planks in it, and no word from the owner. The body has been inside it before (it remembers eight planks),
+     * which is not the same as being told to use it. The chest stands within the eight blocks a snapshot looks around the
+     * body, so the body sees it and what it noted of it: what keeps it out is the owner's word, not the distance. In a
+     * sealed room the goal ends however its plan ends; what is measured is the chest: not opened, not planned from,
+     * unchanged, and no planks on the body.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 400)
     public static void aChestNobodyNamedIsLeftAlone(GameTestHelper helper) {
         room(helper, 3);
-        ChestBlockEntity chest = chestWith(helper, CHEST, Items.OAK_PLANKS, 8);
+        BlockPos near = new BlockPos(11, FLOOR_Y + 1, 5);
+        ChestBlockEntity chest = chestWith(helper, near, Items.OAK_PLANKS, 8);
         Rig rig = Rig.spawnOwned(helper, "unnamed", 400);
-        BotMemory.of(rig.id()).noteContainer(dimension(helper), helper.absolutePos(CHEST), "minecraft:chest", Map.of(PLANKS, 8));
+        BotMemory.of(rig.id()).noteContainer(dimension(helper), helper.absolutePos(near), "minecraft:chest", Map.of(PLANKS, 8));
+        ContainerSight sight = SnapshotCollector.collect(rig.body()).containerAt(corePos(helper.absolutePos(near)));
+        helper.assertTrue(sight != null && sight.contentsKnown() && sight.count(PLANKS) == 8 && !sight.mayTakeFrom(),
+            "setup: the chest is not in the body's sight as one it may not take from: " + sight);
         rig.say("make 4 stick");
         rig.leftAlone(chest, new Watch(), 1);
     }
@@ -585,6 +640,97 @@ public final class SupplyChestGameTests {
     }
 
     /**
+     * The owner's word is for the block it named. A barrel, a furnace or another chest set where a named chest stood is
+     * nobody's word, and block safety refuses to let the body use it, as the tasks do when they compare the record with
+     * what stands there (a barrel is also a job site, which the word would otherwise lift). A double chest that lost a half
+     * is the same: the word was for the pair.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
+    public static void theOwnersWordForAChestIsNoWordForAnotherBlockThatReplacedIt(GameTestHelper helper) {
+        room(helper, 3);
+        ServerLevel level = helper.getLevel();
+        Rig rig = Rig.spawnOwned(helper, "stale", 100);
+        BotPlayer body = rig.body();
+        BlockSafety safety = BlockSafety.of(level.getServer());
+        BotMemory memory = BotMemory.of(rig.id());
+        String dimension = dimension(helper);
+
+        BlockPos at = helper.absolutePos(CHEST);
+        helper.setBlock(CHEST, Blocks.CHEST);
+        memory.addSupply(new BotMemory.SupplyContainer(dimension, at, null, "minecraft:chest"));
+        helper.assertTrue(safety.mayUseContainer(body, level, at).allowed(), "setup: a chest the owner named may not be used");
+        for (net.minecraft.world.level.block.Block replacement : List.of(Blocks.BARREL, Blocks.TRAPPED_CHEST, Blocks.FURNACE)) {
+            helper.setBlock(CHEST, replacement);
+            Verdict verdict = safety.mayUseContainer(body, level, at);
+            helper.assertTrue(!verdict.allowed(), "a " + replacement + " where the owner named a chest may be used: " + verdict);
+        }
+        helper.setBlock(CHEST, Blocks.CHEST);
+        helper.assertTrue(safety.mayUseContainer(body, level, at).allowed(), "the chest, put back, is the owner's word again");
+
+        // A pair named as a pair: with one half gone, the half that stands is not what was named.
+        BlockPos leftHalf = new BlockPos(7, FLOOR_Y + 1, 3);
+        BlockPos rightHalf = new BlockPos(8, FLOOR_Y + 1, 3);
+        helper.setBlock(leftHalf, Blocks.CHEST.defaultBlockState().setValue(ChestBlock.FACING, Direction.NORTH).setValue(ChestBlock.TYPE, ChestType.LEFT));
+        helper.setBlock(rightHalf, Blocks.CHEST.defaultBlockState().setValue(ChestBlock.FACING, Direction.NORTH).setValue(ChestBlock.TYPE, ChestType.RIGHT));
+        SupplyChests.Spot spot = SupplyChests.find(level, helper.absolutePos(leftHalf));
+        helper.assertTrue(spot != null && spot.other() != null, "setup: the two chests are not one inventory: " + spot);
+        memory.addSupply(new BotMemory.SupplyContainer(dimension, spot.pos(), spot.other(), spot.block()));
+        helper.assertTrue(safety.mayUseContainer(body, level, helper.absolutePos(leftHalf)).allowed()
+            && safety.mayUseContainer(body, level, helper.absolutePos(rightHalf)).allowed(), "setup: the named pair may not be used");
+        helper.setBlock(rightHalf, Blocks.DIRT);
+        Verdict lone = safety.mayUseContainer(body, level, helper.absolutePos(leftHalf));
+        helper.assertTrue(!lone.allowed(), "the half that stands, of a pair that lost the other, may be used: " + lone);
+        rig.pass();
+    }
+
+    /**
+     * A container the body placed itself, and has been inside, is its own only while it stands as it was: another container
+     * put in its place (with the same planks in it) is not opened, the body's note of the chest and its claim on the spot go,
+     * and the goal does not take from it. (The body has the chest in its plan, and the barrel is put there before it arrives.)
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 700)
+    public static void aChestTheBodyPlacedThatIsAnotherContainerNowIsNotOpened(GameTestHelper helper) {
+        room(helper, 3);
+        ChestBlockEntity chest = chestWith(helper, CHEST, Items.OAK_PLANKS, 8);
+        Rig rig = Rig.spawnOwned(helper, "placed", 700);
+        BlockPos at = helper.absolutePos(CHEST);
+        // As if the body had set the chest down and filled it: its placement is on record with block safety and in its memory.
+        BlockSafety.of(rig.server()).noteBotPlaced(rig.body(), helper.getLevel(), at);
+        BotMemory memory = BotMemory.of(rig.id());
+        memory.notePlaced(dimension(helper), at);
+        memory.noteContainer(dimension(helper), at, "minecraft:chest", Map.of(PLANKS, 8));
+        rig.say("make 4 stick");
+        Watch watch = new Watch();
+        BarrelBlockEntity[] barrel = {null};
+        int[] swappedAt = {0};
+        rig.onEachTick(() -> {
+            watch.look(rig);
+            if (barrel[0] == null) {
+                if (!watch.kinds.contains("withdraw")) return;
+                // The chest is emptied first: a chest that is broken drops what it holds, and the body would pick those up.
+                chest.clearContent();
+                helper.setBlock(CHEST, Blocks.BARREL);
+                barrel[0] = (BarrelBlockEntity) helper.getBlockEntity(CHEST);
+                barrel[0].setItem(0, new ItemStack(Items.OAK_PLANKS, 8));
+                watch.sawMenu = false;
+                swappedAt[0] = watch.ticks;
+                return;
+            }
+            GoalResult result = rig.itemResult();
+            if (result == null && watch.ticks - swappedAt[0] < WATCH_TICKS) return;
+            helper.assertTrue(!watch.sawMenu, "the barrel that replaced the chest was opened");
+            helper.assertTrue(holds(barrel[0], Items.OAK_PLANKS) == 8, "the barrel holds " + holds(barrel[0], Items.OAK_PLANKS) + " planks, it held 8");
+            helper.assertTrue(rig.count(Items.OAK_PLANKS) == 0 && rig.count(Items.STICK) == 0,
+                "the body took " + rig.count(Items.OAK_PLANKS) + " planks and made " + rig.count(Items.STICK) + " sticks from a barrel");
+            helper.assertTrue(result == null || result.status() != GoalResult.Status.SATISFIED, "the goal was met from the barrel");
+            helper.assertTrue(memory.containerAt(dimension(helper), at) == null, "the body still remembers the chest: " + memory.containers());
+            helper.assertTrue(!memory.isPlaced(dimension(helper), at), "the body still counts the spot as a block it placed");
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
      * What a task may conclude about a named container from the world: it stands as named, it is another block now (the
      * owner's word was for something else: gone), or the position is not loaded, which is "cannot tell" and never gone.
      * (The task's answer to the last is a failure the executor meets by going there, and it drops nothing. A body that is
@@ -619,6 +765,34 @@ public final class SupplyChestGameTests {
         helper.assertTrue(SupplyChests.stand(level, far, null) == SupplyChests.Stand.NOT_LOADED, "a position nobody named, not loaded, was called loaded");
         helper.assertTrue(SupplyChests.stand(level, at, new BotMemory.SupplyContainer(dimension, at, far, "minecraft:chest")) == SupplyChests.Stand.NOT_LOADED,
             "a pair with a half that is not loaded was called gone");
+
+        // The same rule for what the body holds of a container nobody named: its own note is of a block too, and the owner's
+        // word and the note are each held to theirs.
+        UUID id = UUID.randomUUID();
+        BotMemory memory = BotMemory.of(id);
+        try {
+            helper.setBlock(CHEST, Blocks.CHEST);
+            helper.setBlock(CHEST.east(), Blocks.AIR);
+            helper.assertTrue(SupplyChests.stand(level, memory, at) == SupplyChests.Stand.STANDS, "a position nothing is recorded for does not stand");
+            memory.notePlaced(dimension, at);
+            memory.noteContainer(dimension, at, "minecraft:chest", Map.of());
+            helper.assertTrue(SupplyChests.stand(level, memory, at) == SupplyChests.Stand.STANDS, "a noted chest, still there, does not stand");
+            helper.setBlock(CHEST, Blocks.BARREL);
+            helper.assertTrue(SupplyChests.stand(level, memory, at) == SupplyChests.Stand.CHANGED, "a barrel where a chest was noted stands");
+            helper.assertTrue(!SupplyChests.forget(memory, dimension, at), "there was no owner's word to drop");
+            helper.assertTrue(memory.containerAt(dimension, at) == null && !memory.isPlaced(dimension, at),
+                "the note or the claim on the spot outlived the chest: " + memory.containers());
+
+            helper.setBlock(CHEST, Blocks.CHEST);
+            memory.addSupply(single);
+            memory.noteContainer(dimension, at, "minecraft:chest", Map.of());
+            helper.assertTrue(SupplyChests.stand(level, memory, at) == SupplyChests.Stand.STANDS, "a named and noted chest does not stand");
+            helper.assertTrue(SupplyChests.forget(memory, dimension, at) && memory.supply().isEmpty() && memory.containers().isEmpty(),
+                "forgetting did not drop the word and the note: " + memory);
+            helper.assertTrue(SupplyChests.stand(level, memory, far) == SupplyChests.Stand.NOT_LOADED, "a position that is not loaded was called something else");
+        } finally {
+            BotMemory.forget(id);
+        }
         helper.succeed();
     }
 
@@ -852,15 +1026,6 @@ public final class SupplyChestGameTests {
         void sendBack() {
             Vec3 at = helper.absoluteVec(new Vec3(8.5, FLOOR_TOP, 8.5));
             body().teleportTo(helper.getLevel(), at.x, at.y, at.z, 0.0F, 0.0F);
-        }
-
-        /**
-         * The body has been inside the chest at {@code relative} before and found it empty. A stockpile goal cannot start
-         * without that: the postcondition of a container the body has not looked in is unknown, and nothing but the
-         * body's own note makes it known (the deposit does not note what it leaves there).
-         */
-        void noteEmpty(BlockPos relative) {
-            BotMemory.of(id).noteContainer(dimension(helper), helper.absolutePos(relative), "minecraft:chest", Map.of());
         }
 
         /** Right after the owner named the chest at {@code relative}: the body has not been inside it, so it knows nothing of it. */

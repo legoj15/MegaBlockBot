@@ -10,6 +10,7 @@ import com.legoj15.megablockbot.game.lang.ModelLanguageConfig;
 import com.legoj15.megablockbot.game.task.CraftTask;
 import com.legoj15.megablockbot.game.task.EquipTask;
 import com.legoj15.megablockbot.game.task.TaskRegistry;
+import com.legoj15.megablockbot.game.task.WithdrawGameTests;
 import com.legoj15.megablockbot.platform.Platform;
 
 /**
@@ -46,6 +47,6 @@ public final class BotFeature {
         Platform.loader().onServerStopping(server -> BotPlanner.shutdown());
 
         Platform.loader().registerGameTests(BotRuntimeGameTests.class, BotRuntimeMiningGameTests.class,
-                SupplyChestGameTests.class);
+                SupplyChestGameTests.class, WithdrawGameTests.class);
     }
 }

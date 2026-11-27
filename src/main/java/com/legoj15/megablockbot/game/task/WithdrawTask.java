@@ -40,6 +40,9 @@ import net.minecraft.world.item.ItemStack;
  *
  * <p>Whatever it saw inside goes into the body's {@link com.legoj15.megablockbot.game.plan.BotMemory}, which the snapshot
  * reads, so the next plan counts what was really there.
+ *
+ * <p>It never leaves anything on the cursor, though the slot it lifted a stack from need not take the rest back (a
+ * furnace's result slot): see {@link #takeItems}.
  */
 final class WithdrawTask extends ContainerTask {
     private final ItemKey itemKey;
@@ -114,11 +117,12 @@ final class WithdrawTask extends ContainerTask {
     /**
      * Moves up to {@code want} of the item from the menu's container slots into the body's inventory with the clicks a
      * player makes: a shift-click for a whole stack, and for part of one lift the stack, set the items down one at a
-     * time with the right button, and put the rest back. Stops when the inventory takes no more.
+     * time with the right button, and put the rest back (into the inventory when the slot will not have it). Stops when
+     * the inventory takes no more.
      *
-     * @return how many moved
+     * @return how many the inventory gained (package-private: the GameTest of the cursor drives it on an open menu)
      */
-    private int takeItems(BotPlayer body, AbstractContainerMenu menu, int want) {
+    int takeItems(BotPlayer body, AbstractContainerMenu menu, int want) {
         int taken = 0;
         for (Slot source : menu.slots) {
             if (taken >= want) break;
@@ -138,20 +142,30 @@ final class WithdrawTask extends ContainerTask {
         return taken;
     }
 
+    /**
+     * Part of a stack: lift it, set the items down in the inventory one at a time with the right button, and put the rest
+     * back where it came from. A slot that does not take it back (a furnace's result slot) leaves the rest on the cursor,
+     * and a cursor is never left holding anything: it goes to the inventory as closing the menu would send it, and to the
+     * ground only when the inventory is full too ({@link MenuHand#putBack}).
+     *
+     * @return how many the inventory gained, which is more than {@code want} when the slot kept none of the rest
+     */
     private int takePart(BotPlayer body, AbstractContainerMenu menu, Slot source, int want) {
+        int before = body.getInventory().countItem(item);
         menu.clicked(source.index, 0, ClickType.PICKUP, body); // lift the stack
-        int moved = 0;
-        while (moved < want) {
+        int set = 0;
+        while (set < want) {
             Slot target = roomFor(body, menu, menu.getCarried());
             if (target == null) break;
             int carried = menu.getCarried().getCount();
             menu.clicked(target.index, 1, ClickType.PICKUP, body); // set one down
             if (menu.getCarried().getCount() >= carried) break; // nothing was set down
-            moved++;
+            set++;
         }
-        // What is left on the cursor goes back where it came from, which the lift emptied.
+        // What is left goes back where it came from, which the lift emptied; whatever that slot refuses is the hand's to place.
         menu.clicked(source.index, 0, ClickType.PICKUP, body);
-        return moved;
+        new MenuHand(body, menu).putBack();
+        return body.getInventory().countItem(item) - before;
     }
 
     /** A slot of the body's own inventory that takes one more of the carried item: a partial stack first. */

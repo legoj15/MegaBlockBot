@@ -87,7 +87,9 @@ import java.util.TreeSet;
  *   <li>{@code deposit}: {@code item}, {@code container}, {@code dimension}, and {@code count}, which is how many
  *       to move now: the goal asked for, minus what the container is known to hold. The node's goal is the
  *       {@link Goal.Stockpile} itself and carries the total the container should hold. The moved items leave the
- *       working stock.</li>
+ *       working stock. A container the snapshot has no sight of at all has never been opened, so the plan for the
+ *       goal is one {@code look_inside} leaf ({@link LookInside#leafBeforeDeposit}) and nothing else: the goal is
+ *       planned again, knowing the contents, once the body has looked.</li>
  *   <li>{@code navigate}: {@code dimension}, {@code pos}, {@code radius}.</li>
  *   <li>{@code withdraw}: {@code item}, {@code container} (its position), {@code dimension} and {@code count}, how
  *       many to take out of that container. The node's goal is the item's absolute count once the leaf is done (what
@@ -107,7 +109,14 @@ import java.util.TreeSet;
  * stock. A container is left out when the request's exclusions rule its position out (a failure at it) or its withdraw
  * source ({@code withdraw:<container>}, what a NO_SOURCE failure of that leaf names: the container would not open), and
  * the target of a {@link Goal.Stockpile} is not a supply for that goal. A container the body has not been inside has
- * no contents in its sight, so it supplies nothing: the plan counts only what the body noted when it opened one.
+ * no contents in its sight, so it supplies nothing: the plan counts only what the body noted when it opened one. A double
+ * chest is one sight whichever half a goal names ({@link ContainerSight#covers}), so it is a stockpile goal's own target
+ * whichever half that goal names.
+ *
+ * <p>An {@code equip} goal's requirements are items to hold when it is done. Each one met is reserved from the
+ * requirements after it (the solver is not offered the unit), so that a stick crafted for the off hand is not crafted
+ * from the planks the main hand is to hold, and the unit stays among what the plan relies on holding, however much of the
+ * stock a later requirement's draw used up in the books: the containers give what the draws and the held units add up to.
  */
 public final class SolverPlanner implements Planner {
     /** Solver budgets, SprawlCrafting's pins (docs/handoff/solver-core.md): depth and attempt caps per solve. */
@@ -258,6 +267,11 @@ public final class SolverPlanner implements Planner {
         private final TreeMap<ItemKey, Long> drawn = new TreeMap<>();
         private final TreeMap<ItemKey, Long> relied = new TreeMap<>();
         /**
+         * What the requirements of an equip goal planned so far are to hold when it is done, one unit of each item. The
+         * solver is not offered these units: a later requirement plans around what an earlier one holds, not out of it.
+         */
+        private final TreeMap<ItemKey, Long> reserved = new TreeMap<>();
+        /**
          * One solver-side wrapper per recipe for the whole run: the solver's quantity path matches recipes by
          * identity, so a producers function that built new objects on every call would defeat it.
          */
@@ -294,9 +308,10 @@ public final class SolverPlanner implements Planner {
             Pos here = snapshot.pos();
             List<ContainerSight> boxes = new ArrayList<>();
             for (ContainerSight box : snapshot.containers()) {
-                // A container the body has not opened has no contents in its sight, so it has nothing to count.
-                if (!box.mayTakeFrom() || box.contents().isEmpty() || box.pos().equals(target)) continue;
-                if (exclusions.excludes(snapshot.dimension(), box.pos())) continue;
+                // A container the body has not opened has no contents in its sight, so it has nothing to count. A
+                // double chest is the goal's own target whichever half the goal names.
+                if (!box.mayTakeFrom() || box.contents().isEmpty() || (target != null && box.covers(target))) continue;
+                if (excluded(box)) continue;
                 // A leaf that failed with NO_SOURCE (the container would not open) ruled out its own source id.
                 if (exclusions.sources().contains(withdrawSource(box.pos()))) continue;
                 boxes.add(box);
@@ -305,6 +320,12 @@ public final class SolverPlanner implements Planner {
                     .thenComparingInt(box -> box.pos().x()).thenComparingInt(box -> box.pos().y())
                     .thenComparingInt(box -> box.pos().z()));
             return List.copyOf(boxes);
+        }
+
+        /** Whether a failure at either half of this container rules it out of the plan. */
+        private boolean excluded(ContainerSight box) {
+            return exclusions.excludes(snapshot.dimension(), box.pos())
+                    || (box.other() != null && exclusions.excludes(snapshot.dimension(), box.other()));
         }
 
         /**
@@ -450,7 +471,7 @@ public final class SolverPlanner implements Planner {
             List<NodeSpec> nodes = new ArrayList<>();
             Failure gatherFailure = null;
             for (int round = 0; round <= MAX_SETTLE_ROUNDS; round++) {
-                RecipeGraphSolver.ShortfallResult<ItemKey> shortfall = solver.shortfallLong(demand, stock);
+                RecipeGraphSolver.ShortfallResult<ItemKey> shortfall = solver.shortfallLong(demand, spendable());
                 if (shortfall.saturated()) {
                     return Step.fail(internal("the shortfall of " + key.id() + " overflows what a plan can count"));
                 }
@@ -516,7 +537,7 @@ public final class SolverPlanner implements Planner {
         Step craftDemand(ItemKey key, DemandRecipe demand) {
             List<NodeSpec> nodes = new ArrayList<>();
             for (int attempt = 0; ; attempt++) {
-                RecipeGraphSolver.Result<String, ItemKey> result = solver.solveLong(demand, stock);
+                RecipeGraphSolver.Result<String, ItemKey> result = solver.solveLong(demand, spendable());
                 if (result instanceof RecipeGraphSolver.Result.Success<String, ItemKey> success) {
                     Step crafts = craftNodes(success);
                     if (crafts.failure() != null) return crafts;
@@ -924,25 +945,67 @@ public final class SolverPlanner implements Planner {
             return Step.ok(winner.proposal().nodes());
         }
 
-        /** An item plan for every slot's item not worn or held, then one equip leaf (brief P12). */
+        /**
+         * An item plan for every slot's item not worn or held, then one equip leaf (brief P12). Every requirement is
+         * an item to hold when the goal is done, so once one is met its unit is kept from the requirements after it:
+         * they plan around it (a stick crafted from the planks the main hand is to hold would leave it empty-handed),
+         * and the unit stays among what the plan relies on holding, however much of the stock a later draw used up.
+         */
         Step equipPlan(Goal.Equip goal) {
             List<NodeSpec> nodes = new ArrayList<>();
-            for (Map.Entry<EquipSlot, ItemKey> slot : new TreeMap<>(goal.slots()).entrySet()) {
-                if (slot.getValue().equals(snapshot.equipped().get(slot.getKey()))) continue;
-                Step step = itemPlan(slot.getValue(), 1);
-                if (step.failure() != null) return step;
-                nodes.addAll(step.nodes());
+            TreeMap<ItemKey, Long> outer = new TreeMap<>(reserved);
+            TreeMap<ItemKey, Long> mine = new TreeMap<>();
+            try {
+                for (Map.Entry<EquipSlot, ItemKey> slot : new TreeMap<>(goal.slots()).entrySet()) {
+                    if (slot.getValue().equals(snapshot.equipped().get(slot.getKey()))) continue;
+                    Step step = itemPlan(slot.getValue(), 1);
+                    if (step.failure() != null) return step;
+                    nodes.addAll(step.nodes());
+                    if (!reserved.containsKey(slot.getValue())) {
+                        reserved.put(slot.getValue(), 1L);
+                        mine.put(slot.getValue(), 1L);
+                    }
+                }
+                mine.forEach((item, count) -> relied.merge(item, count, (a, b) -> Math.max(a, b)));
+            } finally {
+                reserved.clear();
+                reserved.putAll(outer);
             }
             nodes.add(NodeSpec.leaf(goal, "equip", Map.of(), ""));
             return Step.ok(nodes);
         }
 
+        /** The working stock less what is reserved: what the solver may spend. The stock itself when nothing is. */
+        private Map<ItemKey, Long> spendable() {
+            if (reserved.isEmpty()) return stock;
+            TreeMap<ItemKey, Long> view = new TreeMap<>(stock);
+            reserved.forEach((item, count) -> {
+                long left = view.getOrDefault(item, 0L) - count;
+                if (left > 0) view.put(item, left);
+                else view.remove(item);
+            });
+            return view;
+        }
+
         /**
          * An item plan for what the container is not known to hold already, then one deposit leaf (brief P12). The
-         * leaf's {@code count} is that same number, how many to move; its goal is the whole stockpile goal.
+         * leaf's {@code count} is that same number, how many to move; its goal is the whole stockpile goal. A container
+         * the snapshot says nothing of is looked into first and nothing else is planned (see {@link LookInside}).
          */
         Step stockpilePlan(Goal.Stockpile goal) {
             ContainerSight sight = snapshot.containerAt(goal.container());
+            // A container the body has never opened (no sight of it at all, or a sight with no note: one its owner named
+            // and it has not looked into yet) holds nobody knows what, and the goal cannot be judged. The plan is to
+            // look, as a player would; with the contents noted the goal is judged and, when it is not met, planned again
+            // knowing them. Without this a named, unopened target was planned as gather and deposit, stayed unknown
+            // after the walk to it, and the goal gave up beside a chest it could have opened.
+            // (A sight the body may not take from, with nothing known, is a container it has a note of and cannot see
+            // from here: that one is planned for in full, and the executor's walk to it brings the note into range.)
+            boolean neverOpened = sight == null
+                    || (sight.mayTakeFrom() && !sight.contentsKnown() && !sight.remembered());
+            if (neverOpened && goal.dimension().equals(snapshot.dimension())) {
+                return Step.ok(List.of(LookInside.leafBeforeDeposit(goal.dimension(), goal.container())));
+            }
             long already = sight != null && sight.contentsKnown() ? sight.count(goal.key()) : 0;
             long need = Math.max(0, goal.count() - already);
             List<NodeSpec> nodes = new ArrayList<>();
@@ -1281,7 +1344,7 @@ public final class SolverPlanner implements Planner {
         Pos stockpileTarget = goal instanceof Goal.Stockpile stockpile && stockpile.dimension().equals(snapshot.dimension())
                 ? stockpile.container() : null;
         for (ContainerSight box : sortedByPosition(snapshot.containers())) {
-            if (!box.mayTakeFrom() || box.pos().equals(stockpileTarget)) continue;
+            if (!box.mayTakeFrom() || (stockpileTarget != null && box.covers(stockpileTarget))) continue;
             StringBuilder held = new StringBuilder();
             // What a plan may take from a container: the items it reads the stock of, and the tools it may count as
             // carried (relyOnTool: any tool of a class and tier a pickaxe, say, would serve, not only the one the

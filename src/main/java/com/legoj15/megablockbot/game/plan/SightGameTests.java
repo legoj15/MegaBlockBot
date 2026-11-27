@@ -4,6 +4,7 @@ import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.megablockbot.game.body.BodyException;
 import com.legoj15.megablockbot.game.body.BodyManager;
+import com.legoj15.megablockbot.game.body.BotBrain;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.resolver.AcquisitionIndexes;
 import java.util.UUID;
@@ -31,9 +32,14 @@ public final class SightGameTests {
     private static BotPlayer spawn(GameTestHelper helper, String tag) {
         try {
             BotPlayer body = BodyManager.of(helper.getLevel().getServer()).spawn("sg_" + tag + "_" + RUN_ID, null,
-                helper.getLevel(), helper.absoluteVec(new Vec3(8.5, 2.0, 8.5)), 0.0F, null);
-            // The tests that wait must find the body where they left it.
+                helper.getLevel(), helper.absoluteVec(new Vec3(8.5, 2.0, 8.5)), 0.0F, () -> BotBrain.NONE);
+            // The tests that wait must find the body where they left it: no gravity, and a brain that does nothing (the
+            // real one has reflexes, and a mob of a test in the next arena made it move and scan again).
             body.setNoGravity(true);
+            // And nothing may kill it: tests in the arenas next door spawn zombies and skeletons, a body that stands
+            // here for two hundred ticks is their nearest player, and one that died came back at the world spawn and
+            // scanned again. An invulnerable player is not a target at all.
+            body.setInvulnerable(true);
             return body;
         } catch (BodyException e) {
             throw new IllegalStateException("could not spawn the body of " + tag + ": " + e.getMessage(), e);

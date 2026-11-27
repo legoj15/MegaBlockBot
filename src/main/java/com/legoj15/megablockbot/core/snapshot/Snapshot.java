@@ -67,10 +67,13 @@ public record Snapshot(
         return bestTools.getOrDefault(toolClass, ToolTier.HAND);
     }
 
-    /** The container at that position, or null when the snapshot holds nothing about it. */
+    /**
+     * The container with a block at that position, or null when the snapshot holds nothing about it. A double chest is one
+     * inventory and one sight, and either of its halves finds it.
+     */
     public ContainerSight containerAt(Pos at) {
         for (ContainerSight c : containers) {
-            if (c.pos().equals(at)) return c;
+            if (c.covers(at)) return c;
         }
         return null;
     }

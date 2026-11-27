@@ -14,7 +14,7 @@ public sealed interface Failure {
     /** One value per failure type: the unit of "one retry per node per failure type". */
     enum Kind {
         UNREACHABLE, TARGET_GONE, MISSING_TOOL, MISSING_INPUT, NO_SOURCE, PROTECTED, HAZARD, TIMED_OUT,
-        NO_PROGRESS, DIED, PREEMPT_STALLED, INTERNAL
+        NO_PROGRESS, DIED, PREEMPT_STALLED, NO_PLACE, INTERNAL
     }
 
     Kind kind();
@@ -73,6 +73,19 @@ public sealed interface Failure {
         public Kind kind() { return Kind.PREEMPT_STALLED; }
     }
 
+    /**
+     * The body looked and found nowhere to do {@code what} (put a crafting table down, stand to work), and a new plan
+     * would find the same: the planner does not see where a block fits, so replanning cannot change the answer and the
+     * executor gives the goal up at once.
+     *
+     * @param what   the thing it could not find a place for, as a verb phrase ("put a crafting table down")
+     * @param radius how far from where it stood, in blocks, it looked
+     */
+    record NoPlace(String what, int radius, String detail) implements Failure {
+        public Kind kind() { return Kind.NO_PLACE; }
+    }
+
+    /** A bug: a condition the code did not expect. A task that merely cannot do its work here says so with its own kind. */
     record Internal(Throwable exception, String detail) implements Failure {
         public Kind kind() { return Kind.INTERNAL; }
     }

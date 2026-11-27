@@ -221,17 +221,18 @@ public final class SnapshotCollector {
      * Only what the body's memory knows: a body cannot see into a closed container, so the contents of every sight are a
      * note the body made when it opened it, never read from the world, and they stay {@link ContainerSight#remembered
      * remembered} until it opens the container again. A container is {@code contentsKnown} when it is within the scan
-     * radius, its chunk is loaded and the same kind of block still stands there (a note is then not out of reach, though an
-     * owner who opened the chest since has made it stale). Otherwise the contents are withheld (an empty map) so that
-     * nothing reads old memory as the current state: the postcondition answers UNKNOWN and the executor walks over.
+     * radius, its chunk is loaded and the block that stands there is the one recorded (a note is then not out of reach,
+     * though an owner who opened the chest since has made it stale). Otherwise the contents are withheld (an empty map) so
+     * that nothing reads old memory as the current state: the postcondition answers UNKNOWN and the executor walks over.
      *
      * <p>A container the body may take from (one it placed, or one its owner named: design 3.5) is shown to the planner
      * even when it is out of sight: its contents are then the remembered ones, because the plan walks over and counts on
-     * what the body last saw there. Only a container whose chunk is loaded and no longer holds that block (both blocks,
-     * for a double chest) is treated as gone, whatever the distance. Each inventory is one sight, a double chest included
-     * (a note and an owner's word are each per inventory, so the pair is listed once, at the half with the lower
-     * position hash). A container the owner named and the body has not opened is listed with nothing in it and not
-     * {@code remembered}: it is there and may be taken from, and what it holds is unknown, which the planner counts as
+     * what the body last saw there. Only a container whose chunk is loaded and which no longer stands as recorded (the
+     * owner's word and the note are each held to their block, both blocks for a double chest: {@link SupplyChests#stand})
+     * is treated as gone, whatever the distance. Each inventory is one sight, a double chest included (a note and an
+     * owner's word are each per inventory, so the pair is listed once, at the half with the lower position hash, with the
+     * other half in the sight). A container the owner named and the body has not opened is listed with nothing in it and
+     * not {@code remembered}: it is there and may be taken from, and what it holds is unknown, which the planner counts as
      * nothing.
      */
     private static void containers(ServerLevel level, String dimension, BlockPos at, BotMemory memory, Snapshot.Builder builder) {
@@ -241,30 +242,29 @@ public final class SnapshotCollector {
             if (!container.dimension().equals(dimension)) continue; // a Pos carries no dimension, so another one's cannot be shown
             BlockPos pos = container.pos();
             BlockPos other = container.other();
+            Pos otherPos = other == null ? null : pos(other);
             boolean placed = memory.isPlaced(dimension, pos);
             boolean named = memory.isSupply(dimension, pos) || (other != null && memory.isSupply(dimension, other));
             boolean inRange = pos(pos).distSq(pos(at)) <= radiusSq;
-            boolean loaded = level.hasChunkAt(pos) && (other == null || level.hasChunkAt(other));
-            boolean sameBlock = loaded && blockId(level.getBlockState(pos).getBlock()).equals(container.block())
-                && (other == null || blockId(level.getBlockState(other).getBlock()).equals(container.block()));
-            boolean stillThere = inRange && sameBlock;
+            SupplyChests.Stand stand = SupplyChests.stand(level, memory, pos);
+            boolean stillThere = inRange && stand == SupplyChests.Stand.STANDS;
             listed.add(pos);
             if (other != null) listed.add(other);
             if (stillThere) {
-                builder.container(new ContainerSight(pos(pos), container.block(), true, placed, placed || named, true,
+                builder.container(new ContainerSight(pos(pos), otherPos, container.block(), true, placed, placed || named, true,
                     container.contents()));
-            } else if ((placed || named) && !(loaded && !sameBlock)) {
+            } else if ((placed || named) && stand != SupplyChests.Stand.CHANGED) {
                 // Out of sight (or in range with its chunk not loaded): what the body remembers, marked as such.
-                builder.container(new ContainerSight(pos(pos), container.block(), false, placed, true, true, container.contents()));
+                builder.container(new ContainerSight(pos(pos), otherPos, container.block(), false, placed, true, true, container.contents()));
             } else {
-                builder.container(new ContainerSight(pos(pos), container.block(), false, placed, false, false, Map.of()));
+                builder.container(new ContainerSight(pos(pos), otherPos, container.block(), false, placed, false, false, Map.of()));
             }
         }
         for (BotMemory.SupplyContainer entry : memory.supply()) {
             if (!entry.dimension().equals(dimension) || listed.contains(entry.pos())
                 || (entry.other() != null && listed.contains(entry.other()))) continue;
-            builder.container(new ContainerSight(pos(entry.pos()), entry.block(), false, memory.isPlaced(dimension, entry.pos()), true,
-                false, Map.of()));
+            builder.container(new ContainerSight(pos(entry.pos()), entry.other() == null ? null : pos(entry.other()), entry.block(), false,
+                memory.isPlaced(dimension, entry.pos()), true, false, Map.of()));
         }
     }
 
@@ -272,9 +272,5 @@ public final class SnapshotCollector {
 
     private static Pos pos(BlockPos pos) {
         return new Pos(pos.getX(), pos.getY(), pos.getZ());
-    }
-
-    private static String blockId(Block block) {
-        return BuiltInRegistries.BLOCK.getKey(block).toString();
     }
 }

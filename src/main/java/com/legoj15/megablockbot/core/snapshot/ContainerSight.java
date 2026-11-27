@@ -6,13 +6,16 @@ import java.util.Map;
 
 /**
  * A container the snapshot looked at. A double chest is one inventory and so one sight, at the half with the lower
- * position hash ({@code BlockPos.asLong}); the snapshot is of the body's own dimension, so a sight carries none.
+ * position hash ({@code BlockPos.asLong}) and with the other half in {@code other}; either half names the sight
+ * ({@link #covers}, {@link Snapshot#containerAt}). The snapshot is of the body's own dimension, so a sight carries none.
  *
  * <p>The body does only what a player can, and a player cannot see into a closed container: what a sight says is in a
  * container is a note the body made the last time it opened it, never what the world holds now. A container the body
  * has not opened (one its owner named and it has not looked in yet) has no note, so its sight carries no contents and
  * is not {@code remembered}: its contents are unknown, and unknown counts as nothing.
  *
+ * @param pos           the container's position: for a double chest, the half with the lower position hash
+ * @param other         the second half of a double chest, or null for a container of one block
  * @param block         the container block's id
  * @param contentsKnown false when it is out of range, its chunk is not loaded, or the body has never opened it; a
  *                      postcondition that needs the contents then answers UNKNOWN, never "empty"
@@ -28,15 +31,26 @@ import java.util.Map;
  *                      when it is out of range or its chunk is not loaded, as {@code contentsKnown} says
  * @param contents      item counts: what the body noted in it, never more
  */
-public record ContainerSight(Pos pos, String block, boolean contentsKnown, boolean placedByBot, boolean mayTakeFrom,
-                             boolean remembered, Map<ItemKey, Integer> contents) {
+public record ContainerSight(Pos pos, Pos other, String block, boolean contentsKnown, boolean placedByBot,
+                             boolean mayTakeFrom, boolean remembered, Map<ItemKey, Integer> contents) {
     public ContainerSight {
         contents = Map.copyOf(contents);
     }
 
-    /** A container the body may take from only when it placed it, with its contents seen now or withheld. */
+    /** A container of one block. */
+    public ContainerSight(Pos pos, String block, boolean contentsKnown, boolean placedByBot, boolean mayTakeFrom,
+                          boolean remembered, Map<ItemKey, Integer> contents) {
+        this(pos, null, block, contentsKnown, placedByBot, mayTakeFrom, remembered, contents);
+    }
+
+    /** A container of one block the body may take from only when it placed it, with its contents seen now or withheld. */
     public ContainerSight(Pos pos, String block, boolean contentsKnown, boolean placedByBot, Map<ItemKey, Integer> contents) {
-        this(pos, block, contentsKnown, placedByBot, placedByBot, false, contents);
+        this(pos, null, block, contentsKnown, placedByBot, placedByBot, false, contents);
+    }
+
+    /** Whether {@code at} is one of the blocks of this inventory: a double chest answers for either half. */
+    public boolean covers(Pos at) {
+        return pos.equals(at) || (other != null && other.equals(at));
     }
 
     public int count(ItemKey key) {

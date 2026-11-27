@@ -9,12 +9,10 @@ import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BodyInteractionManager;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
 import com.legoj15.megablockbot.game.plan.BotMemory;
-import com.legoj15.megablockbot.game.plan.ItemKeys;
 import com.legoj15.megablockbot.game.plan.SupplyChests;
 import com.legoj15.megablockbot.game.safety.BlockSafety;
 import com.legoj15.megablockbot.game.safety.Verdict;
 import java.util.Map;
-import java.util.TreeMap;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -23,8 +21,6 @@ import net.minecraft.world.Container;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.MenuProvider;
 import net.minecraft.world.inventory.AbstractContainerMenu;
-import net.minecraft.world.inventory.Slot;
-import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
@@ -36,12 +32,16 @@ import net.minecraft.world.phys.Vec3;
  * to and including the menu, and the rules about the owner's word:
  *
  * <ul>
- *   <li>The container that is used is the one that was named. For a supply container the block recorded when it was named
- *       has to stand at the position (both halves of a double chest); another block there means the owner's word is
- *       gone, so the word and what the body noted are dropped, nothing is opened, and the failure is {@code TargetGone}.</li>
+ *   <li>The container that is used is the one that was recorded. Whatever the body holds of it, the owner's word for it
+ *       and its own note of what is inside (a container it placed and has been inside has no word, only the note), has
+ *       to be of the block that stands at the position, both halves of a double chest included
+ *       ({@link SupplyChests#stand}); another block there means the record is gone, so the word, the note and the body's
+ *       claim on the spot are dropped, nothing is opened, and the failure is {@code TargetGone}.</li>
  *   <li>A position that is not loaded is "cannot tell", never "gone": {@code Unreachable}, and nothing is dropped, so the
  *       executor answers by going there.</li>
- *   <li>Block safety is asked when the body is about to open it, as a position far away is not loaded: {@code Protected}.</li>
+ *   <li>Block safety is asked when the body is about to open it, as a position far away is not loaded: {@code Protected}.
+ *       A task whose goal names the container (the look a stockpile plan makes of its target) asks on the goal's word, as
+ *       {@link DepositTask} does ({@link #askedOnTheGoalsWord}).</li>
  *   <li>A container that is there and may be used but gives no menu (blocked above, locked) is the subclass's failure
  *       ({@link #wouldNotOpen}): what the executor does with it differs by task.</li>
  * </ul>
@@ -87,6 +87,11 @@ abstract class ContainerTask extends BodyTask {
 
     /** The failure for a container that is there, may be used, and opened no menu. */
     protected abstract Failure wouldNotOpen(BotPlayer body);
+
+    /** Whether the goal this leaf belongs to names the container, which is the owner's word for it for that goal. */
+    protected boolean askedOnTheGoalsWord() {
+        return false;
+    }
 
     // ---------------------------------------------------------------------------------------------------------
 
@@ -160,15 +165,14 @@ abstract class ContainerTask extends BodyTask {
         ServerLevel level = body.serverLevel();
         BlockPos pos = blockPos(containerPos);
         BotMemory memory = BotMemory.of(body.getUUID());
-        BotMemory.SupplyContainer word = memory.supplyAt(dimension, pos);
-        switch (SupplyChests.stand(level, pos, word)) {
+        switch (SupplyChests.stand(level, memory, pos)) {
             case NOT_LOADED -> {
                 // Nothing is known of an unloaded position, so nothing is forgotten: the executor goes there again.
                 return end(body, TickResult.failed(unreachable(containerPos.encode(), "not loaded",
                     "the position of the container at " + containerPos.encode() + " is not loaded, so I cannot tell what stands there")));
             }
             case CHANGED -> {
-                return end(body, TickResult.failed(gone(body, memory, pos, "another block stands where the owner named one")));
+                return end(body, TickResult.failed(gone(body, memory, pos, "another block stands where one was recorded")));
             }
             case STANDS -> { }
         }
@@ -176,7 +180,8 @@ abstract class ContainerTask extends BodyTask {
         if (!(entity instanceof Container) && !(entity instanceof MenuProvider)) {
             return end(body, TickResult.failed(gone(body, memory, pos, "no container stands there")));
         }
-        Verdict verdict = BlockSafety.of(level.getServer()).mayUseContainer(body, level, pos);
+        Verdict verdict = askedOnTheGoalsWord() ? ContainerAccess.askAsGoalsWord(body, level, pos)
+            : BlockSafety.of(level.getServer()).mayUseContainer(body, level, pos);
         if (!verdict.allowed()) return end(body, TickResult.failed(verdict.toFailure(pos)));
         BodyInteractionManager use = (BodyInteractionManager) body.getInteractionManager();
         use.interactBlock(body, level, body.getMainHandItem(), InteractionHand.MAIN_HAND, hitOn(body, pos));
@@ -186,10 +191,9 @@ abstract class ContainerTask extends BodyTask {
         return TickResult.RUNNING;
     }
 
-    /** The owner's word for this position, and what the body noted there, are dropped: what stands there is not what was named. */
+    /** What the body holds of this position (the owner's word, the note, its claim on the spot) is dropped: what stands there is not what was recorded. */
     private Failure gone(BotPlayer body, BotMemory memory, BlockPos pos, String why) {
-        memory.forgetContainer(dimension, pos);
-        if (memory.removeSupply(dimension, pos)) {
+        if (SupplyChests.forget(memory, dimension, pos)) {
             MegaBlockBot.LOGGER.info("{} found {} at {} in {} and no longer takes from it", body.getGameProfile().getName(),
                 why, pos.toShortString(), dimension);
         }
@@ -225,28 +229,12 @@ abstract class ContainerTask extends BodyTask {
 
     /** What the menu's container slots hold now (the body's own slots are not the container's), by item. */
     protected static Map<ItemKey, Integer> contentsOf(BotPlayer body, AbstractContainerMenu menu) {
-        Map<ItemKey, Integer> contents = new TreeMap<>();
-        for (Slot slot : menu.slots) {
-            if (slot.container == body.getInventory() || !slot.hasItem()) continue;
-            ItemStack stack = slot.getItem();
-            contents.merge(ItemKeys.of(stack.getItem()), stack.getCount(), Integer::sum);
-        }
-        return contents;
+        return ContainerAccess.contentsOf(body, menu);
     }
 
-    /**
-     * Notes what the container held when the body last looked, so that the next snapshot, and plan, say the same. The note
-     * is per inventory: for a double chest it is one note, at the half with the lower position hash, whichever half the
-     * leaf named; whatever was noted under any of its blocks before is replaced.
-     */
+    /** Notes what the container held when the body last looked, so that the next snapshot, and plan, say the same. */
     protected final void note(BotPlayer body, Map<ItemKey, Integer> contents) {
-        ServerLevel level = body.serverLevel();
-        BlockPos pos = blockPos(containerPos);
-        SupplyChests.Spot spot = SupplyChests.find(level, pos);
-        BlockPos at = spot == null ? pos : spot.pos();
-        BlockPos other = spot == null ? null : spot.other();
-        String block = spot == null ? SupplyChests.blockId(level.getBlockState(pos).getBlock()) : spot.block();
-        BotMemory.of(body.getUUID()).noteContainer(dimension, at, other, block, contents);
+        ContainerAccess.note(body, dimension, containerPos, contents);
     }
 
     /** Lets go of the body and the menu, then reports. The executor does not abort a task that ended itself. */

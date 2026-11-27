@@ -107,6 +107,10 @@ final class ResultText {
                 fields.put("deathPos", pos(f.deathPos()));
             }
             case Failure.PreemptStalled f -> fields.put("reflexCause", f.reflexCause());
+            case Failure.NoPlace f -> {
+                fields.put("what", f.what());
+                fields.put("radius", f.radius());
+            }
             // Only the exception's class: its message and stack trace are for logs, not for a model.
             case Failure.Internal f -> fields.put("exception",
                     f.exception() == null ? "none" : f.exception().getClass().getSimpleName());
@@ -151,6 +155,7 @@ final class ResultText {
             case Failure.Died f -> "I died while working on it";
             case Failure.PreemptStalled f ->
                     "I kept being interrupted by " + f.reflexCause() + " and could not get back to it";
+            case Failure.NoPlace f -> "I found nowhere within " + f.radius() + " blocks to " + f.what();
             case Failure.Internal f -> "something went wrong on my side";
         };
     }

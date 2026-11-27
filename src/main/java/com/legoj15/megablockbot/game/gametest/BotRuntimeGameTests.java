@@ -39,6 +39,8 @@ import com.legoj15.megablockbot.game.task.TableSites;
 import com.legoj15.megablockbot.game.task.TaskRegistry;
 import com.mojang.authlib.GameProfile;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.BitSet;
@@ -69,9 +71,11 @@ import net.minecraft.world.inventory.CraftingMenu;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.LeavesBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec2;
 import net.minecraft.world.phys.Vec3;
@@ -294,9 +298,11 @@ public final class BotRuntimeGameTests {
     }
 
     /**
-     * The body stands on a pillar five blocks high with air all round. From there no face of any block is within reach,
-     * so a table cannot go down where it stands: the craft has to walk to a place with a spot beside it (here, down off
-     * the pillar), put the table there, craft and take it up again.
+     * The body stands on a pillar five blocks high with air all round. The pillar's own sides are faces it could click,
+     * but every spot beside the pillar has air below it, and a table put there would drop its item into the gap when it is
+     * broken again (the one rule {@code TableSites} adds to the game's, because the task takes the table up). So a table
+     * cannot go down where it stands: the craft has to walk to a place with a usable spot beside it (here, down off the
+     * pillar), put the table there, craft and take it up again.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600)
     public static void aCraftWalksToAPlaceForItsTable(GameTestHelper helper) {
@@ -382,7 +388,7 @@ public final class BotRuntimeGameTests {
         helper.setBlock(8, 8, 8, Blocks.AIR);
         helper.setBlock(8, 9, 8, Blocks.AIR);
         Rig rig = Rig.spawnAt(helper, "shaft", 300, new Vec3(8.5, 8.0, 8.5));
-        TableSites.setRadius(rig.id(), 3);
+        TableSites.setRadii(rig.id(), 3, 3);
         giveThePickaxeMaterials(rig);
         rig.runtime().submit(new Goal.HaveItem(ItemKey.of("wooden_pickaxe"), 1));
         int[] ticks = {0};
@@ -394,9 +400,8 @@ public final class BotRuntimeGameTests {
             if (result == null) return;
             helper.assertTrue(ticks[0] <= 100, "the goal took " + ticks[0] + " ticks to end");
             helper.assertTrue(result.status() == GoalResult.Status.FAILED, "the goal ended " + BotSpeech.result(result));
-            helper.assertTrue(result.failure() instanceof Failure.Internal none && none.exception() == null
-                    && none.detail().contains("within 3 blocks"),
-                "the failure does not say how far the task looked: " + result.failure());
+            helper.assertTrue(result.failure() instanceof Failure.NoPlace none && none.radius() == 3,
+                "the failure is not a NoPlace that looked three blocks out: " + result.failure());
             helper.assertTrue(mostReplans[0] == 0, "the executor answered the failure with " + mostReplans[0] + " replans");
             helper.assertTrue(rig.count(Items.OAK_PLANKS) == 3 && rig.count(Items.STICK) == 2 && rig.count(Items.CRAFTING_TABLE) == 1,
                 "something was lost: planks " + rig.count(Items.OAK_PLANKS) + ", sticks " + rig.count(Items.STICK) + ", tables "
@@ -408,27 +413,160 @@ public final class BotRuntimeGameTests {
     }
 
     /**
-     * Four planks come out of one log, and the inventory has room for two of them: 34 slots of unstackable tools, 62 planks
-     * and two logs. A craft takes its result whole or not at all. Taking it partly would count the craft as made, use up
-     * its log, and leave the other two planks lying at the feet of a body with no room to pick them up.
+     * The body starts inside the protected square around its owner's respawn point, where block safety refuses every spot
+     * (the table could not be taken up again). The live runs of every bot that begins at the world spawn ended this way:
+     * three identical replans, then the goal. A player walks out of the square, and so does the craft. The square here
+     * ends at x = 7 (its centre is nine blocks west of the arena), so the table can only go down at x of 8 or more.
+     * The neighbouring arenas are five blocks off, so the test cannot start from the square's middle, whose way out is
+     * seventeen blocks; it narrows the normal search to two blocks instead, so that what finds the way out is the wide
+     * search that follows a refusal, which is the same code as from the middle.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 700)
+    public static void aCraftLeavesAProtectedAreaForItsTable(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawnInZoneOf(helper, "zone", 700, new Vec3(0.5, FLOOR_TOP, 8.5), new BlockPos(-9, FLOOR_Y + 1, 8));
+        TableSites.setRadii(rig.id(), 2, TableSites.WIDE_RADIUS);
+        giveThePickaxeMaterials(rig);
+        rig.runtime().submit(new Goal.HaveItem(ItemKey.of("wooden_pickaxe"), 1));
+        BlockPos[] placedAt = {null};
+        int[] mostReplans = {0};
+        rig.onEachTick(() -> {
+            mostReplans[0] = Math.max(mostReplans[0], rig.runtime().view().totalReplans());
+            if (placedAt[0] == null) {
+                List<BlockPos> tables = rig.tablesInArena();
+                if (!tables.isEmpty()) placedAt[0] = tables.get(0);
+            }
+            GoalResult result = rig.runtime().lastResult();
+            if (result == null) return;
+            helper.assertTrue(result.status() == GoalResult.Status.SATISFIED, "the goal ended " + BotSpeech.result(result));
+            helper.assertTrue(mostReplans[0] == 0, "the craft was replanned " + mostReplans[0] + " times");
+            helper.assertTrue(rig.count(Items.WOODEN_PICKAXE) == 1, "no wooden pickaxe in the inventory");
+            helper.assertTrue(placedAt[0] != null && placedAt[0].getX() >= 8, "the table went down inside the square, at " + placedAt[0]);
+            helper.assertTrue(rig.count(Items.CRAFTING_TABLE) == 1, "the table is not back in the inventory: " + rig.count(Items.CRAFTING_TABLE));
+            helper.assertTrue(rig.tablesInArena().isEmpty(), "a crafting table was left standing at " + rig.tablesInArena());
+            helper.assertTrue(BotMemory.of(rig.id()).placedCount() == 0, "the body still remembers a block it placed");
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * The protected square covers everything the wide search reaches (narrowed to five blocks): there is no place to put the
+     * table, and that is a body with nowhere to go, not a block it may not touch. The answer is NoPlace with the radius it
+     * looked over, at once and without a replan; a Protected answer excludes one block and replans, which is a plan that
+     * finds the same refusal again.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 300)
+    public static void aCraftThatCannotLeaveAProtectedAreaIsNoPlaceNotProtected(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawnInZoneOf(helper, "locked", 300, new Vec3(8.5, FLOOR_TOP, 8.5), new BlockPos(8, FLOOR_Y + 1, 8));
+        TableSites.setRadii(rig.id(), 2, 5);
+        giveThePickaxeMaterials(rig);
+        rig.runtime().submit(new Goal.HaveItem(ItemKey.of("wooden_pickaxe"), 1));
+        int[] ticks = {0};
+        int[] mostReplans = {0};
+        rig.onEachTick(() -> {
+            ticks[0]++;
+            mostReplans[0] = Math.max(mostReplans[0], rig.runtime().view().totalReplans());
+            GoalResult result = rig.runtime().lastResult();
+            if (result == null) return;
+            helper.assertTrue(ticks[0] <= 100, "the goal took " + ticks[0] + " ticks to end");
+            helper.assertTrue(result.status() == GoalResult.Status.FAILED, "the goal ended " + BotSpeech.result(result));
+            helper.assertTrue(result.failure() instanceof Failure.NoPlace none && none.radius() == 5,
+                "the failure is not a NoPlace that looked five blocks out: " + result.failure());
+            helper.assertTrue(mostReplans[0] == 0, "the executor answered the failure with " + mostReplans[0] + " replans");
+            helper.assertTrue(rig.count(Items.OAK_PLANKS) == 3 && rig.count(Items.STICK) == 2 && rig.count(Items.CRAFTING_TABLE) == 1,
+                "something was lost: planks " + rig.count(Items.OAK_PLANKS) + ", sticks " + rig.count(Items.STICK) + ", tables "
+                    + rig.count(Items.CRAFTING_TABLE));
+            helper.assertTrue(rig.tablesInArena().isEmpty(), "a crafting table was put down at " + rig.tablesInArena());
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * The body is sealed in a tube of bedrock on an open floor: no spot beside it can be clicked from inside, and every
+     * place the search offers outside is one the navigator cannot get to. The walks are bounded, and when they have all
+     * failed the craft says it found no place (a replan would offer the same places, three times over), not that
+     * something was unreachable.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 900)
+    public static void aCraftWhoseWalksAllFailEndsInNoPlace(GameTestHelper helper) {
+        floor(helper);
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int y = FLOOR_Y + 1; y <= FLOOR_Y + 3; y++) {
+                    boolean inside = dx == 0 && dz == 0 && y <= FLOOR_Y + 2;
+                    if (!inside) helper.setBlock(8 + dx, y, 8 + dz, Blocks.BEDROCK);
+                }
+            }
+        }
+        Rig rig = Rig.spawn(helper, "sealed", null, 900);
+        giveThePickaxeMaterials(rig);
+        rig.runtime().submit(new Goal.HaveItem(ItemKey.of("wooden_pickaxe"), 1));
+        int[] mostReplans = {0};
+        rig.onEachTick(() -> {
+            mostReplans[0] = Math.max(mostReplans[0], rig.runtime().view().totalReplans());
+            GoalResult result = rig.runtime().lastResult();
+            if (result == null) return;
+            helper.assertTrue(result.status() == GoalResult.Status.FAILED, "the goal ended " + BotSpeech.result(result));
+            helper.assertTrue(result.failure() instanceof Failure.NoPlace none && none.radius() == TableSites.DEFAULT_RADIUS,
+                "the failure is not a NoPlace that looked the normal radius out: " + result.failure());
+            helper.assertTrue(mostReplans[0] == 0, "the executor answered the failure with " + mostReplans[0] + " replans");
+            helper.assertTrue(rig.count(Items.OAK_PLANKS) == 3 && rig.count(Items.STICK) == 2 && rig.count(Items.CRAFTING_TABLE) == 1,
+                "something was lost: planks " + rig.count(Items.OAK_PLANKS) + ", sticks " + rig.count(Items.STICK) + ", tables "
+                    + rig.count(Items.CRAFTING_TABLE));
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * Four planks come out of one log and the inventory is full: 34 slots of unstackable tools, a stack of planks, and the
+     * logs. A craft takes its result whole or not at all. Taking it partly would count the craft as made, use up its log,
+     * and leave the other planks lying at the feet of a body with no room to pick them up; and the log the grid is given
+     * back must find its way home, not onto the floor. Two fills: room for two of the four planks (the stack stands at 62),
+     * and room for none (it stands at 64). After the craft has failed, every slot holds what it held and nothing of any
+     * kind lies near the body.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
     public static void aResultThatDoesNotFitIsNotTakenAtAll(GameTestHelper helper) {
         floor(helper);
         Rig rig = Rig.spawn(helper, "room", null, 100);
-        Inventory inventory = rig.body().getInventory();
-        for (int slot = 0; slot < 34; slot++) inventory.setItem(slot, new ItemStack(Items.STONE_PICKAXE));
-        inventory.setItem(34, new ItemStack(Items.OAK_PLANKS, 62));
-        inventory.setItem(35, new ItemStack(Items.OAK_LOG, 2));
-        TaskRun run = new TaskRun(craftTask("minecraft:oak_planks", 1, "", new Goal.HaveItem(ItemKey.of("oak_planks"), 66)));
+        int[] planksInTheStack = {62, 64};
+        int[] logsInTheStack = {2, 3};
+        List<ItemStack> before = new ArrayList<>();
+        TaskRun[] run = {null};
+        int[] fill = {0};
+        Runnable stock = () -> {
+            Inventory inventory = rig.body().getInventory();
+            inventory.clearContent();
+            for (int slot = 0; slot < 34; slot++) inventory.setItem(slot, new ItemStack(Items.STONE_PICKAXE));
+            inventory.setItem(34, new ItemStack(Items.OAK_PLANKS, planksInTheStack[fill[0]]));
+            inventory.setItem(35, new ItemStack(Items.OAK_LOG, logsInTheStack[fill[0]]));
+            before.clear();
+            for (int slot = 0; slot < inventory.getContainerSize(); slot++) before.add(inventory.getItem(slot).copy());
+            run[0] = new TaskRun(craftTask("minecraft:oak_planks", 1, "", new Goal.HaveItem(ItemKey.of("oak_planks"), 70)));
+        };
+        stock.run();
         rig.onEachTick(() -> {
-            if (!run.tick(rig.body())) return;
-            int onTheFloor = itemsOnTheFloor(helper, rig.body(), Items.OAK_PLANKS);
-            String state = "planks " + rig.count(Items.OAK_PLANKS) + ", logs " + rig.count(Items.OAK_LOG) + ", on the floor " + onTheFloor;
-            helper.assertTrue(run.failure() instanceof Failure.NoProgress, "the craft ended " + run.result + " (" + state + ")");
-            helper.assertTrue(rig.count(Items.OAK_PLANKS) == 62 && rig.count(Items.OAK_LOG) == 2 && onTheFloor == 0, "an item moved: " + state);
+            if (!run[0].tick(rig.body())) return;
+            String state = "fill " + fill[0] + ": planks " + rig.count(Items.OAK_PLANKS) + ", logs " + rig.count(Items.OAK_LOG);
+            helper.assertTrue(run[0].failure() instanceof Failure.NoProgress, "the craft ended " + run[0].result + " (" + state + ")");
+            Inventory after = rig.body().getInventory();
+            for (int slot = 0; slot < after.getContainerSize(); slot++) {
+                helper.assertTrue(ItemStack.matches(before.get(slot), after.getItem(slot)),
+                    "slot " + slot + " held " + before.get(slot) + " and holds " + after.getItem(slot) + " (" + state + ")");
+            }
+            List<ItemEntity> onTheFloor = helper.getLevel().getEntitiesOfClass(ItemEntity.class, rig.body().getBoundingBox().inflate(6.0),
+                candidate -> !candidate.isRemoved());
+            helper.assertTrue(onTheFloor.isEmpty(), "items lie on the floor: " + onTheFloor + " (" + state + ")");
             rig.assertHandsEmpty();
-            rig.pass();
+            if (++fill[0] == planksInTheStack.length) {
+                rig.pass();
+                return;
+            }
+            stock.run();
         });
     }
 
@@ -554,6 +692,142 @@ public final class BotRuntimeGameTests {
             rig.assertHandsEmpty();
             rig.pass();
         });
+    }
+
+    /** The moments of a craft at a table that a reflex can interrupt. */
+    private enum Moment { CRAFTING, BREAKING, DROPPED }
+
+    /**
+     * What a reflex does to a craft: it holds the body, which pauses the task, and carries the body several blocks away
+     * before the task goes on. The test stands in for the retreat: the goal is paused at the moment, the body is walked off
+     * through its own input until the table is out of reach, and the goal is resumed. The craft must find its table again
+     * (or the table's dropped item) and end as if nothing had happened: the pickaxe made, the table back in the inventory,
+     * nothing left standing.
+     */
+    private static void interruptedCraft(GameTestHelper helper, String tag, Moment moment) {
+        floor(helper);
+        Rig rig = Rig.spawn(helper, tag, null, 700);
+        giveThePickaxeMaterials(rig);
+        rig.runtime().submit(new Goal.HaveItem(ItemKey.of("wooden_pickaxe"), 1));
+        Vec3[] interest = {null};
+        Vec3[] target = {null};
+        int[] stage = {0};
+        int[] walked = {0};
+        rig.onEachTick(() -> {
+            BotPlayer body = rig.body();
+            GoalResult result = rig.runtime().lastResult();
+            switch (stage[0]) {
+                case 0 -> {
+                    helper.assertTrue(result == null, "the goal ended before the moment " + moment + " came: " + (result == null ? "" : BotSpeech.result(result)));
+                    Vec3 point = pointOfMoment(helper, rig, moment);
+                    if (point == null) return;
+                    interest[0] = point;
+                    rig.runtime().pause();
+                    helper.assertTrue(rig.runtime().view().status() == GoalStatus.PAUSED, "the goal is " + rig.runtime().view().status() + " after the pause");
+                    if (moment == Moment.DROPPED) {
+                        // A walk from a standstill is slow: the body would still be inside its own pickup box when the item's
+                        // ten-tick delay ran out, and take it. A real retreat starts further off than this; the delay is held
+                        // back so that the distance, not the timing, is what keeps the body from the item.
+                        for (ItemEntity drop : helper.getLevel().getEntitiesOfClass(ItemEntity.class, arenaBox(helper),
+                            candidate -> candidate.getItem().is(Items.CRAFTING_TABLE))) {
+                            drop.setPickUpDelay(80);
+                        }
+                    }
+                    target[0] = farthestPlaceFrom(helper, body, point);
+                    stage[0] = 1;
+                }
+                case 1 -> {
+                    Vec3 at = body.position();
+                    boolean arrived = Math.hypot(at.x - target[0].x, at.z - target[0].z) < 0.5;
+                    if (arrived || ++walked[0] > 150) {
+                        body.input().reset();
+                        double apart = Math.hypot(at.x - interest[0].x, at.z - interest[0].z);
+                        helper.assertTrue(apart > 5.5, "setup: the body is only " + apart + " blocks from the table after the walk");
+                        rig.runtime().resume();
+                        stage[0] = 2;
+                        return;
+                    }
+                    body.input().lookAt(new Vec3(target[0].x, body.getEyeY(), target[0].z));
+                    body.input().forward = 1.0F;
+                }
+                default -> {
+                    if (result == null) return;
+                    helper.assertTrue(result.status() == GoalResult.Status.SATISFIED, "the goal ended " + BotSpeech.result(result));
+                    helper.assertTrue(rig.count(Items.WOODEN_PICKAXE) == 1, "no wooden pickaxe in the inventory");
+                    helper.assertTrue(rig.count(Items.CRAFTING_TABLE) == 1, "the table is not back in the inventory: " + rig.count(Items.CRAFTING_TABLE));
+                    helper.assertTrue(rig.tablesInArena().isEmpty(), "a crafting table was left standing at " + rig.tablesInArena());
+                    helper.assertTrue(BotMemory.of(rig.id()).placedCount() == 0, "the body still remembers a block it placed");
+                    rig.assertHandsEmpty();
+                    rig.pass();
+                }
+            }
+        });
+    }
+
+    /** Where the table (or its dropped item) is when the moment has come, or null while it has not. Absolute. */
+    private static Vec3 pointOfMoment(GameTestHelper helper, Rig rig, Moment moment) {
+        List<BlockPos> tables = rig.tablesInArena();
+        boolean made = rig.count(Items.WOODEN_PICKAXE) == 1;
+        switch (moment) {
+            case CRAFTING -> {
+                if (!tables.isEmpty() && !made && rig.body().containerMenu instanceof CraftingMenu) {
+                    return Vec3.atCenterOf(helper.absolutePos(tables.get(0)));
+                }
+            }
+            case BREAKING -> {
+                if (!tables.isEmpty() && made && rig.body().getInteractionManager().isMining()) {
+                    return Vec3.atCenterOf(helper.absolutePos(tables.get(0)));
+                }
+            }
+            case DROPPED -> {
+                if (tables.isEmpty() && made) {
+                    for (ItemEntity drop : helper.getLevel().getEntitiesOfClass(ItemEntity.class, arenaBox(helper),
+                        candidate -> !candidate.isRemoved() && candidate.getItem().is(Items.CRAFTING_TABLE))) {
+                        return drop.position();
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** The point inside the arena, in line with the body along one axis, that is farthest from {@code point}. Absolute. */
+    private static Vec3 farthestPlaceFrom(GameTestHelper helper, BotPlayer body, Vec3 point) {
+        Vec3 origin = helper.absoluteVec(Vec3.ZERO);
+        double x = body.getX() - origin.x;
+        double z = body.getZ() - origin.z;
+        Vec3[] candidates = {new Vec3(1.5, 0, z), new Vec3(14.5, 0, z), new Vec3(x, 0, 1.5), new Vec3(x, 0, 14.5)};
+        Vec3 best = null;
+        double bestDistance = -1.0;
+        for (Vec3 candidate : candidates) {
+            double distance = Math.hypot(origin.x + candidate.x - point.x, origin.z + candidate.z - point.z);
+            if (distance > bestDistance) {
+                bestDistance = distance;
+                best = new Vec3(origin.x + candidate.x, body.getY(), origin.z + candidate.z);
+            }
+        }
+        return best;
+    }
+
+    /** Carried off with the menu open and the pickaxe not yet made: the table stands out of reach, and nothing was made yet. */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 700)
+    public static void aCraftInterruptedAtItsTableWalksBackToIt(GameTestHelper helper) {
+        interruptedCraft(helper, "intcraf", Moment.CRAFTING);
+    }
+
+    /** Carried off while the table is being broken: the take-up goes back to the table before it breaks it again. */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 700)
+    public static void aTableBeingTakenUpWhenTheBodyIsCarriedOffIsWalkedBackTo(GameTestHelper helper) {
+        interruptedCraft(helper, "intbrk", Moment.BREAKING);
+    }
+
+    /**
+     * Carried off the moment the table is broken: its item lies where the table stood, further from the body than the
+     * body's own pickup reach and than the four blocks the take-up used to look, and the take-up must walk to it.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 700)
+    public static void aTableItemFarFromTheBodyIsWalkedTo(GameTestHelper helper) {
+        interruptedCraft(helper, "intdrop", Moment.DROPPED);
     }
 
     /**
@@ -947,16 +1221,6 @@ public final class BotRuntimeGameTests {
         return new AABB(corner.getX(), corner.getY(), corner.getZ(), corner.getX() + 16, corner.getY() + 16, corner.getZ() + 16);
     }
 
-    /** How many of the item lie on the ground as item entities within four blocks of the body. */
-    private static int itemsOnTheFloor(GameTestHelper helper, BotPlayer body, Item item) {
-        int total = 0;
-        for (ItemEntity drop : helper.getLevel().getEntitiesOfClass(ItemEntity.class, body.getBoundingBox().inflate(4.0),
-            candidate -> !candidate.isRemoved() && candidate.getItem().is(item))) {
-            total += drop.getItem().getCount();
-        }
-        return total;
-    }
-
     /** One task ticked the way the executor ticks it, keeping how it ended. */
     private static final class TaskRun {
         private final Task<BotPlayer> task;
@@ -976,6 +1240,18 @@ public final class BotRuntimeGameTests {
 
         Failure failure() {
             return result instanceof TickResult.Failed failed ? failed.failure() : null;
+        }
+    }
+
+    /** What the server wrote for a mock player that was in the world: its data, statistics and advancements. */
+    private static void forgetPlayerFiles(MinecraftServer server, UUID id) {
+        try {
+            Files.deleteIfExists(server.getWorldPath(LevelResource.PLAYER_DATA_DIR).resolve(id + ".dat"));
+            Files.deleteIfExists(server.getWorldPath(LevelResource.PLAYER_DATA_DIR).resolve(id + ".dat_old"));
+            Files.deleteIfExists(server.getWorldPath(LevelResource.PLAYER_STATS_DIR).resolve(id + ".json"));
+            Files.deleteIfExists(server.getWorldPath(LevelResource.PLAYER_ADVANCEMENTS_DIR).resolve(id + ".json"));
+        } catch (IOException ignored) {
+            // Leftover files of a test player are harmless; its id is random.
         }
     }
 
@@ -1059,6 +1335,25 @@ public final class BotRuntimeGameTests {
             player.setPos(at.x, at.y, at.z);
             Rig rig = new Rig(helper, tag, profile, player);
             rig.respawn(at);
+            helper.runAtTickTime(deadlineTicks, rig::cleanup);
+            return rig;
+        }
+
+        /**
+         * A body owned by a player who is in the world and whose respawn point is {@code relativeHome}: block safety then
+         * refuses to let the body break anything within sixteen blocks of it, as around a real bed. The player and the
+         * files the server wrote for it are gone when the test ends.
+         */
+        static Rig spawnInZoneOf(GameTestHelper helper, String tag, int deadlineTicks, Vec3 relative, BlockPos relativeHome) {
+            ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+            owner.setRespawnPosition(Level.OVERWORLD, helper.absolutePos(relativeHome), 0.0F, true, false);
+            Rig rig = new Rig(helper, tag, owner.getGameProfile(), owner);
+            rig.atEnd(() -> {
+                MinecraftServer server = helper.getLevel().getServer();
+                if (server.getPlayerList().getPlayers().contains(owner)) server.getPlayerList().remove(owner);
+                forgetPlayerFiles(server, owner.getUUID());
+            });
+            rig.respawn(helper.absoluteVec(relative));
             helper.runAtTickTime(deadlineTicks, rig::cleanup);
             return rig;
         }

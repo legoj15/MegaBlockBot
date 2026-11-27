@@ -26,8 +26,12 @@ subject to the protected radius (only breaking is), so a named chest inside the 
 it. Naming lifts the container rule and the workstation rule for that block, not the bed rule (a bed holds nothing to take
 and cannot be named). A double chest is named as one inventory (both halves), and a half joined to it later is not named:
 using needs both halves, so the pair is refused until the owner names it again. Naming is the owner's word for a block at
-a position: a task that finds another block there (either half of a pair) drops the word, and one that finds the position
-not loaded decides nothing and drops nothing.
+a position, and counts only while that block stands there (`SupplyChests.stand`, the one rule the tasks, the snapshot and
+this check share): `mayUseContainer` lets a named container through only when the block at the position, and for a pair at
+the second half too, is the one that was named, so a barrel (also a job site) put where a named chest stood is refused like
+any other container the body did not place. A position that is not loaded is not decided and so not allowed. The check only
+reads: a task that finds another block there (either half of a pair) drops the word, and one that finds the position not
+loaded decides nothing and drops nothing.
 
 Putting into a container asks the same question. The `deposit` task asks `mayUseContainer` before it opens the container,
 with an `Allowance` that covers exactly that container (both halves of a double chest) open for the length of the question:

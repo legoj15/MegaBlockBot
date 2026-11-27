@@ -969,6 +969,7 @@ class ModelLanguageLayerTest {
                 new Failure.NoProgress(600, "x"),
                 new Failure.Died(dimension, pos, List.of(pos), 5L, "x"),
                 new Failure.PreemptStalled("zombie", "x"),
+                new Failure.NoPlace("put a crafting table down", 12, "x"),
                 new Failure.Internal(new IllegalStateException("boom"), "x"));
         List<GoalResult> results = new ArrayList<>();
         for (Failure failure : failures) {

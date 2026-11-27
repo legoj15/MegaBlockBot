@@ -27,6 +27,7 @@ final class FailureNotes {
             case Failure.Died f -> new Failure.Died(f.dimension(), f.deathPos(), f.dropPositions(), f.deathTime(),
                     detail);
             case Failure.PreemptStalled f -> new Failure.PreemptStalled(f.reflexCause(), detail);
+            case Failure.NoPlace f -> new Failure.NoPlace(f.what(), f.radius(), detail);
             case Failure.Internal f -> new Failure.Internal(f.exception(), detail);
         };
     }

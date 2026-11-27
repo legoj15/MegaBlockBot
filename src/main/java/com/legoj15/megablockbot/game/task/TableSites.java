@@ -2,6 +2,7 @@ package com.legoj15.megablockbot.game.task;
 
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.safety.BlockSafety;
+import com.legoj15.megablockbot.game.safety.SafetyConstants;
 import com.legoj15.megablockbot.game.safety.Verdict;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -35,9 +36,10 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * leaves, on a pillar's side, against a wall. (A sturdy face is not required; the rule the task used to have, that the
  * block below must be sturdy, refused every spot in a tree canopy.)
  *
- * <p>One thing is asked on top of the game's rule, and only because the task takes the table up again: something below
- * the spot has a collision shape, so the table's item comes to rest beside the body when the table is broken. A table
- * on a ledge over a drop would give its item to the drop.
+ * <p>Two things are asked on top of the game's rule, both because the task takes the table up again: something below
+ * the spot has a collision shape, so the table's item comes to rest beside the body when the table is broken (a table on a
+ * ledge over a drop would give its item to the drop), and block safety lets the body break a table there (inside a
+ * protected area it never does, so no spot in one is offered, and the search goes on out of it: {@link #WIDE_RADIUS}).
  *
  * <p>The click is made while sneaking, as a player builds against a chest or a door (the click would otherwise open it),
  * so every look uses the sneaking eye height.
@@ -66,15 +68,23 @@ public final class TableSites {
     /** Spots around a standing place, in the order they are tried: level with the feet first, near before far. */
     private static final List<int[]> OFFSETS = offsets();
 
-    /** A body's own radius, for a test that has to make "nowhere" small enough to build. */
-    private static final Map<UUID, Integer> RADII = new ConcurrentHashMap<>();
+    /**
+     * How far the search reaches when everything it found within {@link #DEFAULT_RADIUS} was a spot block safety does not
+     * let the body break again (the table could not be taken up): the body is inside a protected area, and the way out is
+     * further than the normal radius. Enough to stand beyond the far edge of a protected square, and put a table down
+     * beside that stand, from the square's middle.
+     */
+    public static final int WIDE_RADIUS = SafetyConstants.PROTECTED_RADIUS + 1 + REACH_SIDEWAYS;
+
+    /** A body's own radii, for a test that has to make "nowhere" small enough to build: {radius, wide radius}. */
+    private static final Map<UUID, int[]> RADII = new ConcurrentHashMap<>();
 
     private TableSites() {}
 
     /** One way to put the table down: click {@code face} of {@code against} at {@code click}, and it appears at {@code spot}. */
     record Site(BlockPos spot, BlockPos against, Direction face, Vec3 click) {}
 
-    /** The first spot a look found that the body could place on but may not break again, kept for the failure. */
+    /** The first spot a look came to that block safety would not let the body break again (a table put there could not be taken up). */
     static final class Refusal {
         @Nullable
         Verdict verdict;
@@ -95,13 +105,25 @@ public final class TableSites {
 
     /** The search radius for this body: {@link #DEFAULT_RADIUS} unless a test narrowed it. */
     static int radius(UUID body) {
-        return RADII.getOrDefault(body, DEFAULT_RADIUS);
+        int[] own = RADII.get(body);
+        return own == null ? DEFAULT_RADIUS : own[0];
     }
 
-    /** Narrows (or widens) the search for this body only, so that a test arena can hold a place with nowhere to go. */
-    public static void setRadius(UUID body, int radius) {
-        if (radius < 1) throw new IllegalArgumentException("a search radius is at least 1, not " + radius);
-        RADII.put(body, radius);
+    /** The wide search radius for this body: {@link #WIDE_RADIUS} unless a test narrowed it. */
+    static int wideRadius(UUID body) {
+        int[] own = RADII.get(body);
+        return own == null ? WIDE_RADIUS : own[1];
+    }
+
+    /**
+     * Narrows (or widens) the search for this body only, so that a test arena can hold a place with nowhere to go: the
+     * normal radius, and the wide one that follows it when every candidate was refused by block safety.
+     */
+    public static void setRadii(UUID body, int radius, int wideRadius) {
+        if (radius < 1 || wideRadius < radius) {
+            throw new IllegalArgumentException("a search radius is at least 1 and the wide one at least as big, not " + radius + ", " + wideRadius);
+        }
+        RADII.put(body, new int[] {radius, wideRadius});
     }
 
     public static void clearRadius(UUID body) {
@@ -141,15 +163,17 @@ public final class TableSites {
             if (!level.getBlockState(spot).canBeReplaced()) continue;
             BlockPos under = spot.below();
             if (level.getBlockState(under).getCollisionShape(level, under).isEmpty()) continue; // the item would fall away
-            if (!unobstructed(body, level, spot, here)) continue;
-
-            Site site = faceFor(body, level, spot, eye, reach);
-            if (site == null) continue;
+            // Asked before the entity query and the rays, which cost more: inside a protected area this refuses almost
+            // every spot of a wide search, and the refusal is all that is wanted of those.
             Verdict verdict = safety.mayBreak(body, level, spot, TABLE);
             if (!verdict.allowed()) {
                 refusal.note(verdict, spot);
                 continue;
             }
+            if (!unobstructed(body, level, spot, here)) continue;
+
+            Site site = faceFor(body, level, spot, eye, reach);
+            if (site == null) continue;
             found.add(site);
             if (found.size() >= limit) break;
         }
@@ -209,14 +233,16 @@ public final class TableSites {
     // ---------------------------------------------------------------------------------------------------------
 
     /**
-     * The nearest place the body can stand that has a usable spot beside it, or null when there is none within
-     * {@code radius} blocks of its feet. Searched shell by shell outward, so the first shell with a place holds the
-     * nearest; {@code skip} names places not to offer again (where the body already is, where a walk already failed).
+     * The nearest place the body can stand that has a usable spot beside it, or null when there is none in the shells
+     * {@code fromShell} to {@code toShell} blocks out from its feet. Searched shell by shell outward, so the first shell
+     * with a place holds the nearest; a second search over the shells beyond the first one's goes on where it stopped.
+     * {@code skip} names places not to offer again (where the body already is, where a walk already failed).
      */
     @Nullable
-    static BlockPos nearestStand(BotPlayer body, ServerLevel level, int radius, Set<BlockPos> skip, Refusal refusal) {
+    static BlockPos nearestStand(BotPlayer body, ServerLevel level, int fromShell, int toShell, Set<BlockPos> skip,
+                                 Refusal refusal) {
         BlockPos centre = body.blockPosition();
-        for (int r = 1; r <= radius; r++) {
+        for (int r = fromShell; r <= toShell; r++) {
             BlockPos best = null;
             double bestDistance = Double.MAX_VALUE;
             for (int dx = -r; dx <= r; dx++) {

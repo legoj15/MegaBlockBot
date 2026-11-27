@@ -870,7 +870,26 @@ final class SolverPlannerTest {
     @Test
     void stockpilePlansWhatTheContainerLacksThenOneDepositLeaf() {
         Goal.Stockpile goal = new Goal.Stockpile(OAK_PLANKS, 8, "minecraft:overworld", CONTAINER);
-        Plan blind = planned(planner(), request(goal, EMPTY, Exclusions.NONE));
+        // A container the snapshot says nothing of has never been opened: the plan is the look, and nothing else, because
+        // what the goal needs depends on what is in it. Planned again with the note, it is planned in full.
+        Plan unseen = planned(planner(), request(goal, EMPTY, Exclusions.NONE));
+        assertEquals(List.of(LookInside.TASK), leaves(unseen).stream().map(NodeSpec::taskKind).toList(), leaves(unseen).toString());
+        NodeSpec look = leaves(unseen).get(0);
+        assertEquals(LookInside.goalBeforeDeposit("minecraft:overworld", CONTAINER), look.goal());
+        assertEquals(CONTAINER.encode(), look.params().get(LookInside.PARAM_CONTAINER));
+        assertEquals("minecraft:overworld", look.params().get(LookInside.PARAM_DIMENSION));
+
+        // A container its owner named and the body has not opened yet is in the snapshot with nothing known of it. That is
+        // the look again: planned as gather and deposit it stayed unknown after the walk and the goal gave up beside it.
+        Snapshot namedNotOpened = Snapshot.builder().gameTime(0)
+                .container(new ContainerSight(CONTAINER, "minecraft:chest", false, false, true, false, Map.of())).build();
+        Plan named = planned(planner(), request(goal, namedNotOpened, Exclusions.NONE));
+        assertEquals(List.of(LookInside.TASK), leaves(named).stream().map(NodeSpec::taskKind).toList(), leaves(named).toString());
+
+        // A container the body has a note of but cannot see from here is unknown, not unseen: planned for in full.
+        Snapshot outOfSight = Snapshot.builder().gameTime(0)
+                .container(new ContainerSight(CONTAINER, "minecraft:chest", false, false, false, false, Map.of())).build();
+        Plan blind = planned(planner(), request(goal, outOfSight, Exclusions.NONE));
         NodeSpec blindDeposit = leaves(blind).get(leaves(blind).size() - 1);
         assertEquals("deposit", blindDeposit.taskKind());
         assertEquals(goal, blindDeposit.goal(), "the goal carries the total the container should hold");
@@ -913,7 +932,10 @@ final class SolverPlannerTest {
             }
             return Optional.of(new Strategy.Proposal(nodes, 1, List.of()));
         });
-        Plan plan = planned(planner(stocker), request(new Goal.Custom("stock_then_carry", Map.of()), EMPTY,
+        // The container is known to be empty: an unseen one would be looked into first, and nothing gathered for it yet.
+        Snapshot emptyContainer = Snapshot.builder().gameTime(0)
+                .container(new ContainerSight(CONTAINER, "minecraft:chest", true, false, Map.of())).build();
+        Plan plan = planned(planner(stocker), request(new Goal.Custom("stock_then_carry", Map.of()), emptyContainer,
                 Exclusions.NONE));
 
         assertEquals(List.of(0L, 3L), logsAfterEachStep, "the deposit empties the working stock of its items");
@@ -1778,6 +1800,15 @@ final class SolverPlannerTest {
         Plan plan = planned(planner(), request(goal, snapshot, protectedSpot));
         assertTrue(withdrawals(plan).isEmpty(), "the replan after a PROTECTED must not walk back to the same container");
         assertEquals(3, gathered(plan, OAK_LOG, "mine"));
+
+        // A double chest is one container: a failure at either of its halves rules out the pair.
+        Pos far = new Pos(SHELF_A.x() + 1, SHELF_A.y(), SHELF_A.z());
+        Snapshot pair = snapshotWith(Map.of(), new ContainerSight(SHELF_A, far, "minecraft:chest", false, false, true, true, Map.of(OAK_PLANKS, 12)));
+        assertEquals(12, withdrawn(planned(planner(), request(goal, pair, Exclusions.NONE)), OAK_PLANKS), "setup: the pair is a supply");
+        for (Pos half : List.of(SHELF_A, far)) {
+            Plan without = planned(planner(), request(goal, pair, new Exclusions(Set.of(), Set.of(half), List.of())));
+            assertTrue(withdrawals(without).isEmpty(), "a failure at " + half + ", a half of the pair, left the pair in the plan");
+        }
     }
 
     @Test
@@ -1818,6 +1849,60 @@ final class SolverPlannerTest {
 
         Shelved shelved = runWithContainers(plan, Map.of(), Map.of(SHELF_B, Map.of(OAK_PLANKS, 2)));
         assertNull(shelved.executed().failure(), shelved.executed().failure() + " after " + shelved.executed().ran());
+    }
+
+    @Test
+    void aStockpileGoalThatNamesEitherHalfOfADoubleChestIsAboutTheOneInventory() {
+        // One inventory is one sight, kept at the half with the lower hash; the owner may type either half in the goal.
+        Pos far = new Pos(SHELF_A.x() + 1, SHELF_A.y(), SHELF_A.z());
+        ContainerSight pair = new ContainerSight(SHELF_A, far, "minecraft:chest", true, false, true, true, Map.of(OAK_PLANKS, 3));
+        Snapshot snapshot = snapshotWith(Map.of(), pair, supplyBox(SHELF_B, Map.of(OAK_PLANKS, 2)));
+        for (Pos named : List.of(SHELF_A, far)) {
+            Goal.Stockpile goal = new Goal.Stockpile(OAK_PLANKS, 8, "minecraft:overworld", named);
+            Plan plan = planned(planner(), request(goal, snapshot, Exclusions.NONE));
+            assertEquals(2, withdrawn(plan, OAK_PLANKS), "the pair is the goal's own target, not a supply, for the half " + named + ": " + leaves(plan));
+            for (NodeSpec take : withdrawals(plan)) {
+                assertEquals(SHELF_B.encode(), take.params().get("container"), "the half " + named);
+            }
+            NodeSpec deposit = leaves(plan).get(leaves(plan).size() - 1);
+            assertEquals("deposit", deposit.taskKind());
+            assertEquals("5", deposit.params().get("count"), "three are in the pair already, for the half " + named);
+        }
+
+        // The fingerprint exempts the same container: whether the pair may be taken from changes nothing for its own goal.
+        SolverPlanner instance = planner();
+        Goal.Stockpile goal = new Goal.Stockpile(OAK_PLANKS, 8, "minecraft:overworld", far);
+        Snapshot notTakeable = snapshotWith(Map.of(), new ContainerSight(SHELF_A, far, "minecraft:chest", true, false, false, true,
+                Map.of(OAK_PLANKS, 3)), supplyBox(SHELF_B, Map.of(OAK_PLANKS, 2)));
+        assertEquals(instance.inputFingerprint(goal, notTakeable), instance.inputFingerprint(goal, snapshot));
+    }
+
+    @Test
+    void anEquipGoalsLaterRequirementDoesNotEatTheItemTheEarlierOneHolds() {
+        // The main hand is to hold planks and the off hand a stick, which two planks make: three planks are needed, and
+        // the one the first requirement holds is not one the second may craft with.
+        Goal.Equip goal = new Goal.Equip(Map.of(EquipSlot.MAINHAND, OAK_PLANKS, EquipSlot.OFFHAND, STICK));
+        Snapshot inAContainer = snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(OAK_PLANKS, 3)));
+        Plan fromContainer = planned(planner(), request(goal, inAContainer, Exclusions.NONE));
+        assertEquals(3, withdrawn(fromContainer, OAK_PLANKS), leaves(fromContainer).toString());
+        Shelved shelved = runWithContainers(fromContainer, Map.of(), Map.of(SHELF_A, Map.of(OAK_PLANKS, 3)));
+        assertNull(shelved.executed().failure(), shelved.executed().failure() + " after " + shelved.executed().ran());
+        assertTrue(shelved.executed().stock().getOrDefault(OAK_PLANKS, 0) >= 1, "the planks to hold were crafted away: " + shelved.executed().stock());
+        assertTrue(shelved.executed().stock().getOrDefault(STICK, 0) >= 1, shelved.executed().stock().toString());
+
+        // The container holds only two: the second requirement plans around the held one, so a plank more is made.
+        Plan fromTwo = planned(planner(), request(goal, snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(OAK_PLANKS, 2))), Exclusions.NONE));
+        Shelved two = runWithContainers(fromTwo, Map.of(), Map.of(SHELF_A, Map.of(OAK_PLANKS, 2)));
+        assertNull(two.executed().failure(), two.executed().failure() + " after " + two.executed().ran());
+        assertTrue(two.executed().stock().getOrDefault(OAK_PLANKS, 0) >= 1 && two.executed().stock().getOrDefault(STICK, 0) >= 1,
+                "ended with " + two.executed().stock() + " after " + two.executed().ran());
+
+        // Carried, not in a container: the same.
+        Plan carried = planned(planner(), request(goal, snapshotWith(Map.of(OAK_PLANKS, 2)), Exclusions.NONE));
+        Executed ran = run(carried, Map.of(OAK_PLANKS, 2), Map.of());
+        assertNull(ran.failure(), ran.failure() + " after " + ran.ran());
+        assertTrue(ran.stock().getOrDefault(OAK_PLANKS, 0) >= 1 && ran.stock().getOrDefault(STICK, 0) >= 1,
+                "ended with " + ran.stock() + " after " + ran.ran());
     }
 
     @Test
@@ -1961,6 +2046,11 @@ final class SolverPlannerTest {
         // Another container's note is not this one's.
         assertTrue(met.evaluate(snapshotWith(Map.of(), new ContainerSight(SHELF_B, "minecraft:chest", true, false, true, true, Map.of()))).isSatisfied(),
                 "an unrelated container is no reason to look at this one");
+        // The look a stockpile goal's plan makes of its own target: nobody has taken that container back, so no sight at all
+        // is "not looked at yet", and only a note meets it.
+        var beforeDeposit = LookInside.postcondition(LookInside.goalBeforeDeposit("minecraft:overworld", SHELF_A));
+        assertFalse(beforeDeposit.evaluate(snapshotWith(Map.of())).isSatisfied());
+        assertTrue(beforeDeposit.evaluate(snapshotWith(Map.of(), new ContainerSight(SHELF_A, "minecraft:chest", true, false, false, true, Map.of()))).isSatisfied());
         // In another dimension the body cannot look, whatever it has noted.
         Snapshot nether = Snapshot.builder().gameTime(0).dimension("minecraft:the_nether").pos(new Pos(0, 64, 0))
                 .container(new ContainerSight(SHELF_A, "minecraft:chest", true, false, true, true, Map.of())).build();

@@ -360,6 +360,24 @@ class GoalExecutorTest {
         assertEquals(Failure.Kind.INTERNAL, host.published.get(0).failure().kind());
     }
 
+    /**
+     * A node that found nowhere to do its work ends the goal with that failure: a retry would look at the same place, and a
+     * replan would hand the same node back, because nothing a planner can change would alter the answer.
+     */
+    @Test
+    void noPlaceGivesUpTheGoalAtOnceWithThatFailureAndNeitherRetriesNorReplans() {
+        Failure noPlace = new Failure.NoPlace("put a crafting table down", 12, "nowhere");
+        host.tasks.add(Fakes.FakeTask.failing(noPlace));
+        runToActive(diamondLeaf("mine:ore"));
+        tick();
+        assertEquals(1, host.taskRequests.size()); // no retry
+        assertEquals(1, host.planRequests.size()); // no replan: the first plan is the only one
+        assertEquals(1, host.published.size());
+        assertEquals(GoalResult.Status.FAILED, host.published.get(0).status());
+        assertEquals(noPlace, host.published.get(0).failure());
+        assertFalse(exec.active());
+    }
+
     @Test
     void aThrowingTaskFailsWithInternalThatCarriesTheExceptionAndGivesUp() {
         host.tasks.add(Fakes.FakeTask.throwingOnTick());

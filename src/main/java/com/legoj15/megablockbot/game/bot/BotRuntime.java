@@ -326,7 +326,7 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     /** A goal running or paused, and also one queued that has not started (a reflex held the body when it was typed). */
     @Override
     public boolean wantsToStayLoaded() {
-        return executor.active() || !executor.view().queue().isEmpty();
+        return executor.active() || executor.hasQueuedGoal();
     }
 
     @Override

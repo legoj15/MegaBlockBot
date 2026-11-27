@@ -56,8 +56,10 @@ container, moves an item or loads a chunk.
   `mayTakeFrom` says whether the body may take from it: the body placed it, or its owner named it (`BotMemory.supply`). For
   such a container out of sight, or in range with its chunk not loaded, the contents are the remembered ones, so that the
   plan can walk over and count on them; one whose chunk is loaded and no longer holds the block (both blocks, for a double
-  chest) is shown with nothing and may not be taken from. A double chest is one sight, at the half with the lower position
-  hash, and one note: a note is per inventory.
+  chest) is shown with nothing and may not be taken from; "no longer holds the block" is `SupplyChests.stand`, one rule for
+  the owner's word and the note alike (each is held to its block). A double chest is one sight, at the half with the lower
+  position hash and carrying the other half (`ContainerSight.other`), and one note: a note is per inventory.
+  `Snapshot.containerAt` answers for either half, so a goal that names the far half finds the same sight.
 - `nearbyBlocks` (the sight, `BodySight`): block id to the horizontal distance of the nearest such block, for the blocks
   `AcquisitionIndex.sourceBlocks()` names (every mining or harvesting source's block). A scan reads the chunks that
   are loaded now (`ServerChunkCache.getChunkNow`; a chunk that is not loaded is skipped, never loaded) within

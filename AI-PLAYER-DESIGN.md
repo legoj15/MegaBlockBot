@@ -453,7 +453,8 @@ renaming a message silently changes behaviour.)
 | `TIMED_OUT`, `NO_PROGRESS` | budget used | retry once; then replan |
 | `DIED` | drop positions, death time | abort the active task, if any; its node returns to PENDING; replan from the respawned inventory; if the drops can still be reached before they despawn (§3.1), a "recover drops" node goes in front of the new tree, otherwise the death record is dropped |
 | `PREEMPT_STALLED` | reflex cause | the reflex layer held the goal paused past its limit (see Preemption); give up the goal at once (the reflex layer still owns the body, so no replan can run) |
-| `INTERNAL` | exception | give up on the goal; report to the owner and the server log |
+| `NO_PLACE` | what, radius | the body looked within `radius` blocks for somewhere to do `what` (put a crafting table down, stand to work) and found nowhere, and nothing a planner can change would alter that (the planner does not see where a block fits): give up the goal at once, with this failure as the result's reason; no retry, no replan |
+| `INTERNAL` | exception | a bug: give up on the goal; report to the owner and the server log |
 
 **Retry, replan, give up.** The executor, not the task, decides. Budgets, based on AIBot's
 tuned numbers:
@@ -633,10 +634,12 @@ above, these hold; the code is `core/exec`.**
   and reach; no sturdy face is needed) and, when no such spot is within reach, walks to the nearest place that has one
   (`game.task.TableSites`, 12 blocks). It draws only from the main inventory and the hotbar, and takes its result whole or
   not at all. A table it may no longer break is left standing, remembered, and the craft still succeeds.
-- No failure kind in the table above makes the executor give up on a plan that cannot work from where the body is: all
-  but `INTERNAL` and `PREEMPT_STALLED` end in a replan, and a replan only changes the plan when the planner can see why
-  the node failed (a source to exclude, a block to avoid). A craft with nowhere to put its table fails `INTERNAL` with no
-  exception as a stand-in; a kind of its own (or a planner input for it) belongs in `core` (#27).
+- A plan can fail for a reason the planner cannot see or avoid: where a block fits is in the world, not in its snapshot. Every
+  kind in the table above except `PREEMPT_STALLED`, `NO_PLACE` and `INTERNAL` ends in a replan, and a replan only changes the
+  plan when the planner can see why the node failed (a source to exclude, a block to avoid); a craft with nowhere to put its
+  table would be replanned into the same craft three times. `NO_PLACE` is the kind for it, and the executor gives the goal up
+  at once. A craft inside a protected area (block safety would not let the body take the table up again) first walks out of it
+  (`TableSites.WIDE_RADIUS`) and fails `NO_PLACE`, never `PROTECTED`, when it cannot (#27).
 - A look inside (`look_inside`, the one leaf of the small goal the body gives itself when its owner names a container:
   a `Goal.Custom` whose postcondition reads the snapshot) walks to the container, opens it with the real menu, notes
   what is in it and closes it. It is how the body comes to know what a named container holds.
@@ -690,16 +693,27 @@ refreshes it, and naming the container again drops the note and looks again. A n
 position: a pair is one note, and naming a chest that has since become half of a double chest leaves one note for the
 pair, so one inventory is never counted twice.
 
-The container that is used is the one that was named. The word records the block, and the withdraw and look tasks
-compare it with the block standing there (both halves of a double chest) before they open anything: another block means
-the owner's word is gone (`TARGET_GONE`: the word and the note are dropped, nothing is opened). A position that is not
-loaded is "cannot tell", never "gone": the task fails `UNREACHABLE` and keeps the word and the note, and the executor
-answers by going there. A container that is there and may be used but will not open ends the withdraw leaf `NO_SOURCE`
+The container that is used is the one that was recorded, and the rule is one rule in one place
+(`SupplyChests.stand`) for the tasks, the snapshot and block safety. The owner's word and the body's own note of what is
+inside each record the block, and a record counts only while that block stands at the position (both halves of a double
+chest). So the withdraw and look tasks compare what they hold of the container with what stands there before they open
+anything: another block means the record is gone (`TARGET_GONE`: the word, the note and the body's claim on the spot are
+dropped, nothing is opened), whether the container was named or is one the body placed and has been inside, and block
+safety's use check no longer passes a barrel put where a named chest stood. A position that is not loaded is "cannot
+tell", never "gone": the task fails `UNREACHABLE` and keeps the word and the note, and the executor answers by going
+there. A container that is there and may be used but will not open ends the withdraw leaf `NO_SOURCE`
 for that leaf's source, so the replan leaves it out and gathers or crafts. Putting into a container asks block safety
 too: a stockpile goal names its target, which is the owner's word for it for that goal, so the deposit task asks with
 an allowance that covers exactly that container (both halves) open for the one question; the allowance lifts the
 container rule and never a claim, a bed or a job site (a barrel the bot did not place is stocked once
-it is named).
+it is named). A deposit notes what the container holds when it is done, as a withdraw does, so what was put in is
+remembered. A stockpile goal whose target the body has no sight of at all (it has never been inside) cannot be judged
+(UNKNOWN, and the executor's one `Reach` does not tell it what is inside), so its plan is the body's look at the target
+(the same `look_inside` leaf, on the goal's own word) and nothing else: with the note made the goal is judged, and when it
+is not met the executor replans knowing what is there. A double chest is one inventory for a goal as for a note: either
+half, as the owner types it, finds the one sight (`ContainerSight.other`, `Snapshot.containerAt`), and the pair is the
+goal's own target whichever half names it. A withdraw never ends with anything on the cursor: what a slot will not take
+back (a furnace's result slot) goes to the inventory, and to the ground only when that is full too.
 
 ## 4. Planning pipeline
 

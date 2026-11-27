@@ -315,6 +315,14 @@ public final class GoalExecutor<B> {
         return run != null && (run.status == GoalStatus.RUNNING || run.status == GoalStatus.PAUSED);
     }
 
+    /**
+     * True while a goal waits in the queue behind the running one, or with nothing running (a reflex held the body when it
+     * was submitted). Cheap: {@link #view()} copies the whole tree, and a question asked every tick must not.
+     */
+    public boolean hasQueuedGoal() {
+        return !queue.isEmpty();
+    }
+
     public ExecutorView view() {
         List<ExecutorView.NodeView> nodes = new ArrayList<>();
         int total = 0, noProgress = 0, repair = 0, deathCount = 0;
@@ -838,7 +846,10 @@ public final class GoalExecutor<B> {
                 node.state = NodeState.PENDING;
                 death(body, (Failure.Died) failure);
             }
-            case PREEMPT_STALLED, INTERNAL -> giveUp(body, failure);
+            // Nothing a replan can change would alter the answer: the reflex layer still owns the body (PREEMPT_STALLED),
+            // the body found nowhere to do the work and the planner cannot see why (NO_PLACE), or the code has a bug
+            // (INTERNAL). A retry or a replan would only repeat the failure.
+            case PREEMPT_STALLED, NO_PLACE, INTERNAL -> giveUp(body, failure);
         }
     }
 

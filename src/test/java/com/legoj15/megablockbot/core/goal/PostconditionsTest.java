@@ -106,6 +106,26 @@ class PostconditionsTest {
     }
 
     @Test
+    void stockpileReadsADoubleChestWhicheverHalfTheGoalNames() {
+        // One inventory is one sight, kept at one half; the owner may type either half in the goal.
+        Pos low = new Pos(13, 65, 1);
+        Pos high = new Pos(14, 65, 1);
+        Snapshot pair = Snapshot.builder()
+                .container(new ContainerSight(low, high, "minecraft:chest", true, false, false, true, Map.of(diamond, 5)))
+                .build();
+        for (Pos named : List.of(low, high)) {
+            assertEquals(Evaluation.Status.SATISFIED, eval(new Goal.Stockpile(diamond, 5, "minecraft:overworld", named), pair).status(),
+                    "the goal names " + named + ", a half of the pair");
+        }
+        Evaluation shortBy = eval(new Goal.Stockpile(diamond, 8, "minecraft:overworld", high), pair);
+        assertEquals(Evaluation.Status.UNSATISFIED, shortBy.status(), "the far half is not 'no sight'");
+        assertEquals(5, shortBy.matched());
+        // Another position is no part of the pair.
+        assertEquals(Evaluation.Status.UNKNOWN,
+                eval(new Goal.Stockpile(diamond, 5, "minecraft:overworld", new Pos(15, 65, 1)), pair).status());
+    }
+
+    @Test
     void stockpileIsUnknownWhenTheDimensionDiffersOrThereIsNoSightOrContentsAreUnknown() {
         Pos chest = new Pos(10, 64, 10);
         var goal = new Goal.Stockpile(diamond, 5, "minecraft:overworld", chest);

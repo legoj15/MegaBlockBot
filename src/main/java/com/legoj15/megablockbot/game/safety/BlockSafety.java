@@ -4,6 +4,7 @@ import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.game.body.BodyManager;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.plan.BotMemory;
+import com.legoj15.megablockbot.game.plan.SupplyChests;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -268,16 +269,24 @@ public final class BlockSafety {
         if (recordedAt(placedData(level), pos, state, body, true) == PlacedBlocks.BOT_SELF) return Verdict.ALLOWED;
         // Only the container rule is an allowance's to lift; a bed or a workstation is not a container to take from.
         if (kind == BlockKinds.CONTAINER && granted(body, pos, true)) return Verdict.ALLOWED;
-        // The owner's word: a container it named for this body to take from. Asked per block, so a double chest needs
-        // both halves named (naming either names both, but a half joined to it since is nobody's word).
+        // The owner's word: a container it named for this body to take from, and only while the block that stands there is
+        // the one it named. Asked per block, so a double chest needs both halves named (naming either names both, but a
+        // half joined to it since is nobody's word).
         if (kind != BlockKinds.BED && namedSupply(body, level, pos)) return Verdict.ALLOWED;
         return verdictOf(kind);
     }
 
-    /** Whether the owner of this body named the container at {@code pos} for it to take from. Reads, never makes, a memory. */
+    /**
+     * Whether the owner of this body named the container at {@code pos} for it to take from, and it still stands as it was
+     * named: the word is for the block it recorded (both halves of a pair: {@link SupplyChests#stand}), so a barrel put
+     * where a chest was named is not covered, nor a position that is not loaded. Reads, never makes, a memory, and drops
+     * nothing: the tasks that use a container drop a word that no longer holds.
+     */
     private static boolean namedSupply(UUID body, ServerLevel level, BlockPos pos) {
         BotMemory memory = BotMemory.peek(body);
-        return memory != null && memory.isSupply(level.dimension().location().toString(), pos);
+        if (memory == null) return false;
+        BotMemory.SupplyContainer word = memory.supplyAt(level.dimension().location().toString(), pos);
+        return word != null && SupplyChests.stand(level, pos, word) == SupplyChests.Stand.STANDS;
     }
 
     /** The debug command's body: no owner, so only the world spawn zone applies, and no block is its own. */
