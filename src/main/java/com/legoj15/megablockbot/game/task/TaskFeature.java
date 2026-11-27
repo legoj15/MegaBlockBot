@@ -11,6 +11,8 @@ import com.legoj15.megablockbot.core.planner.LookInside;
  *   <li>{@value #NAVIGATE} and {@value #REACH}: walk to a place ({@link ReachTask}).</li>
  *   <li>{@value #MINE}: break blocks until the body holds a count of an item ({@link MineTask}).</li>
  *   <li>{@value #FISH}: cast a rod into water until the body holds a count of an item ({@link FishTask}).</li>
+ *   <li>{@value #KILL}: fight mobs until the body holds a count of an item ({@link KillTask}).</li>
+ *   <li>{@value #HARVEST}: take growables until the body holds a count of an item ({@link HarvestTask}).</li>
  *   <li>{@value #RECOVER_DROPS}: pick up what a death dropped ({@link RecoverDropsTask}).</li>
  *   <li>{@value #DEPOSIT}: put items into a container ({@link DepositTask}).</li>
  *   <li>{@value #WITHDRAW}: take items out of a container its owner named (or the body placed), as a player does
@@ -30,6 +32,10 @@ public final class TaskFeature {
     public static final String MINE = "mine";
     /** The kind a {@code Source.Fishing} gather leaf binds to ({@code SolverPlanner}, "fish"). */
     public static final String FISH = FishTask.KIND;
+    /** The kind a planner leaf for a {@code KillMob} source binds to ({@code SolverPlanner}). */
+    public static final String KILL = "kill";
+    /** The kind a planner leaf for a {@code Harvest} source binds to ({@code SolverPlanner}). */
+    public static final String HARVEST = "harvest";
     /** The kind of the node the executor inserts after a death; the name is the executor's ({@code DeathHandling}). */
     public static final String RECOVER_DROPS = "recover_drops";
     public static final String DEPOSIT = "deposit";
@@ -47,6 +53,8 @@ public final class TaskFeature {
         TaskRegistry.register(REACH, (leaf, hints) -> new ReachTask(leaf));
         TaskRegistry.register(MINE, MineTask::new);
         TaskRegistry.register(FISH, FishTask::new);
+        TaskRegistry.register(KILL, KillTask::new);
+        TaskRegistry.register(HARVEST, HarvestTask::new);
         TaskRegistry.register(RECOVER_DROPS, (leaf, hints) -> new RecoverDropsTask(leaf));
         TaskRegistry.register(DEPOSIT, (leaf, hints) -> new DepositTask(leaf));
         TaskRegistry.register(WITHDRAW, (leaf, hints) -> new WithdrawTask(leaf));

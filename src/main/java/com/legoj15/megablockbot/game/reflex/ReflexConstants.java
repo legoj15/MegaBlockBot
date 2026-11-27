@@ -1,5 +1,6 @@
 package com.legoj15.megablockbot.game.reflex;
 
+import com.legoj15.megablockbot.game.task.Weapons;
 import java.util.List;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.Items;
@@ -44,8 +45,12 @@ public final class ReflexConstants {
     /** A swing is made once the attack cooldown has recovered this far (AIBot: 0.95, same). */
     public static final float ATTACK_READY = 0.95F;
 
-    /** A sword or axe with this much durability or less left is not a weapon any more (AIBot: 2, same). */
-    public static final int MIN_WEAPON_DURABILITY = 2;
+    /**
+     * A sword or axe with this much durability or less left is not a weapon any more (AIBot: 2, same). The number lives
+     * with the weapon choice it belongs to ({@code Weapons}, shared with the kill task); this file still names it,
+     * because it names every threshold of the reflex layer.
+     */
+    public static final int MIN_WEAPON_DURABILITY = Weapons.MIN_DURABILITY;
 
     /** Walk, do not sprint, when this close to the target: a sprint hit knocks the mob out of reach. */
     public static final double SPRINT_APPROACH_DISTANCE = 5.0;

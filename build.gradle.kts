@@ -102,6 +102,8 @@ neoForge {
                 type = "gameTestServer"
                 gameDirectory = gameTestDirectory
                 systemProperty("neoforge.enabledGameTestNamespaces", modId)
+                // scripts/gametest.ps1 -Only: run only the named test classes (a fix loop's short run).
+                System.getProperty("mbb.gametest.only")?.let { systemProperty("mbb.gametest.only", it) }
             }
         }
     }

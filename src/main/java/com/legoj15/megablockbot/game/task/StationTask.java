@@ -934,7 +934,7 @@ abstract class StationTask extends BodyTask {
      * player reaches for an axe or an empty hand: a station broken with the pickaxe just made would cost it durability
      * for nothing.
      */
-    private static void selectBreakingTool(BotPlayer body, BlockState state) {
+    static void selectBreakingTool(BotPlayer body, BlockState state) {
         var inventory = body.getInventory();
         int best = inventory.selected;
         float bestSpeed = -1.0F;

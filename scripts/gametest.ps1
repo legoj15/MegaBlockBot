@@ -14,11 +14,16 @@
 .EXAMPLE
   ./scripts/gametest.ps1
   ./scripts/gametest.ps1 -Node 1.21.1 -TimeoutSec 1200
+  ./scripts/gametest.ps1 -Only KillHarvestGameTests,FishGameTests
+.PARAMETER Only
+  Test class names, comma separated: only their tests are registered. For a fix loop; "All N required tests passed"
+  then counts that subset, and the script says so. A change is not verified until a run without -Only passes.
 #>
 [CmdletBinding()]
 param(
     [string]$Node = '1.21.1',
-    [int]$TimeoutSec = 900
+    [int]$TimeoutSec = 900,
+    [string]$Only = ''
 )
 
 $root = Split-Path $PSScriptRoot -Parent
@@ -36,10 +41,15 @@ $stale = Stop-NodeJvms -Root $root -Node $Node
 if ($stale) { Write-Host "[$Node] could not stop a leftover server JVM: $($stale -join ', ')"; exit 1 }
 Remove-Item $log, $err, $serverLog -ErrorAction SilentlyContinue
 
+$gradleArgs = @(":${Node}:runGameTestServer", '--no-daemon', '--console=plain')
+if ($Only) {
+    $gradleArgs += "-Dmbb.gametest.only=$Only"
+    Write-Host "[$Node] SUBSET RUN: only $Only"
+}
 Write-Host "[$Node] running the GameTest server"
 try {
     $proc = Start-Process -FilePath (Join-Path $root 'gradlew.bat') `
-        -ArgumentList ":${Node}:runGameTestServer", '--no-daemon', '--console=plain' `
+        -ArgumentList $gradleArgs `
         -WorkingDirectory $root -RedirectStandardOutput $log -RedirectStandardError $err `
         -NoNewWindow -PassThru -ErrorAction Stop
 } catch {

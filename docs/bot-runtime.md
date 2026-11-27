@@ -76,8 +76,8 @@ returns its own `Failed`** (the executor does not abort a task that failed itsel
 `waiting()` is true while it waits on the game (a break, a pickup) so the stuck watchdog leaves it alone; `checkpoint()`
 returns hints for where to look after a restart, never facts.
 
-Registered here: `craft`, `smelt` and `equip`. `navigate`, `reach`, `mine`, `fish`, `recover_drops`, `deposit` and `withdraw` are
-registered by the navigation work (`TaskFeature`), not here.
+Registered here: `craft`, `smelt` and `equip`. `navigate`, `reach`, `mine`, `fish`, `kill`, `harvest`, `recover_drops`,
+`deposit`, `withdraw`, `look_inside` and `build` are registered by the navigation work (`TaskFeature`), not here.
 
 What the navigation tasks need from this runtime:
 
@@ -375,6 +375,80 @@ count wins, as for a mine leaf) and `table`, the loot table the source was read 
   (open water is what gives the game's normal waiting times) and Lure III on the set-up rod (five seconds off the wait
   per level); the missing-rod failure; `NoSource` in a sealed room; a pause while the hook is out, with no hook left
   during it, and the catch afterwards.
+## `kill`
+
+Leaf params: `item`, `count` (how many more; the goal's `HaveItem` count is absolute and wins), `entity` and
+`playerKillOnly`. A drop that needs a player kill is satisfied by this body's own kill: the body is a player, so the flag
+asks nothing of the task. The leaf's source id (`kill:minecraft:cow`) rides along in `NoSource` so a replan excludes exactly
+that source.
+
+- Targets are living entities of the leaf's type within `KillTask.SEARCH_RADIUS` (24) blocks, loaded, nearest first. Never a
+  mob with a custom name, a tamed or leashed animal, or a baby: those belong to someone or drop nothing. The scan does not ask
+  for a line of sight — a quarry behind a hedge is a quarry still; the navigator says how to get there.
+- The body goes to the target through `BotNavigator.follow` (it follows a target that moves) and fights when within reach of
+  an attack, as a player does: the best weapon the body carries brought to the main hand by an inventory swap — the same
+  choice the reflex layer makes (`game.task.Weapons`, moved out of `game.reflex.Hands` for both), fists when none — facing the
+  mob, a swing through `Player.attack` only once the attack strength has recovered (attack before swing: a swing first resets
+  the cooldown and makes every hit a weak one). No shield, no retreat: defence is the reflex layer's, and a hold pauses the
+  task like any task. `waiting()` is true while it fights, so the stuck watchdog does not cut a kill short.
+- After a kill it picks up what dropped (`DropPickup`, shared with `harvest`): the drops of the leaf's item within
+  `LOOT_RADIUS` blocks of where the mob fell. The death is asked about before whether the quarry may still be fought: a
+  mob that has just died is no longer a quarry, and the other order sent the body after the next one with the leather
+  left lying. Other drops (beef) come along by standing there.
+- `DropPickup` is the one walk to dropped items. The game takes an item once it lies in the body's pick-up box (the
+  body's box, a block wider each way, half a block taller) and its delay has run, so the helper gets that box onto the
+  nearest drop and stands. The nearest drop is looked for anew each tick, because a fresh drop hops, rolls off its block
+  and floats: one that leaves the box is walked after, it does not end the pick-up. Further than `WALK` (3.5, flat) the
+  navigator brings the body to within `APPROACH` (2) blocks of the drop's cell — two, since nothing a body can stand in
+  is within one block of a bush on a raised block — then the body's own steps (`STEPS_ALLOWED`, 40), which break
+  nothing, then the drop's cell exactly. A drop the navigator cannot reach, or one in the box and not taken for
+  `WAIT_TICKS` (60), is given up; the whole pick-up has `BUDGET_TICKS` (400), so a drop the water carries off cannot
+  hold the task.
+- A target the body cannot get at is set aside, as the mine task sets a block aside, and another is taken. A follow
+  command never fails for want of a path (it keeps trying), so the task watches the chase itself: a quarry neither
+  closer nor within reach for `KillTask.CHASE_STALL_TICKS` ticks (the navigator's own stall bound for one block) is set
+  aside. The set is kept for the task's life and in its checkpoint. Within `KillTask.CLOSE_ON` (4) blocks of the quarry
+  the body closes on it by its own movement input (running: a hurt cow flees about as fast as a player walks) rather
+  than through the navigator, because a follow command holds the body at its follow radius -- where the engine is
+  content to stand, which is not the same as the reach an attack needs. When no target is known the task explores for a
+  bounded number of rounds (`KillTask.Search`), then fails `NoSource` with the leaf's item and source id, so the executor
+  excludes the source and the next plan gathers the item another way. A round is a look, a stretch of exploring and
+  another look; an exploring command that fails at once ends the round and never the search, since one tick is not a
+  search and a mob may walk into range a moment later. No room for the item before it starts or after a
+  kill's drops are gathered is `NoRoom`, as in the mine task.
+- `progress()`: looking for a cow, going to one at x y z, fighting one, picking up what fell — and how many of the item it
+  holds.
+
+## `harvest`
+
+Leaf params: `item`, `count`, `block`. The leaf's source id (`harvest:minecraft:wheat`) rides along in `NoSource`.
+
+- **Grown** is decided from the block's own state properties in one place (`HarvestTask.grown`): a berry bush or cave vine is
+  grown when it carries its berries (the vine's `berries` property; a bush from age 2, where its own loot table's two pools
+  start); sugar cane, cactus, bamboo and kelp when another of the plant stands below — so the lowest block stays and the plant
+  regrows; a crop with an age at its last age. A kind with no rule of its own is read as grown in any non-default state, and
+  the kind is named in the report (the `NoSource` detail says which went that way).
+- A block the break rules would not let the body break is never taken (the per-body rules, as the mine task's scan asks
+  them; the same gate for what is used rather than broken). A forbidden grown block is skipped, and when only forbidden ones
+  are known the task fails `Protected` naming one.
+- The engine's own farm process is not driven: it is a whole farm in one command (every crop kind, replanting open farmland,
+  bonemeal, and a left-click on everything, which a berry bush must not be), while this leaf is one block kind whose taking
+  must ask the rules per target and go through the body's inputs. The task scans the loaded chunks itself (as the mine task's
+  protected scan does), walks with `BotNavigator.goTo`, breaks what a player breaks (crops, cane) through the body's own game
+  mode, and uses what a player uses without breaking (a berry bush, a cave vine) with an empty hand where there is one.
+- A crop that was broken is replanted when the body holds the plant's item (the seed, the carrot — read from the block as the
+  resolver reads it: the block's own item, or what pick-block gives) and the block below is farmland: a use-item click puts
+  the same plant back. The replant is finished before the step can end, so a harvest that took the crop owes the field its
+  seed back even when the count is reached. Not replanting is not a failure.
+- Drops are picked up as in `kill` (`DropPickup`). What a picked bush drops lies in the bush's own cell, the engine
+  counts a berry bush as a block never to be stood in, and a goal of that cell would have it break the bush to stand
+  there: so the navigator is never asked into the drop's cell first, and its break rules refuse that block for as long
+  as the task owes it.
+- Blocks it cannot get at are set aside (kept for the task's life and its checkpoint); when
+  no grown block is known it explores for a bounded number of rounds (`HarvestTask.Search`), then fails `NoSource` with the
+  leaf's item and source id — the planner has no wait-for-it-to-grow yet, so an unripe field is a source to exclude and
+  replan around, not something to stand and wait by. No room is `NoRoom`, as in the mine task.
+- `progress()` as in `kill`, against the block it heads for.
 
 ## Supply containers, `look_inside` and `withdraw`
 

@@ -43,7 +43,13 @@ final class NeoForgeGameTests {
         Set<String> namespaces = enabled == null ? Set.of()
             : Arrays.stream(enabled.split(",")).filter(s -> !s.isBlank()).collect(Collectors.toUnmodifiableSet());
 
+        // A fix loop's own filter (scripts/gametest.ps1 -Only): test class names, comma list. Unset runs them all.
+        String only = System.getProperty("mbb.gametest.only");
+        Set<String> wanted = only == null ? Set.of()
+            : Arrays.stream(only.split(",")).map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toUnmodifiableSet());
+
         for (Class<?> holder : holders) {
+            if (!wanted.isEmpty() && !wanted.contains(holder.getSimpleName())) continue;
             Arrays.stream(holder.getDeclaredMethods())
                 .sorted(Comparator.comparing(Method::getName))
                 .filter(method -> method.isAnnotationPresent(GameTest.class))

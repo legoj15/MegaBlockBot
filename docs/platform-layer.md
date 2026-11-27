@@ -190,7 +190,9 @@ runs wherever the command tree is built (a worker thread while data loads).
   `versions/<node>/run-gameTestServer`, namespace `megablockbot`) and exits 0 only when
   `versions/<node>/run-gameTestServer/logs/latest.log` shows `All N required tests passed` with N > 0 and no failed
   line. The log, not the exit code, is the evidence: on 1.21.1 a startup failure exits 0. It prints the failed
-  tests and their messages, and kills any server JVM left behind.
+  tests and their messages, and kills any server JVM left behind. `-Only ClassA,ClassB` registers only those test
+  classes (`mbb.gametest.only`, read in `NeoForgeGameTests`): a fix loop's short run, about a minute. A change is
+  verified by a run without it.
 - GameTests run side by side in one world, five blocks apart, and share it: a mob one test spawns hunts the nearest
   player, which may be another test's body, and the navigator's block search reads the neighbouring arenas. A test
   whose body stands still makes it invulnerable (it is then no target at all), gives it a brain that does nothing
