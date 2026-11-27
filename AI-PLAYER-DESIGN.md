@@ -491,8 +491,10 @@ re-check pending nodes' postconditions, which is cheap and not a replan.
 
 Planning runs off-thread on a snapshot (§8). The **input fingerprint** is a hash of the inputs the
 planner actually read: counts of the item keys in the shortfall and its recipe closure, tool
-tiers, known stations, and which of the blocks that the closure's mining and harvesting sources name are in
-the sight (seen or not, never how far, so a body that walks does not look like a changed situation). Item
+tiers, known stations, which of the blocks that the closure's mining and harvesting sources name are in
+the sight (seen or not, never how far, so a body that walks does not look like a changed situation), and the
+goal's exclusions whole (they decide which sources and containers a plan may use, so two requests that differ
+only in what an earlier failure ruled out are different inputs). Item
 pickups outside that set do not change it. The result is adopted
 on the server thread if the input fingerprint still matches; otherwise it is re-run, at most twice
 in a row, and the third result is adopted regardless. Drift that slips through is caught by the

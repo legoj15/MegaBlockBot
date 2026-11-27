@@ -369,7 +369,7 @@ final class SolverPlannerTest {
                         return "trade " + node.source() + " charges " + owed + " of " + charge.getKey().id()
                                 + " but the stock holds " + stock.getOrDefault(charge.getKey(), 0);
                     }
-                    lose(stock, charge.getKey(), (int) owed);
+                    lose(stock, tools, charge.getKey(), (int) owed);
                 }
                 gain(stock, tools, ItemKey.of(params.get("item")), trades);
             }
@@ -380,7 +380,7 @@ final class SolverPlannerTest {
                 if (recipe.station() != null && stock.getOrDefault(recipe.station(), 0) < 1) {
                     return "leaf " + params.get("recipe") + " needs a " + recipe.station().id() + " in stock";
                 }
-                String failure = craftByLayout(recipe, params, times, stock);
+                String failure = craftByLayout(recipe, params, times, stock, tools);
                 if (failure != null) return failure;
                 gain(stock, tools, recipe.result(), times * recipe.resultCount());
             }
@@ -391,7 +391,7 @@ final class SolverPlannerTest {
                     return "deposit moves " + moved + " of " + item.id() + " but the stock holds "
                             + stock.getOrDefault(item, 0);
                 }
-                lose(stock, item, moved); // the container's contents are not tracked: the items leave the body
+                lose(stock, tools, item, moved); // the container's contents are not tracked: the items leave the body
             }
             case "withdraw" -> {
                 // What a container holds is only tracked in a run that was given containers (runWithContainers).
@@ -405,7 +405,7 @@ final class SolverPlannerTest {
                 if (held < count) {
                     return "withdraw takes " + count + " of " + item.id() + " from " + at + ", which holds " + held;
                 }
-                lose(shelf, item, count);
+                lose(shelf, tools, item, count);
                 gain(stock, tools, item, count);
             }
             case "equip", "navigate" -> { /* recorded only; a worn item is still counted in the stock */ }
@@ -422,9 +422,9 @@ final class SolverPlannerTest {
      * layout (there is no grid to lay out), so it always runs that way.
      */
     private static String craftByLayout(RecipeDef recipe, Map<String, String> params, long times,
-                                        Map<ItemKey, Integer> stock) {
+                                        Map<ItemKey, Integer> stock, Map<ToolClass, ToolTier> tools) {
         String layout = params.get("layout");
-        if (layout == null || layout.isEmpty()) return craftGreedily(recipe, times, stock);
+        if (layout == null || layout.isEmpty()) return craftGreedily(recipe, times, stock, tools);
         List<CraftLayout.Run> runs = CraftLayout.decode(params.get("layout"));
         long covered = 0;
         for (CraftLayout.Run run : runs) covered += run.crafts();
@@ -450,7 +450,7 @@ final class SolverPlannerTest {
                         if (stock.getOrDefault(named, 0) < 1) {
                             return "craft " + recipe.id() + " is short of " + named.id() + ", the item its layout names";
                         }
-                        lose(stock, named, 1);
+                        lose(stock, tools, named, 1);
                     }
                 }
             }
@@ -458,13 +458,14 @@ final class SolverPlannerTest {
         return null;
     }
 
-    private static String craftGreedily(RecipeDef recipe, long times, Map<ItemKey, Integer> stock) {
+    private static String craftGreedily(RecipeDef recipe, long times, Map<ItemKey, Integer> stock,
+                                      Map<ToolClass, ToolTier> tools) {
         for (RecipeDef.Slot slot : recipe.slots()) {
             int need = slot.count() * (int) times;
             for (ItemKey alternative : slot.alternatives()) {
                 int take = Math.min(need, stock.getOrDefault(alternative, 0));
                 if (take > 0) {
-                    lose(stock, alternative, take);
+                    lose(stock, tools, alternative, take);
                     need -= take;
                 }
                 if (need == 0) break;
@@ -499,10 +500,26 @@ final class SolverPlannerTest {
         if (toolClass != null) tools.merge(toolClass, TOOL_TIERS.get(item), ToolTier::max);
     }
 
-    private static void lose(Map<ItemKey, Integer> stock, ItemKey item, int count) {
+    private static void lose(Map<ItemKey, Integer> stock, Map<ToolClass, ToolTier> tools, ItemKey item, int count) {
         int have = stock.getOrDefault(item, 0) - count;
-        if (have > 0) stock.put(item, have);
-        else stock.remove(item);
+        if (have > 0) {
+            stock.put(item, have);
+            return;
+        }
+        stock.remove(item);
+        // The last tool of a class leaving the stock leaves the class uncarried, as it does for a body: a plan that
+        // spends its pickaxe cannot mine with it afterwards.
+        ToolClass toolClass = TOOL_CLASSES.get(item);
+        if (toolClass == null) return;
+        ToolTier best = ToolTier.HAND;
+        for (Map.Entry<ItemKey, Integer> held : stock.entrySet()) {
+            if (held.getValue() > 0 && TOOL_CLASSES.get(held.getKey()) == toolClass) {
+                ToolTier tier = TOOL_TIERS.get(held.getKey());
+                if (tier.ordinal() > best.ordinal()) best = tier;
+            }
+        }
+        if (best == ToolTier.HAND) tools.remove(toolClass);
+        else tools.put(toolClass, best);
     }
 
     // ─── Assertions' view of a plan ──────────────────────────────────────────────────────────────
@@ -2464,5 +2481,95 @@ final class SolverPlannerTest {
 
         Plan stringPlan = planned(instance, request(new Goal.HaveItem(STRING, 1), EMPTY, Exclusions.NONE));
         assertFalse(stringPlan.notes().isEmpty(), "the cobweb source needs shears, which is not planned yet");
+    }
+
+    // ─── Brief P26: the planner's review leftovers ────────────────────────────────────────────────
+
+    @Test
+    void aComponentCheckedGoalTheSnapshotAlreadySatisfiesPlansNothing() {
+        // The body holds one enchanted book carrying mending, and the goal asks for exactly that. Held is held: the
+        // plan is empty, not an unplannable goal. Arithmetic: one stack of enchanted_book with facts
+        // {minecraft:mending=1}, goal count 1, check mending >= 1 — the stack passes, so 1 of 1 is had.
+        Goal.HaveItem goal = new Goal.HaveItem(ENCHANTED_BOOK, 1, ComponentCheck.enchantment("minecraft:mending", 1));
+        Snapshot holding = Snapshot.builder().item(ENCHANTED_BOOK, 1)
+                .facts(ENCHANTED_BOOK, new StackFacts(1, Map.of("minecraft:mending", 1), "", Map.of())).build();
+        // The same goal with the wrong book under it is still the strategy's to plan (and, with none, unplannable).
+        Snapshot wrongBook = Snapshot.builder().item(ENCHANTED_BOOK, 1)
+                .facts(ENCHANTED_BOOK, new StackFacts(1, Map.of("minecraft:unbreaking", 3), "", Map.of())).build();
+        assertEquals(Failure.Kind.NO_SOURCE, unplannable(planner(), request(goal, wrongBook, Exclusions.NONE)).kind());
+
+        PlanOutcome outcome = planner().plan(request(goal, holding, Exclusions.NONE));
+        assertTrue(outcome instanceof PlanOutcome.Planned, "a goal that holds is not unplannable: " + outcome);
+        Plan plan = ((PlanOutcome.Planned) outcome).plan();
+        assertTrue(plan.roots().isEmpty(), "a goal that holds plans nothing: " + leaves(plan));
+        // Two of them: still nothing to plan for the one already had, and the second is the strategy's business.
+        Goal.HaveItem two = new Goal.HaveItem(ENCHANTED_BOOK, 2, ComponentCheck.enchantment("minecraft:mending", 1));
+        assertEquals(Failure.Kind.NO_SOURCE, unplannable(planner(), request(two, holding, Exclusions.NONE)).kind());
+    }
+
+    @Test
+    void aToolThePlanItselfSpendsIsNotCarriedByTheStepsAfterIt() {
+        // A gear is one cobblestone and the wooden pickaxe itself, so making it spends the only pickaxe. The plan then
+        // has to mine three cobblestone, which needs a wooden pickaxe: the second sub-goal must provide one more
+        // (logs, planks, sticks, a craft) instead of counting on the pickaxe the first sub-goal already spent.
+        // Arithmetic: start {wooden_pickaxe 1, crafting_table 1}, pickaxe WOOD carried; gear = 1 cobblestone +
+        // 1 wooden_pickaxe; then 3 cobblestone are mined at WOOD tier, which costs one pickaxe the plan still holds.
+        ItemKey gear = ItemKey.of("gear");
+        RecipeBook gearBook = bookWith(recipe("gear_from_pickaxe", gear, 1, CRAFTING_TABLE,
+                one(WOODEN_PICKAXE), one(COBBLESTONE)));
+        List<Plan> secondSteps = new ArrayList<>();
+        ScriptedStrategy sequence = new ScriptedStrategy("gear-then-mine", (asked, context) -> {
+            if (!(asked instanceof Goal.Custom)) return Optional.empty();
+            List<NodeSpec> nodes = new ArrayList<>();
+            for (Goal step : List.of(new Goal.HaveItem(gear, 1), new Goal.HaveItem(COBBLESTONE, 3))) {
+                if (!(context.subPlan(step) instanceof PlanOutcome.Planned planned)) return Optional.empty();
+                if (step instanceof Goal.HaveItem have && have.key().equals(COBBLESTONE)) {
+                    secondSteps.add(planned.plan());
+                }
+                nodes.addAll(planned.plan().roots());
+            }
+            return Optional.of(new Strategy.Proposal(nodes, 1, List.of()));
+        });
+        Map<ItemKey, Integer> start = Map.of(WOODEN_PICKAXE, 1, CRAFTING_TABLE, 1);
+        Map<ToolClass, ToolTier> tools = Map.of(ToolClass.PICKAXE, ToolTier.WOOD);
+        Plan plan = planned(planner(gearBook, index(), sequence),
+                request(new Goal.Custom("gear_then_mine", Map.of()), snapshot(start, tools), Exclusions.NONE));
+
+        assertTrue(secondSteps.size() == 1, "the mining step was planned once: " + secondSteps);
+        assertTrue(craftedRecipes(secondSteps.get(0)).contains("wooden_pickaxe_from_planks"),
+                "the mining step provides the pickaxe the gear spent: " + leaves(secondSteps.get(0)));
+        Executed executed = run(plan, gearBook, start, tools);
+        assertNull(executed.failure(), "the plan must run to the end: " + executed.failure() + " after " + executed.ran());
+        assertEquals(1, executed.stock().getOrDefault(gear, 0));
+        assertTrue(executed.stock().getOrDefault(COBBLESTONE, 0) >= 3, "ended with " + executed.stock());
+        assertTrue(executed.tools().get(ToolClass.PICKAXE).atLeast(ToolTier.WOOD),
+                "the plan ends carrying a pickaxe again: " + executed.tools());
+    }
+
+    @Test
+    void aPlansFingerprintSeesTheGoalExclusions() {
+        // Two requests for the same goal on the same snapshot, differing only in what an earlier failure ruled out:
+        // the executor compares the plan's fingerprint against the goal it replans, so a plan made without the
+        // exclusion must not look current for the goal that has one. The exclusion here is the kill source of string,
+        // so the two plans differ in their leaves as well as their inputs.
+        SolverPlanner instance = planner();
+        Goal goal = new Goal.HaveItem(STRING, 1);
+        Exclusions noKill = without("kill:minecraft:spider");
+
+        Plan plain = planned(instance, request(goal, EMPTY, Exclusions.NONE));
+        Plan rerolled = planned(instance, request(goal, EMPTY, noKill));
+        assertNotEquals(plain.inputFingerprint(), rerolled.inputFingerprint(),
+                "two requests that differ only in exclusions must not fingerprint alike");
+        assertEquals(List.of("fish:minecraft:gameplay/fishing"), sources(rerolled), "setup: the exclusion changed the plan");
+        assertEquals(rerolled.inputFingerprint(), instance.inputFingerprint(goal, EMPTY, noKill),
+                "the plan carries the fingerprint of its own request");
+        assertEquals(plain.inputFingerprint(), instance.inputFingerprint(goal, EMPTY, Exclusions.NONE));
+
+        assertRunsToTheGoal(plain, book(), Map.of(), Map.of(), STRING, 1);
+        assertRunsToTheGoal(rerolled, book(), Map.of(), Map.of(), STRING, 1);
+
+        // An exclusion of a source the goal never reads changes nothing but the hash: it is still a different input.
+        assertNotEquals(plain.inputFingerprint(),
+                instance.inputFingerprint(goal, EMPTY, without("mine:minecraft:diamond_ore")));
     }
 }

@@ -12,8 +12,10 @@ public interface Planner {
     PlanOutcome plan(PlanRequest request);
 
     /**
-     * The hash {@link Plan#inputFingerprint()} would carry for this goal on this snapshot. Cheap; called on the
-     * server thread to decide whether a finished plan is still current.
+     * The hash {@link Plan#inputFingerprint()} would carry for this goal on this snapshot and these exclusions.
+     * Cheap; called on the server thread to decide whether a finished plan is still current. The exclusions are an
+     * input the planner reads (which sources and containers it may use), so a goal whose failures have ruled
+     * something out since must not be fingerprinted as it was.
      */
-    long inputFingerprint(Goal goal, Snapshot snapshot);
+    long inputFingerprint(Goal goal, Snapshot snapshot, Exclusions exclusions);
 }

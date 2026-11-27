@@ -185,7 +185,7 @@ public final class SolverPlanner implements Planner {
 
     private Plan finish(Goal goal, List<NodeSpec> roots, Run run) {
         List<NodeSpec> wrapped = roots.isEmpty() ? List.of() : List.of(NodeSpec.group(goal, roots));
-        return new Plan(wrapped, inputFingerprint(goal, run.snapshot), config.maxTotalReplans(), run.notes);
+        return new Plan(wrapped, inputFingerprint(goal, run.snapshot, run.exclusions), config.maxTotalReplans(), run.notes);
     }
 
     // ─── One planning run ───────────────────────────────────────────────────────────────────────
@@ -215,9 +215,10 @@ public final class SolverPlanner implements Planner {
     /**
      * The working stock, the notes and the sources set aside at one moment, so an attempt that is not kept can be
      * undone: a source set aside while a losing strategy's sub-plan was tried must not be missing from the real plan.
+     * {@code spentTools} is rolled back with the rest, so a tool a discarded attempt consumed is still carried.
      */
     private record State(TreeMap<ItemKey, Long> stock, List<String> notes, TreeSet<String> setAside,
-                         TreeMap<ItemKey, Long> drawn, TreeMap<ItemKey, Long> relied) {}
+                         TreeMap<ItemKey, Long> drawn, TreeMap<ItemKey, Long> relied, TreeSet<ToolClass> spentTools) {}
 
     /** The demand "carry {@code count} of {@code key}", as the one recipe the solver is asked to make (item 11). */
     private record DemandRecipe(ItemKey key, int count) implements RecipeGraphSolver.RecipeInfo<String, ItemKey> {
@@ -272,6 +273,12 @@ public final class SolverPlanner implements Planner {
         /** What the plan consumed from the working stock, in all, and what it still relies on holding (see the class doc). */
         private final TreeMap<ItemKey, Long> drawn = new TreeMap<>();
         private final TreeMap<ItemKey, Long> relied = new TreeMap<>();
+        /**
+         * The tool classes this plan has spent a tool of (a recipe ingredient, a trade's charge). The snapshot's own
+         * best tool is a floor for {@code carriedTier} only until then: a tool the plan itself spends is not carried
+         * by the steps after it, so the class drops to what the working stock still holds.
+         */
+        private final TreeSet<ToolClass> spentTools = new TreeSet<>();
         /**
          * What the requirements of an equip goal planned so far are to hold when it is done, one unit for every slot that
          * names the item. The solver is not offered these units: a later requirement plans around what an earlier one
@@ -394,10 +401,12 @@ public final class SolverPlanner implements Planner {
 
         /**
          * The best tier of the class the body holds now, or will hold once the nodes planned so far have run —
-         * a prerequisite planned "against the working stock" must not replan a tool an earlier node crafts.
+         * a prerequisite planned "against the working stock" must not replan a tool an earlier node crafts. The
+         * snapshot's best tool is where the count starts, because it sees tools the tool table cannot name; it stops
+         * counting the moment the plan spends a tool of the class, for the stock is then the whole truth.
          */
         ToolTier carriedTier(ToolClass toolClass) {
-            ToolTier best = snapshot.bestTool(toolClass);
+            ToolTier best = spentTools.contains(toolClass) ? ToolTier.HAND : snapshot.bestTool(toolClass);
             for (Map.Entry<ItemKey, Long> held : stock.entrySet()) {
                 if (held.getValue() <= 0 || toolClasses.get(held.getKey()) != toolClass) continue;
                 ToolTier tier = toolTiers.get(held.getKey());
@@ -412,7 +421,7 @@ public final class SolverPlanner implements Planner {
          * tier in the working stock, which is a container's (or the plan's own, which no container is asked for).
          */
         private void relyOnTool(ToolClass toolClass, ToolTier required) {
-            if (snapshot.bestTool(toolClass).atLeast(required)) return;
+            if (!spentTools.contains(toolClass) && snapshot.bestTool(toolClass).atLeast(required)) return;
             ItemKey cheapest = null;
             for (Map.Entry<ItemKey, Long> held : stock.entrySet()) {
                 if (held.getValue() <= 0 || toolClasses.get(held.getKey()) != toolClass) continue;
@@ -921,12 +930,28 @@ public final class SolverPlanner implements Planner {
 
         // ─── Goals that go to strategies ─────────────────────────────────────────────────────────
 
+        /** How many units of the goal's item sit in stacks that pass its check (Postconditions' own count). */
+        private long checked(Goal.HaveItem have) {
+            long total = 0;
+            for (StackFacts stack : snapshot.stackFacts().getOrDefault(have.key(), List.of())) {
+                if (have.check().test(stack)) total += stack.count();
+            }
+            return total;
+        }
+
         /**
          * Asks every strategy, each from the working stock as it was before any of them; the cheapest proposal wins,
          * ties on the strategy id (design 4.4), and only the winner's effect on the stock stays. A winning proposal
          * for an item goal is credited to the stock like a gather is.
          */
         Step strategiesFor(Goal goal) {
+            // A component-checked goal the snapshot already satisfies plans nothing (design 3.4: done is the
+            // postcondition on a fresh snapshot, never a task). The planner counts it as held, like any stock the
+            // plan goes on relying on, so a container is not asked to supply what the body already carries.
+            if (goal instanceof Goal.HaveItem have && have.check() != null && checked(have) >= have.count()) {
+                relied.merge(have.key(), (long) have.count(), (a, b) -> Math.max(a, b));
+                return Step.ok(List.of());
+            }
             State base = mark();
             Candidate winner = null;
             for (Strategy strategy : strategies) {
@@ -1194,6 +1219,9 @@ public final class SolverPlanner implements Planner {
             if (have > 0) stock.put(item, have);
             else stock.remove(item);
             if (count <= 0) return;
+            // A tool the plan spends (a recipe ingredient, a trade's charge) is not carried after it (finding 5).
+            ToolClass spentClass = toolClasses.get(item);
+            if (spentClass != null) spentTools.add(spentClass);
             // A unit consumed was one the plan relied on holding, if anything was: it is spent, not held.
             drawn.merge(item, count, Long::sum);
             long reliedOn = relied.getOrDefault(item, 0L) - count;
@@ -1209,7 +1237,7 @@ public final class SolverPlanner implements Planner {
 
         private State mark() {
             return new State(new TreeMap<>(stock), new ArrayList<>(notes), new TreeSet<>(setAside),
-                    new TreeMap<>(drawn), new TreeMap<>(relied));
+                    new TreeMap<>(drawn), new TreeMap<>(relied), new TreeSet<>(spentTools));
         }
 
         private void restore(State state) {
@@ -1221,6 +1249,8 @@ public final class SolverPlanner implements Planner {
             drawn.putAll(state.drawn());
             relied.clear();
             relied.putAll(state.relied());
+            spentTools.clear();
+            spentTools.addAll(state.spentTools());
             if (!setAside.equals(state.setAside())) {
                 setAside.clear();
                 setAside.addAll(state.setAside());
@@ -1310,13 +1340,16 @@ public final class SolverPlanner implements Planner {
      * in the sight, never how far away it is (a body that walks must not look like one whose situation changed), and
      * whether the sight is empty, which switches its charge off ({@link GatherCosts}). Position, health, hunger, game
      * time and the counts of items the plan never reads are not part of it, so an unrelated pickup keeps the plan
-     * current. Stable across JVMs: FNV-1a over a canonical text, no {@code hashCode} (whose 32 bits collide sooner
+     * current. The request's exclusions are part of it whole: they decide which sources and containers a plan may use
+     * (brief P26 item 7), so two requests that differ only in what an earlier failure ruled out are different inputs.
+     * Stable across JVMs: FNV-1a over a canonical text, no {@code hashCode} (whose 32 bits collide sooner
      * than needed here).
      */
     @Override
-    public long inputFingerprint(Goal goal, Snapshot snapshot) {
+    public long inputFingerprint(Goal goal, Snapshot snapshot, Exclusions exclusions) {
         StringBuilder text = new StringBuilder();
         text.append("goal=").append(describe(goal)).append(";dim=").append(snapshot.dimension()).append(';');
+        text.append(exclusionsText(exclusions));
         text.append("tools=");
         for (ToolClass toolClass : ToolClass.values()) {
             text.append(toolClass.name()).append('=').append(snapshot.bestTool(toolClass).name()).append(',');
@@ -1381,9 +1414,36 @@ public final class SolverPlanner implements Planner {
         return hash;
     }
 
+    /**
+     * The fingerprint of a first plan for the goal, one no failure has ruled anything out of. Package-private so the
+     * planner's own tests can say "the fingerprint of its inputs" without spelling the empty exclusions out; the
+     * executor always passes the goal's own.
+     */
+    long inputFingerprint(Goal goal, Snapshot snapshot) {
+        return inputFingerprint(goal, snapshot, Exclusions.NONE);
+    }
+
     /** The source id of a withdraw leaf: what a NO_SOURCE failure of that leaf excludes and the planner then honors. */
     static String withdrawSource(Pos container) {
         return "withdraw:" + container.encode();
+    }
+
+    /**
+     * The exclusions as one canonical text (brief P26 item 7): sorted sources, sorted positions, then areas sorted by
+     * their dimension, centre and radius — never their reason, which is for logs and rules nothing out. The sets are
+     * copied into ordered ones, so no unordered iteration reaches the hash.
+     */
+    private static String exclusionsText(Exclusions exclusions) {
+        StringBuilder text = new StringBuilder("ex=");
+        for (String source : new TreeSet<>(exclusions.sources())) text.append(source).append(',');
+        text.append(";at=");
+        TreeSet<String> places = new TreeSet<>();
+        for (Pos block : exclusions.blocks()) places.add(block.encode());
+        for (Exclusions.Area area : exclusions.areas()) {
+            places.add(area.dimension() + "@" + area.center().encode() + "+" + area.radius());
+        }
+        text.append(places);
+        return text.toString();
     }
 
     private static List<ContainerSight> sortedByPosition(List<ContainerSight> boxes) {
@@ -1425,8 +1485,9 @@ public final class SolverPlanner implements Planner {
 
     /**
      * The items a plan for the goal reads the stock of: the goal's items and everything their recipes, stations,
-     * gather sources' tools and trade payments lead to. Walked over the recipe book and the index whole (not the
-     * request's exclusions, which the fingerprint does not see), up to {@link #MAX_CLOSURE_ITEMS} items.
+     * gather sources' tools and trade payments lead to. Walked over the recipe book and the index whole (the
+     * exclusions are hashed as a set of their own, not subtracted from this walk), up to
+     * {@link #MAX_CLOSURE_ITEMS} items.
      *
      * <p>{@code tools} gets, besides, every tool item that a tool the plan needs could be stood in for by: of the class
      * and at least the tier a mining source or a tool goal asks for. Such a tool in a container the body may take from

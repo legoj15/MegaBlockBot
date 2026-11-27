@@ -940,7 +940,7 @@ public final class GoalExecutor<B> {
             case PlanOutcome.Planned p -> {
                 Plan plan = p.plan();
                 Snapshot fresh = host.snapshot(body, run.goal);
-                long fp = host.inputFingerprint(run.goal, fresh);
+                long fp = host.inputFingerprint(run.goal, fresh, run.exclusions);
                 if (fp != plan.inputFingerprint() && rerunsInARow < config.planRerunLimit()) {
                     // Inputs moved under the planner: re-run, at most planRerunLimit in a row. The re-run keeps
                     // the cause that started it, so its result counts toward the budgets the same way.

@@ -1,6 +1,7 @@
 package com.legoj15.megablockbot.core.exec;
 
 import com.legoj15.megablockbot.core.goal.Goal;
+import com.legoj15.megablockbot.core.plan.Exclusions;
 import com.legoj15.megablockbot.core.plan.NodeSpec;
 import com.legoj15.megablockbot.core.plan.Plan;
 import com.legoj15.megablockbot.core.plan.PlanOutcome;
@@ -81,7 +82,7 @@ final class Fakes {
         }
 
         @Override
-        public long inputFingerprint(Goal goal, Snapshot snapshot) {
+        public long inputFingerprint(Goal goal, Snapshot snapshot, Exclusions exclusions) {
             return inputFingerprint;
         }
 

@@ -1,6 +1,7 @@
 package com.legoj15.megablockbot.core.exec;
 
 import com.legoj15.megablockbot.core.goal.Goal;
+import com.legoj15.megablockbot.core.plan.Exclusions;
 import com.legoj15.megablockbot.core.plan.NodeSpec;
 import com.legoj15.megablockbot.core.plan.PlanRequest;
 import com.legoj15.megablockbot.core.plan.Profile;
@@ -38,8 +39,8 @@ public interface ExecutorHost<B> {
     /** Starts planning off-thread. The executor polls the ticket. */
     PlanTicket plan(PlanRequest request);
 
-    /** Planner.inputFingerprint for this goal on this snapshot. */
-    long inputFingerprint(Goal goal, Snapshot snapshot);
+    /** Planner.inputFingerprint for this goal on this snapshot, under the goal's own exclusions. */
+    long inputFingerprint(Goal goal, Snapshot snapshot, Exclusions exclusions);
 
     /** True when the drops of this death can still be reached before they despawn. */
     boolean dropsRecoverable(Failure.Died death, Snapshot now);

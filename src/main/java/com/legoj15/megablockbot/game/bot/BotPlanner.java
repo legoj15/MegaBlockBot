@@ -3,6 +3,7 @@ package com.legoj15.megablockbot.game.bot;
 import com.legoj15.megablockbot.core.acquire.AcquisitionIndex;
 import com.legoj15.megablockbot.core.exec.PlanTicket;
 import com.legoj15.megablockbot.core.goal.Goal;
+import com.legoj15.megablockbot.core.plan.Exclusions;
 import com.legoj15.megablockbot.core.plan.PlanOutcome;
 import com.legoj15.megablockbot.core.plan.PlanRequest;
 import com.legoj15.megablockbot.core.plan.Planner;
@@ -59,8 +60,8 @@ final class BotPlanner {
         return new Ticket(pool().submit(() -> current.plan(request)));
     }
 
-    static long inputFingerprint(Goal goal, Snapshot snapshot) {
-        return planner().inputFingerprint(goal, snapshot);
+    static long inputFingerprint(Goal goal, Snapshot snapshot, Exclusions exclusions) {
+        return planner().inputFingerprint(goal, snapshot, exclusions);
     }
 
     /** Server stopping: ends the planner thread; whatever was queued is dropped (its goals die with the server). */

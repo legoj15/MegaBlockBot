@@ -11,6 +11,7 @@ import com.legoj15.megablockbot.core.exec.PlanTicket;
 import com.legoj15.megablockbot.core.exec.ReflexHold;
 import com.legoj15.megablockbot.core.goal.Goal;
 import com.legoj15.megablockbot.core.goal.Postconditions;
+import com.legoj15.megablockbot.core.plan.Exclusions;
 import com.legoj15.megablockbot.core.plan.NodeIdentity;
 import com.legoj15.megablockbot.core.plan.NodeSpec;
 import com.legoj15.megablockbot.core.plan.PlanRequest;
@@ -397,8 +398,8 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     }
 
     @Override
-    public long inputFingerprint(Goal goal, Snapshot snapshot) {
-        return BotPlanner.inputFingerprint(goal, snapshot);
+    public long inputFingerprint(Goal goal, Snapshot snapshot, Exclusions exclusions) {
+        return BotPlanner.inputFingerprint(goal, snapshot, exclusions);
     }
 
     /** The death is in a dimension that is loaded and is not yet five minutes old: its drops may still be there. */
