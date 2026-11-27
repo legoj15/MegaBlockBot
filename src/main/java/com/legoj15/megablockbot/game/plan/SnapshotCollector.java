@@ -79,9 +79,10 @@ public final class SnapshotCollector {
     }
 
     /**
-     * Collects for {@code wants}: the goals a snapshot is being taken for (the goal being planned or judged, and the
-     * goals waiting in its queue). A {@link Goal.Build} among them gets its structure report; anything a strategy
-     * declares it still needs is not collected here.
+     * Collects for {@code wants}: the goals a snapshot is being taken for -- the goal being planned or judged, and the
+     * first build goal queued behind it (the caller decides what it wants; see {@code BotRuntime.snapshot}). A
+     * {@link Goal.Build} among them gets its structure report; anything a strategy declares it still needs is not
+     * collected here.
      */
     public static Snapshot collect(BotPlayer body, BotMemory memory, List<Goal> wants) {
         MinecraftServer server = body.getServer();
@@ -113,7 +114,9 @@ public final class SnapshotCollector {
      * ({@code blueprint@anchor}): how many of the blueprint's positions are required, how many hold the blueprint's
      * block already, and what is missing as the items that place the still-wrong blocks (issue 17). The report is read
      * from the world -- never from a note, since a player can see blocks that stand -- and an unknown blueprint name
-     * gives no report at all, so the planner says the goal cannot be planned rather than planning a guess.
+     * gives no report at all, so the planner says the goal cannot be planned rather than planning a guess. Each report
+     * stats the blueprint's file and walks its footprint, so a caller passes the goal being planned or judged and at
+     * most the first build goal queued behind it, never the whole queue.
      */
     private static void addGoalFacts(ServerLevel level, String dimension, List<Goal> wants, Snapshot.Builder builder) {
         for (Goal goal : wants) {

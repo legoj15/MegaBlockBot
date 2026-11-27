@@ -80,7 +80,9 @@ import java.util.regex.Pattern;
  * wherever an item is resolved, {@code equip} included.
  *
  * <p>Counts are 1 to 10000, enchantment levels at least 1, the {@code within} radius 0 to 256, and blueprint
- * names match ignoring case and extra whitespace (the goal carries the registry's spelling). An enchantment id
+ * names match ignoring case and extra whitespace (the goal carries the registry's spelling). A blueprint name with a
+ * colon is one of the server's structure templates by id ({@code build minecraft:igloo/top at ...}), carried as typed
+ * and resolved by the loader, which answers "not known" when no template of that id exists. An enchantment id
  * must be one of {@link LanguageContext#enchantments()} when that set is not empty; an empty set means the game's
  * ids are not known yet and the id is taken as typed. Coordinates accept {@code ~}
  * for the owner's own coordinate and {@code ~n} offsets (one that leaves the int range is {@code Unknown}), in
@@ -389,9 +391,15 @@ public final class FixedGrammar implements LanguageLayer {
         return new Intent.SetGoal(new Goal.Build(blueprint, context.dimension(), anchor));
     }
 
-    /** The registry spelling of a blueprint named case- and whitespace-insensitively, or null. */
+    /**
+     * The registry spelling of a blueprint named case- and whitespace-insensitively, or null. A name with a colon is a
+     * structure template's id ({@code minecraft:igloo/top}), not a file name: it is carried as typed for the loader to
+     * resolve, because no list of the server's templates is to hand here, and an id nothing answers to ends "not
+     * known" like any other unknown name.
+     */
     private static String blueprintNamed(String wanted, LanguageContext context) {
         if (wanted.isEmpty()) return null;
+        if (wanted.indexOf(':') >= 0) return wanted;
         for (String blueprint : context.blueprints()) {
             if (collapse(blueprint.toLowerCase(Locale.ROOT)).equals(wanted)) return blueprint;
         }

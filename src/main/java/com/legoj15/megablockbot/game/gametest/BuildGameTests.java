@@ -38,6 +38,9 @@ import net.minecraft.core.HolderLookup;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.IntTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.NbtIo;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -282,11 +285,7 @@ public final class BuildGameTests {
         Rig rig = Rig.spawn(helper, "bcmd", GOAL_TICKS);
         rig.atEnd(() -> {
             Blueprints.forget(name);
-            try {
-                Files.deleteIfExists(Blueprints.folder().resolve(name + ".nbt"));
-            } catch (IOException ignored) {
-                // A leftover file of a test blueprint is harmless; its name is unique to this run.
-            }
+            Blueprints.remove(name);
         });
         rig.give(Items.OAK_PLANKS, 6);
         rig.runtime().submit(new Goal.Build(name, dimension(helper), pos(anchor)));
@@ -306,8 +305,237 @@ public final class BuildGameTests {
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // What the loader refuses, the box it keeps, and a build that is interrupted (the review's findings)
+    // ---------------------------------------------------------------------------------------------------------
+
+    /**
+     * A file whose only block is a double slab, written by hand in the structure save form (the save command refuses
+     * such a box now, so it cannot be saved from the world): the loader refuses it -- one slab item never finishes a
+     * double slab, and a builder that counts the half that stands as the whole would report the goal satisfied with
+     * half the material.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
+    public static void aDoubleSlabBlueprintIsRefusedAtLoad(GameTestHelper helper) {
+        room(helper, 3);
+        String name = "gtslab" + RUN_ID;
+        try {
+            writeStructure(name, "minecraft:oak_slab", "type", "double");
+            helper.assertTrue(Blueprints.load(helper.getLevel().getServer(), name) == null,
+                "a blueprint of a double slab loaded");
+        } finally {
+            Blueprints.remove(name);
+        }
+        helper.succeed();
+    }
+
+    /**
+     * A file of valid NBT that is not a structure template (a plain compound with a string in it): the loader answers
+     * "not known" rather than building nothing, and a goal naming it is unplannable -- not satisfied by an empty
+     * blueprint that required nothing.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 300)
+    public static void aFileThatIsNoStructureIsNotKnownAndItsGoalFails(GameTestHelper helper) {
+        room(helper, 3);
+        String name = "gtnbt" + RUN_ID;
+        boolean handedOver = false;
+        try {
+            CompoundTag tag = new CompoundTag();
+            tag.putString("note", "valid NBT, not a structure");
+            try {
+                Files.createDirectories(Blueprints.folder());
+                NbtIo.writeCompressed(tag, Blueprints.folder().resolve(name + ".nbt"));
+            } catch (IOException e) {
+                throw new IllegalStateException("could not write the file of " + name, e);
+            }
+            helper.assertTrue(Blueprints.load(helper.getLevel().getServer(), name) == null,
+                "a file that is no structure loaded as a blueprint");
+            BlockPos anchor = helper.absolutePos(new BlockPos(4, FLOOR_Y + 1, 10));
+            Rig rig = Rig.spawn(helper, "bnbt", 300);
+            rig.atEnd(() -> Blueprints.remove(name));
+            handedOver = true;
+            rig.runtime().submit(new Goal.Build(name, dimension(helper), pos(anchor)));
+            rig.each(200, () -> {
+                GoalResult result = rig.runtime().lastResult();
+                if (result == null) return;
+                helper.assertTrue(result.status() == GoalResult.Status.FAILED, "the goal ended "
+                    + com.legoj15.megablockbot.game.bot.BotSpeech.result(result));
+                rig.pass();
+            });
+        } finally {
+            if (!handedOver) Blueprints.remove(name);
+        }
+    }
+
+    /**
+     * A box saved with an empty margin at its minimum corner (set-up: one plank at the box's far corner, the rest
+     * air) builds back at the same offsets from the anchor: the blueprint keeps the box it was saved from, air margin
+     * included, and does not re-anchor to its lowest block.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = BUILD_TICKS)
+    public static void aBoxWithAnAirMarginBuildsAtTheSameOffsets(GameTestHelper helper) {
+        room(helper, 3);
+        helper.setBlock(6, FLOOR_Y + 1, 6, Blocks.OAK_PLANKS); // the box's only block, at its max corner
+        String name = "gtmarg" + RUN_ID;
+        BlockPos from = helper.absolutePos(new BlockPos(4, FLOOR_Y + 1, 4));
+        BlockPos to = helper.absolutePos(new BlockPos(6, FLOOR_Y + 1, 6));
+        String refused = Blueprints.save(helper.getLevel(), name, from, to);
+        helper.assertTrue(refused == null, "the save was refused: " + refused);
+        BlockPos anchor = helper.absolutePos(new BlockPos(4, FLOOR_Y + 1, 10));
+        Job job = Job.start(helper, "bmarg", new Vec3(7.5, FLOOR_Y + 1, 7.5), BUILD_TICKS, leaf(helper, name, anchor));
+        job.give(Items.OAK_PLANKS, 1);
+        job.run.atEnd(() -> Blueprints.remove(name));
+        job.run.each(BUILD_TICKS - 200, () -> {
+            failIfFailed(helper, job);
+            if (job.task.state() != TaskState.COMPLETED) return;
+            helper.assertTrue(helper.getBlockState(new BlockPos(6, FLOOR_Y + 1, 12)).is(Blocks.OAK_PLANKS),
+                "the plank is not at the box's far corner from the anchor");
+            helper.assertTrue(!helper.getBlockState(new BlockPos(4, FLOOR_Y + 1, 10)).is(Blocks.OAK_PLANKS),
+                "the plank was built at the anchor itself: the box's air margin was dropped");
+            job.run.pass();
+        });
+    }
+
+    /**
+     * A breakable dirt block stands outside the blueprint's box, on the straight way from where the body starts to
+     * the site (set-up): the build breaks nothing outside its own box, so the dirt still stands when the build is
+     * done -- and the build is done where the saved box says, margin included.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = BUILD_TICKS)
+    public static void aBreakableBlockOutsideTheBoxStillStands(GameTestHelper helper) {
+        room(helper, 3);
+        helper.setBlock(6, FLOOR_Y + 1, 6, Blocks.OAK_PLANKS);
+        String name = "gtway" + RUN_ID;
+        BlockPos from = helper.absolutePos(new BlockPos(4, FLOOR_Y + 1, 4));
+        BlockPos to = helper.absolutePos(new BlockPos(6, FLOOR_Y + 1, 6));
+        String refused = Blueprints.save(helper.getLevel(), name, from, to);
+        helper.assertTrue(refused == null, "the save was refused: " + refused);
+        BlockPos dirt = new BlockPos(7, FLOOR_Y + 1, 9); // between the body's start and the site, outside the box
+        helper.setBlock(dirt, Blocks.DIRT);
+        BlockPos anchor = helper.absolutePos(new BlockPos(4, FLOOR_Y + 1, 10));
+        Job job = Job.start(helper, "bway", new Vec3(7.5, FLOOR_Y + 1, 7.5), BUILD_TICKS, leaf(helper, name, anchor));
+        job.give(Items.OAK_PLANKS, 1);
+        job.run.atEnd(() -> Blueprints.remove(name));
+        job.run.each(BUILD_TICKS - 200, () -> {
+            failIfFailed(helper, job);
+            if (job.task.state() != TaskState.COMPLETED) return;
+            helper.assertTrue(helper.getBlockState(new BlockPos(6, FLOOR_Y + 1, 12)).is(Blocks.OAK_PLANKS),
+                "the plank is not at the box's far corner from the anchor");
+            helper.assertTrue(helper.getBlockState(dirt).is(Blocks.DIRT),
+                "the dirt outside the blueprint's box was broken");
+            job.run.pass();
+        });
+    }
+
+    /**
+     * A build paused and resumed after the test moved the body away (the set-up of each pause: the move is the test's
+     * own) completes. Every command the task gives starts its watches again, so each walk back to the site is
+     * measured as its own approach and not held against the build as no progress; the body is moved away three times,
+     * from the corner farthest from the site.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 3200)
+    public static void aPausedBuildMovedAwayResumesAndCompletes(GameTestHelper helper) {
+        room(helper, 3);
+        String name = "gtres" + RUN_ID;
+        Blueprint blueprint = Blueprints.register(name, HUT);
+        BlockPos anchor = helper.absolutePos(new BlockPos(2, FLOOR_Y + 1, 2));
+        Vec3 far = helper.absoluteVec(new Vec3(13.5, FLOOR_Y + 1, 13.5));
+        Job job = Job.start(helper, "bres", new Vec3(13.5, FLOOR_Y + 1, 13.5), 3200, leaf(helper, name, anchor));
+        job.give(Items.OAK_PLANKS, 9);
+        job.give(Items.COBBLESTONE, 8);
+        job.run.atEnd(() -> Blueprints.forget(name));
+        int[] moves = {0};
+        boolean[] walkedOff = {false};
+        job.run.each(3000, () -> {
+            failIfFailed(helper, job);
+            BotPlayer body = job.body();
+            double away = body.position().distanceTo(Vec3.atCenterOf(anchor));
+            if (moves[0] < 3) {
+                if (away > 8.0) walkedOff[0] = true;
+                if (walkedOff[0] && away < 6.0) {
+                    // The body has come back to the site; it is moved away again before it places anything.
+                    walkedOff[0] = false;
+                    moves[0]++;
+                    job.task.pause(body, "the test moves the body away");
+                    body.setPos(far.x, far.y, far.z);
+                    job.run.resetStep();
+                    job.task.resume(body);
+                    return;
+                }
+            }
+            if (job.task.state() != TaskState.COMPLETED) return;
+            helper.assertTrue(moves[0] == 3, "the build completed after only " + moves[0] + " of the three moves");
+            assertStands(helper, blueprint, anchor);
+            job.run.pass();
+        });
+    }
+
+    /**
+     * A block of the structure is broken by the test while the build runs (the break is the test's own hand, not the
+     * body's): the build puts it back before the task completes, which waits for the whole structure to stand.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = BUILD_TICKS)
+    public static void aBlockBrokenWhileTheBuildRunsIsPutBack(GameTestHelper helper) {
+        room(helper, 3);
+        String name = "gtfix" + RUN_ID;
+        Blueprint blueprint = Blueprints.register(name, HUT);
+        BlockPos anchor = helper.absolutePos(new BlockPos(4, FLOOR_Y + 1, 10));
+        Job job = Job.start(helper, "bfix", new Vec3(7.5, FLOOR_Y + 1, 7.5), BUILD_TICKS, leaf(helper, name, anchor));
+        // One plank more than the floor takes: the test's own break below drops nothing, so the plank that goes back
+        // has to come from somewhere.
+        job.give(Items.OAK_PLANKS, 10);
+        job.give(Items.COBBLESTONE, 8);
+        job.run.atEnd(() -> Blueprints.forget(name));
+        boolean[] broken = {false};
+        job.run.each(BUILD_TICKS - 200, () -> {
+            failIfFailed(helper, job);
+            if (!broken[0]) {
+                if (blueprint.matched(helper.getLevel(), anchor) < 3) return; // some of it stands first
+                helper.setBlock(new BlockPos(5, FLOOR_Y + 1, 11), Blocks.AIR); // the middle plank, nothing above it
+                broken[0] = true;
+                return;
+            }
+            if (job.task.state() != TaskState.COMPLETED) return;
+            assertStands(helper, blueprint, anchor);
+            job.run.pass();
+        });
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------------------------------------
+
+    /**
+     * A one-block structure file in the game's save form (the same tags {@code Blueprints} reads), with the block's
+     * id and one state property; for the files the save command itself refuses to write.
+     */
+    private static void writeStructure(String name, String block, String property, String value) {
+        CompoundTag tag = new CompoundTag();
+        ListTag size = new ListTag();
+        for (int i = 0; i < 3; i++) size.add(IntTag.valueOf(1));
+        tag.put("size", size);
+        CompoundTag state = new CompoundTag();
+        state.putString("Name", block);
+        CompoundTag properties = new CompoundTag();
+        properties.putString(property, value);
+        state.put("Properties", properties);
+        ListTag palette = new ListTag();
+        palette.add(state);
+        tag.put("palette", palette);
+        CompoundTag placed = new CompoundTag();
+        ListTag where = new ListTag();
+        for (int i = 0; i < 3; i++) where.add(IntTag.valueOf(0));
+        placed.put("pos", where);
+        placed.putInt("state", 0);
+        ListTag blocks = new ListTag();
+        blocks.add(placed);
+        tag.put("blocks", blocks);
+        try {
+            Files.createDirectories(Blueprints.folder());
+            NbtIo.writeCompressed(tag, Blueprints.folder().resolve(name + ".nbt"));
+        } catch (IOException e) {
+            throw new IllegalStateException("could not write the structure file of " + name, e);
+        }
+    }
 
     /** A build leaf as the planner writes it: the goal's own name, dimension and anchor. */
     private static NodeSpec leaf(GameTestHelper helper, String name, BlockPos anchor) {

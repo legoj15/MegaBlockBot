@@ -436,9 +436,17 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
 
     @Override
     public Snapshot snapshot(BotPlayer current, Goal goal) {
-        // The goal the snapshot is for, and the goals waiting behind it: a build goal in the queue gets its structure
-        // report from the same snapshot (issue 17), so the plan made when it starts is never made blind.
-        List<Goal> wants = new ArrayList<>(executor.view().queue());
+        // The goal the snapshot is for, and the first build goal queued behind it (issue 17): its structure report is
+        // read from the same snapshot, so the plan made when it starts is never made blind. Only the first: each
+        // report stats the blueprint's file and walks its footprint, and an owner who queues many build goals at
+        // nearby sites must not multiply that over the whole queue on every snapshot.
+        List<Goal> wants = new ArrayList<>();
+        for (Goal queued : executor.view().queue()) {
+            if (queued instanceof Goal.Build) {
+                wants.add(queued);
+                break;
+            }
+        }
         if (goal != null) wants.add(goal);
         return SnapshotCollector.collect(current, BotMemory.of(current.getUUID()), wants);
     }

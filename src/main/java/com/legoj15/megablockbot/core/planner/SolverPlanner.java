@@ -150,6 +150,14 @@ public final class SolverPlanner implements Planner {
      * radius), far enough that the body is not asked to stand inside what it is to look at.
      */
     static final int BUILD_REACH_RADIUS = 8;
+    /**
+     * How many inventory slots a build's missing blocks may need at once: the 27 of the main inventory, with the
+     * hotbar left for tools and whatever else the body holds. Staged builds are not built yet, so a blueprint that
+     * needs more is unplannable in one trip rather than a gather that would end {@code NoRoom} when the last slot
+     * filled. Checked on the report of each plan, so a structure half standing (fewer blocks missing) still finishes.
+     * A slot holds a stack of 64, which every block item a blueprint places stacks to.
+     */
+    static final int BUILD_CARRY_SLOTS = 27;
 
     /** The solver's id for the demand recipe; no such recipe is in any book, and no step of it is ever emitted. */
     private static final String DEMAND_ID = "megablockbot:planner/demand";
@@ -1133,7 +1141,10 @@ public final class SolverPlanner implements Planner {
          *       next plan has the report.</li>
          *   <li>A known report: an item plan for each missing item and count the body does not hold (through the path
          *       every item is planned by, relied on rather than drawn, in a fixed order), then one {@code build} leaf
-         *       that carries the goal's own name, dimension and anchor.</li>
+         *       that carries the goal's own name, dimension and anchor. When the missing blocks need more slots at
+         *       once than the main inventory holds ({@link #BUILD_CARRY_SLOTS}), the plan is unplannable saying so:
+         *       staged builds are not built yet, and the gather would only end {@code NoRoom} when the last slot
+         *       filled.</li>
          * </ul>
          * Nothing missing is nothing to plan: the goal is met, and a build leaf of zero would be a task that throws.
          */
@@ -1151,6 +1162,8 @@ public final class SolverPlanner implements Planner {
                                 "radius", Integer.toString(BUILD_REACH_RADIUS)), "")));
             }
             if (report.missing().isEmpty()) return Step.ok(List.of());
+            Failure tooMuchToCarry = carryBound(report);
+            if (tooMuchToCarry != null) return Step.fail(tooMuchToCarry);
             List<NodeSpec> nodes = new ArrayList<>();
             for (Map.Entry<ItemKey, Integer> missing : new TreeMap<>(report.missing()).entrySet()) {
                 if (held(missing.getKey()) >= missing.getValue()) continue;
@@ -1163,6 +1176,27 @@ public final class SolverPlanner implements Planner {
             nodes.add(NodeSpec.leaf(goal, "build", Map.of("blueprint", goal.blueprint(),
                     "dimension", goal.dimension(), "anchor", goal.anchor().encode()), ""));
             return Step.ok(nodes);
+        }
+
+        /**
+         * Why the build's missing blocks cannot be held at once ({@code BUILD_CARRY_SLOTS} slots or fewer), or null
+         * when they can: the count of slots the still-missing blocks that are not carried need, stacks of 64. Staged
+         * builds are not built yet, so this is unplannable in one trip instead of a gather that would end {@code NoRoom}
+         * when the last slot filled.
+         */
+        private Failure carryBound(StructureReport report) {
+            int slots = 0;
+            ItemKey first = null;
+            for (Map.Entry<ItemKey, Integer> missing : report.missing().entrySet()) {
+                int more = missing.getValue() - (int) Math.min(held(missing.getKey()), missing.getValue());
+                if (more <= 0) continue;
+                if (first == null) first = missing.getKey();
+                slots += (more + 63) / 64;
+            }
+            if (slots <= BUILD_CARRY_SLOTS) return null;
+            return new Failure.NoRoom(first, "the build needs " + slots + " inventory slots of blocks at once (from "
+                    + first.id() + " on) and the main inventory holds " + BUILD_CARRY_SLOTS + ", with the hotbar left "
+                    + "for tools; staged builds are not built yet, so it cannot be gathered in one trip");
         }
 
         // ─── Gather leaves ───────────────────────────────────────────────────────────────────────

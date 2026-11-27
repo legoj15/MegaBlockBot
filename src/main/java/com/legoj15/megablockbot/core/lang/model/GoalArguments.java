@@ -206,11 +206,14 @@ final class GoalArguments {
 
     /**
      * The registry's spelling of a blueprint the model named, ignoring case and extra whitespace the way the
-     * grammar does, or null.
+     * grammar does, or null. A name with a colon is one of the server's structure templates by id
+     * ({@code minecraft:igloo/top}), not a file name: it is carried as typed for the loader to resolve, which answers
+     * "not known" when no template of that id exists.
      */
     private static String blueprintNamed(String wanted, LanguageContext context) {
         String normalized = wanted.toLowerCase(Locale.ROOT).strip().replaceAll("\\s+", " ");
         if (normalized.isEmpty()) return null;
+        if (normalized.indexOf(':') >= 0) return normalized;
         for (String blueprint : context.blueprints()) {
             if (blueprint.toLowerCase(Locale.ROOT).strip().replaceAll("\\s+", " ").equals(normalized)) return blueprint;
         }

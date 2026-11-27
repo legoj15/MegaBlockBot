@@ -13,7 +13,7 @@ amendments are the contract), 4.2 and 6. Bot node only (1.21.1). Server thread t
    take the same two ways in and the same guard; see "Supply containers" below.
 2. `LanguageLayers.current()` (the `FixedGrammar` until a model-backed layer replaces it with `set`) answers with
    `Intent`s for a `LanguageContext` built per message (`RegistryItemSearch`, dimension, owner and bot position, the status
-   paragraph, no blueprints, the game's enchantment ids). A layer that already answered is applied at once; one that
+   paragraph, the blueprint folder's names, the game's enchantment ids). A layer that already answered is applied at once; one that
    completes later is applied after a hop to the server thread (`server.execute`).
 3. `SetGoal` calls `BotRuntime.submit`: the executor starts the goal or queues it (design 3.4).
 4. `GoalExecutor` asks its host, `BotRuntime`, for a snapshot (`SnapshotCollector`), then `plan`: `BotPlanner` runs the
@@ -325,42 +325,69 @@ goal is the `Goal.Build` itself, so the executor judges it on the snapshot's str
 - **Where blueprints come from** (`game.build.Blueprints`, registered by `BuildFeature.init()` from `GameBootstrap`): a
   name is looked up first as `<config dir>/megablockbot/blueprints/<name>.nbt` (compressed structure-template NBT, read
   with the game's own `StructureTemplate.load` over the registries, and its blocks then from the lists of the template's
-  own save form: the palettes are private and the public block filter answers for one named block only),
-  then, when the name parses as a resource location, as one of the server's structure templates. A name is a file name
-  only (no path separator, `..` or colon); at most 4096 blocks and 48 along a side, or the blueprint is refused with a
-  message saying so. This brief builds plain blocks: a blueprint holding a block no item places, a block entity, or the
-  second block of a two-block thing (the upper half of a door, the head of a bed) is refused naming the block. Loaded
-  blueprints are cached per server and dropped on a datapack reload, on stop, and when the file's modification time
-  changes. `/aiplayer blueprint save <name> <from> <to>` (permission level 2, same name and size rules) saves the blocks
-  of that box of the caller's world without entities, with the game's own `fillFromWorld` and `save`;
-  `/aiplayer blueprint list` lists the folder.
-- **The report** (`SnapshotCollector.addGoalFacts`): a snapshot taken for a goal (or a goal in its queue) that is a
-  `Goal.Build` carries a `StructureReport` under `blueprint@anchor` — `required` the blueprint's positions, `matched`
-  how many hold the blueprint's block already (the block, not every state property, so a log placed along another axis
-  counts), and `missing` the items that place the still-wrong blocks. `known` is false when any position's chunk is not
-  loaded or the goal's dimension is not the body's; an unknown blueprint name gives no report at all.
+  own save form: the palettes are private and the public block filter answers for one named block only), and then, when
+  the name has a colon and parses as a resource location, as one of the server's structure templates
+  (`build minecraft:igloo/top at ...`; the grammar and the model layer carry an id-shaped name as typed, since no list
+  of the server's templates is to hand where words are read — an id no template answers to ends "not known"). A file
+  name is a file name only (no path separator, `..` or colon); at most 4096 blocks and 48 along a side, or the blueprint
+  is refused with a message saying so. A file that is not a structure this brief can build from — valid NBT with no
+  palette or no block, a block outside the size the file declares — is refused with a logged reason, never loaded as an
+  empty blueprint that would read "already built". This brief builds plain blocks: a blueprint holding a block no item
+  places, a block entity, the second block of a two-block thing (the upper half of a door, the head of a bed), or a
+  state that is more than one item's worth of the block (a double slab, snow of more than one layer, candles, sea
+  pickles or turtle eggs of more than one — one item can never finish them) is refused naming the block; which way a
+  block faces is left free. A blueprint keeps the box it was saved from: its size is the template's declared one, air
+  margin included, so a box saved with an empty margin builds back where the owner pointed. Loaded blueprints are cached
+  per server and dropped on a datapack reload, on stop, and when the file's modification time changes.
+  `/aiplayer blueprint save <name> <from> <to>` (permission level 2, same name and size rules) saves the blocks of that
+  box of the caller's world without entities, with the game's own `fillFromWorld` and `save`, and refuses a box the
+  loader would refuse — nothing to build, or one of those unbuildable blocks — naming the block and where it stands,
+  writing no file; `/aiplayer blueprint list` lists the folder.
+- **The report** (`SnapshotCollector.addGoalFacts`): a snapshot taken for a goal that is a `Goal.Build` (the one being
+  planned or judged), and for the first build goal queued behind it, carries a `StructureReport` under
+  `blueprint@anchor` — `required` the blueprint's positions, `matched` how many hold the blueprint's block already (the
+  block, not every state property, so a log placed along another axis counts), and `missing` the items that place the
+  still-wrong blocks. `known` is false when any position's chunk is not loaded or the goal's dimension is not the body's;
+  an unknown blueprint name gives no report at all. Only the first queued build goal is read, not every one: each report
+  stats the file and walks the footprint, and an owner who queues many build goals at nearby sites must not multiply
+  that over the whole queue on every snapshot.
 - **The plan** (`SolverPlanner.buildPlan`): no report is unplannable (the blueprint's name is not known); a report that
   is not known plans one `navigate` leaf to the anchor (radius 8: near enough that the footprint's chunks load), as an
   unseen container is looked into first; a known report plans an item plan per missing item and count the body does not
   hold (relied on, not drawn, in a fixed order — the containers the body may take from are asked for them like any
-  other item the plan relies on) and then the one `build` leaf. Nothing missing plans nothing.
+  other item the plan relies on) and then the one `build` leaf. Nothing missing plans nothing. When the missing blocks
+  need more inventory slots at once than the main inventory holds (27, stacks of 64, the hotbar left for tools), the
+  plan is unplannable saying the count and the limit — staged builds are not built yet, and the gather would only end
+  `NoRoom` when the last slot filled. The bound is taken on the report of each plan, so a structure half standing
+  (fewer blocks missing) still finishes.
 - **The task** (`BuildTask`, kind `build`, registered in `TaskFeature`, budget 36000 ticks — see `BotRuntime`): arms the
   per-body break filter as the mine task does and starts the navigator's `build`, which hands the engine's
   `BuilderProcess` a static schematic of the blueprint. The engine's settings for the command: `acceptableThrowawayItems`
   emptied (so the pathing never bridges with dirt — the build places only blocks the blueprint names and only from the
   inventory), `allowInventory` on (the hotbar is filled from the main inventory), no layers, no repeats, no orientation
   flips, `buildIgnoreExisting` off, and the break filter narrowed to the blueprint's box for as long as the command runs
-  (the filter reads the box live, so a command that ends opens the world back up).
+  (the filter reads the box live, so a command that ends opens the world back up). Every command the task gives — the
+  start and every resume — starts its watches again, as the mine task's do: the walk back after a pause is measured as
+  its own approach, not held against the build as no progress.
 - **When the builder lacks a block**, upstream pauses and says what is missing (`BuilderProcess`:
   "Missing materials ... Unable to do it. Pausing."), which would wait for ever: the navigator fails the command the
   moment it sees the pause, naming the block the body is short of (`MISSING_BLOCKS`, the count read from the world and
   the inventory). The task makes that `MissingInput` naming the item and the count short — the executor replans, and the
-  planner gets what is missing from the next report. A build that cannot go on another way fails `BUILD_STUCK`.
+  planner gets what is missing from the next report. A build that cannot go on another way fails `BUILD_STUCK`, and an
+  engine error ends the leaf `Internal` with the exception. The navigator's state, failure text, kind and cause are read
+  before the task releases it (release stops and clears the navigator), so none of that is lost.
 - **A block the rules protect** does not pause the builder (it keeps trying the same spot), so the task watches itself:
   no placement, break, or step toward the anchor for 400 ticks ends the leaf. The end is `Protected` naming the position
   when a wrong, non-air position inside the blueprint may not be broken by this body's rules; `Unreachable` for the
   navigator's other failures; `NoRoom` never applies (nothing is picked up). It pauses, resumes and aborts like the mine
   task — the builder is stopped and a resumed task starts the build again, and the builder skips what stands.
+- **A build never stands still without saying why.** The engine's builder waits without saying so when its goal cannot
+  be acted on (its tick assembles the same goal again): a position with nothing to place against and no scaffolding
+  carried (air all round — a block can only be placed against a block, and this command's throwaway list is empty), a
+  goal the body already stands in (the builder will not place a block into the body), or a place it can find no path to.
+  A build that holds every block it needs and has neither placed, broken nor moved for 100 ticks ends with that reason,
+  read from the world by the task, instead of waiting out the 400-tick watch; the same reason is what a stalled build's
+  failure says wherever it ends.
 - `progress()` says how many of the blueprint's blocks stand.
 
 ## `fish`

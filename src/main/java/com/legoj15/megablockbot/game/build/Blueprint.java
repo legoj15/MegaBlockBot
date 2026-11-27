@@ -16,16 +16,21 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BedPart;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
+import net.minecraft.world.level.block.state.properties.SlabType;
 
 /**
  * One blueprint (issue 17): a name and an immutable list of (position relative to the anchor, block state), air and
- * structure voids left out. The anchor is the min corner of the bounding box, so a blueprint saved from a box of the
- * world builds back with its corner at the anchor.
+ * structure voids left out. The anchor is the min corner of the box the blueprint was saved from, so a blueprint saved
+ * from a box of the world builds back with that box's corner at the anchor; a box with an empty margin keeps it and
+ * builds at the same offsets. A blueprint made of a list of blocks by hand (see {@link Blueprints#register}) anchors at
+ * the min corner of the blocks themselves.
  *
  * <p>This brief builds plain blocks, and the constructor refuses anything else, naming the block: a block whose state
  * has no item that places it (a fluid, fire, a portal), a block with a block entity (a chest or a sign carries data the
- * blueprint would not put back), or the second block of a two-block thing (the upper half of a door, the head of a
- * bed), which the first block's item places on its own.
+ * blueprint would not put back), the second block of a two-block thing (the upper half of a door, the head of a bed),
+ * which the first block's item places on its own, or a state that is more than one item's worth of the block (a double
+ * slab, snow of more than one layer, candles, sea pickles or turtle eggs of more than one), which one item can never
+ * finish and the builder would count as standing. Which way a block faces is left free: one item places any facing.
  */
 public final class Blueprint {
     /** A block of the blueprint: where it stands relative to the anchor, and what stands there. */
@@ -42,53 +47,107 @@ public final class Blueprint {
      *                                  class doc); positions are taken relative to the min corner of their bounding box
      */
     public Blueprint(String name, List<Entry> entries) {
+        this(name, anchoredToMinCorner(entries), span(entries, 0), span(entries, 1), span(entries, 2));
+    }
+
+    /**
+     * A blueprint that keeps the box it was saved from: the entries are relative to that box's own minimum corner
+     * already (a structure template's are) and the sides are the box's declared ones, air margin included, so a box
+     * saved with an empty margin builds back at the same offsets from the anchor instead of shifting to its lowest
+     * block. The sides are what was saved, so an entry outside them is refused before this is called.
+     *
+     * @throws IllegalArgumentException naming the block when the blueprint holds none at all or one this brief cannot
+     *                                  build (see the class doc)
+     */
+    Blueprint(String name, List<Entry> entries, int widthX, int heightY, int lengthZ) {
+        if (entries.isEmpty()) {
+            throw new IllegalArgumentException("the blueprint holds no block");
+        }
         this.name = name;
+        List<Entry> sorted = new ArrayList<>(entries.size());
+        for (Entry entry : entries) {
+            String why = unbuildable(entry.state());
+            if (why != null) throw new IllegalArgumentException("the blueprint holds " + why);
+            sorted.add(entry);
+        }
+        sorted.sort(Comparator.comparing(Entry::pos));
+        this.blocks = List.copyOf(sorted);
+        this.widthX = widthX;
+        this.heightY = heightY;
+        this.lengthZ = lengthZ;
+    }
+
+    /** The entries taken relative to the min corner of their own bounding box. */
+    private static List<Entry> anchoredToMinCorner(List<Entry> entries) {
         int minX = Integer.MAX_VALUE;
         int minY = Integer.MAX_VALUE;
         int minZ = Integer.MAX_VALUE;
-        int maxX = Integer.MIN_VALUE;
-        int maxY = Integer.MIN_VALUE;
-        int maxZ = Integer.MIN_VALUE;
         for (Entry entry : entries) {
             BlockPos pos = entry.pos();
             minX = Math.min(minX, pos.getX());
             minY = Math.min(minY, pos.getY());
             minZ = Math.min(minZ, pos.getZ());
-            maxX = Math.max(maxX, pos.getX());
-            maxY = Math.max(maxY, pos.getY());
-            maxZ = Math.max(maxZ, pos.getZ());
         }
-        List<Entry> normalized = new ArrayList<>(entries.size());
+        List<Entry> anchored = new ArrayList<>(entries.size());
         for (Entry entry : entries) {
             BlockPos pos = entry.pos();
-            BlockPos relative = new BlockPos(pos.getX() - minX, pos.getY() - minY, pos.getZ() - minZ);
-            buildable(entry.state());
-            normalized.add(new Entry(relative, entry.state()));
+            anchored.add(new Entry(new BlockPos(pos.getX() - minX, pos.getY() - minY, pos.getZ() - minZ), entry.state()));
         }
-        normalized.sort(Comparator.comparing(Entry::pos));
-        this.blocks = List.copyOf(normalized);
-        this.widthX = entries.isEmpty() ? 0 : maxX - minX + 1;
-        this.heightY = entries.isEmpty() ? 0 : maxY - minY + 1;
-        this.lengthZ = entries.isEmpty() ? 0 : maxZ - minZ + 1;
+        return anchored;
     }
 
-    /** Names the first block this brief cannot build; throws for it (see the class doc). */
-    private static void buildable(BlockState state) {
+    /** How far the entries span along one axis (0 x, 1 y, 2 z); zero when there are none. */
+    private static int span(List<Entry> entries, int axis) {
+        int min = Integer.MAX_VALUE;
+        int max = Integer.MIN_VALUE;
+        for (Entry entry : entries) {
+            int at = axis == 0 ? entry.pos().getX() : axis == 1 ? entry.pos().getY() : entry.pos().getZ();
+            min = Math.min(min, at);
+            max = Math.max(max, at);
+        }
+        return entries.isEmpty() ? 0 : max - min + 1;
+    }
+
+    /**
+     * Why one item cannot place this state (see the class doc), or null when one item places it: no item places the
+     * block, a block entity carries data the blueprint would not put back, the state is the second block of a
+     * two-block thing, or it is more than one item's worth of the block. Which way a block faces is left free, so
+     * any facing of a placeable state is buildable. The save command asks this of a box before it writes a file.
+     */
+    public static String unbuildable(BlockState state) {
         String id = state.getBlock().toString();
         if (state.getBlock().asItem() == net.minecraft.world.item.Items.AIR) {
-            throw new IllegalArgumentException("the blueprint holds " + id + ", which no item places");
+            return id + ", which no item places";
         }
         if (state.getBlock() instanceof EntityBlock) {
-            throw new IllegalArgumentException("the blueprint holds " + id + ", a block entity, whose data it cannot put back");
+            return id + ", a block entity, whose data it cannot put back";
         }
         if (state.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF)
                 && state.getValue(BlockStateProperties.DOUBLE_BLOCK_HALF) == DoubleBlockHalf.UPPER) {
-            throw new IllegalArgumentException("the blueprint holds the upper half of " + id + "; the lower half places it");
+            return "the upper half of " + id + "; the lower half places it";
         }
         if (state.hasProperty(BlockStateProperties.BED_PART)
                 && state.getValue(BlockStateProperties.BED_PART) == BedPart.HEAD) {
-            throw new IllegalArgumentException("the blueprint holds the head of a bed; the foot places it");
+            return "the head of a bed; the foot places it";
         }
+        if (state.hasProperty(BlockStateProperties.SLAB_TYPE)
+                && state.getValue(BlockStateProperties.SLAB_TYPE) == SlabType.DOUBLE) {
+            return "a double slab of " + id + "; two slabs are two items";
+        }
+        if (state.hasProperty(BlockStateProperties.LAYERS) && state.getValue(BlockStateProperties.LAYERS) > 1) {
+            return id + " of " + state.getValue(BlockStateProperties.LAYERS)
+                    + " layers; one snow item places one layer";
+        }
+        if (state.hasProperty(BlockStateProperties.CANDLES) && state.getValue(BlockStateProperties.CANDLES) > 1) {
+            return id + " of " + state.getValue(BlockStateProperties.CANDLES) + " candles; one candle item places one";
+        }
+        if (state.hasProperty(BlockStateProperties.PICKLES) && state.getValue(BlockStateProperties.PICKLES) > 1) {
+            return id + " of " + state.getValue(BlockStateProperties.PICKLES) + " sea pickles; one places one";
+        }
+        if (state.hasProperty(BlockStateProperties.EGGS) && state.getValue(BlockStateProperties.EGGS) > 1) {
+            return id + " of " + state.getValue(BlockStateProperties.EGGS) + " eggs; one egg places one";
+        }
+        return null;
     }
 
     public String name() {

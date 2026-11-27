@@ -29,6 +29,7 @@ import com.legoj15.megablockbot.game.bot.BotSpeech;
 import com.legoj15.megablockbot.game.bot.NbtForm;
 import com.legoj15.megablockbot.game.bot.ReflexSource;
 import com.legoj15.megablockbot.game.bot.ReflexSources;
+import com.legoj15.megablockbot.game.build.Blueprints;
 import com.legoj15.megablockbot.game.plan.BotMemory;
 import com.legoj15.megablockbot.game.plan.RecipeBooks;
 import com.legoj15.megablockbot.game.plan.SnapshotCollector;
@@ -1188,6 +1189,48 @@ public final class BotRuntimeGameTests {
     // ---------------------------------------------------------------------------------------------------------
     // Talking to the bot
     // ---------------------------------------------------------------------------------------------------------
+
+    /**
+     * A build goal made from the owner's words: a blueprint saved as a file at set-up (six planks of the arena, test
+     * set-up), then {@code build <name> at <x> <y> <z>} through the goal command. The words become a running build
+     * goal and the body builds the file's shape at the anchor. Passes because the language context now lists the
+     * blueprint folder's names ({@code BotTalk.context}, commit 528bad0); on the commit before that fix the list was
+     * always empty and the words were answered "I don't know a blueprint called ...".
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600)
+    public static void aBuildGoalFromTheOwnersWords(GameTestHelper helper) {
+        floor(helper);
+        // Set-up: the shape the blueprint is saved from, six planks in a 3x2 box.
+        for (int x = 4; x <= 6; x++) {
+            for (int z = 4; z <= 5; z++) helper.setBlock(x, FLOOR_Y + 1, z, Blocks.OAK_PLANKS);
+        }
+        String name = "gtwb" + RUN_ID;
+        String refused = Blueprints.save(helper.getLevel(), name, helper.absolutePos(new BlockPos(4, FLOOR_Y + 1, 4)),
+            helper.absolutePos(new BlockPos(6, FLOOR_Y + 1, 5)));
+        helper.assertTrue(refused == null, "the save was refused: " + refused);
+        BlockPos anchor = helper.absolutePos(new BlockPos(4, FLOOR_Y + 1, 10));
+        Rig rig = Rig.spawnOwned(helper, "bwords", 600);
+        rig.atEnd(() -> Blueprints.remove(name));
+        rig.give(Items.OAK_PLANKS, 6);
+        Feedback feedback = new Feedback();
+        int done = run(rig.server(), rig.ownerSource(feedback), "aiplayer goal " + rig.name() + " build " + name
+            + " at " + anchor.getX() + " " + anchor.getY() + " " + anchor.getZ());
+        helper.assertTrue(done == 1, "the goal command failed: " + feedback.messages);
+        helper.assertTrue(rig.runtime().view().goal() instanceof Goal.Build building && building.blueprint().equals(name),
+            "the words did not become a build goal: " + rig.runtime().view().goal());
+        rig.onEachTick(() -> {
+            GoalResult result = rig.runtime().lastResult();
+            if (result == null) return;
+            helper.assertTrue(result.status() == GoalResult.Status.SATISFIED, "the goal ended " + BotSpeech.result(result));
+            for (int x = 4; x <= 6; x++) {
+                for (int z = 10; z <= 11; z++) {
+                    helper.assertTrue(helper.getBlockState(new BlockPos(x, FLOOR_Y + 1, z)).is(Blocks.OAK_PLANKS),
+                        "the saved shape does not stand at " + x + " " + z);
+                }
+            }
+            rig.pass();
+        });
+    }
 
     /** Status names the goal and the step; pause and resume flip the goal's state; cancel ends it as CANCELLED. */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 200)
