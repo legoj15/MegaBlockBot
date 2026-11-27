@@ -26,29 +26,38 @@ $ErrorActionPreference = 'Stop'
 $server = Join-Path $PSScriptRoot 'bot-server.ps1'
 $log = Join-Path (Split-Path $PSScriptRoot -Parent) "build/bot-server/$Node.log"
 
-function Send([string]$Command) {
-    # RCON drops a connection now and then on a busy machine: one retry, then whatever came back.
-    foreach ($try in 1..2) {
+function Send([string]$Command, [switch]$Once) {
+    # RCON drops a connection now and then on a busy machine (seen before the command ran, never proven after), so a
+    # command that is safe to repeat gets one retry. -Once is for the one that is not: the goal itself.
+    $dropped = $false
+    foreach ($try in 1..($Once ? 1 : 2)) {
         $out = & $server cmd -Node $Node -Command $Command 2>&1 | Select-Object -Last 1
-        if ("$out" -notmatch 'RCON:') { break }
+        $dropped = "$out" -match 'RCON:'
+        if (-not $dropped) { break }
     }
     [Console]::Out.WriteLine(('{0} > {1} :: {2}' -f (Get-Date -Format 'HH:mm:ss'), $Command, "$out"))
+    return $dropped
 }
 
 & $server status -Node $Node *> $null
 if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine("bot-goal: no dev server is running for $Node"); exit 3 }
 
-if ($Day) { Send 'time set day'; Send 'gamerule doDaylightCycle false' }
-Send "aiplayer spawn $Bot"
+if ($Day) { $null = Send 'time set day'; $null = Send 'gamerule doDaylightCycle false' }
+$null = Send "aiplayer spawn $Bot"
 if ($At) {
     $x, $z = $At -split '\s+'
-    Send "forceload add $x $z"
-    Send "execute positioned $x.5 0 $z.5 positioned over motion_blocking_no_leaves run tp $Bot ~ ~ ~"
+    $null = Send "forceload add $x $z"
+    $null = Send "execute positioned $x.5 0 $z.5 positioned over motion_blocking_no_leaves run tp $Bot ~ ~ ~"
 }
-if ($Empty) { Send "clear $Bot" }
+if ($Empty) { $null = Send "clear $Bot" }
 
 $before = @(Get-Content -LiteralPath $log).Count
-Send "aiplayer goal $Bot $Goal"
+if (Send "aiplayer goal $Bot $Goal" -Once) {
+    # The connection dropped. The bot answers a goal in the log; if it said nothing, the goal never arrived.
+    Start-Sleep -Seconds 3
+    $answered = Get-Content -LiteralPath $log | Select-Object -Skip $before | Where-Object { $_ -match "<$Bot> " }
+    if (-not $answered) { $null = Send "aiplayer goal $Bot $Goal" -Once }
+}
 $result = $null
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 while (-not $result -and (Get-Date) -lt $deadline) {
@@ -57,13 +66,13 @@ while (-not $result -and (Get-Date) -lt $deadline) {
         Where-Object { $_ -match "Goal result of ${Bot}:" } | Select-Object -Last 1
 }
 if ($result) { [Console]::Out.WriteLine("RESULT: $result") } else { [Console]::Out.WriteLine("RESULT: none after $TimeoutSec s") }
-Send "aiplayer status $Bot"
-Send "data get entity $Bot Inventory"
-Send "data get entity $Bot Pos"
+$null = Send "aiplayer status $Bot"
+$null = Send "data get entity $Bot Inventory"
+$null = Send "data get entity $Bot Pos"
 Get-Content -LiteralPath $log | Select-Object -Skip $before |
     Where-Object { $_ -match "reflex ${Bot}:|Body $Bot died|\]: $Bot (drowned|was |fell|died|burned|suffocated|starved|blew|hit )" } |
     ForEach-Object { [Console]::Out.WriteLine($_) }
-if ($At) { Send "forceload remove $x $z" }
+if ($At) { $null = Send "forceload remove $x $z" }
 
 if (-not $result) { exit 2 }
 if ($result -match 'status=SATISFIED') { exit 0 }
