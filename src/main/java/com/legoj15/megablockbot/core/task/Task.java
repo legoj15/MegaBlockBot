@@ -64,4 +64,13 @@ public interface Task<B> {
     default boolean waiting() {
         return false;
     }
+
+    /**
+     * One short phrase for a status line about what the task is doing now ("heading for a block at 1 2 3",
+     * "exploring"), empty when it has nothing to say. Read on the server thread at any time, between ticks; it only
+     * describes and never changes anything.
+     */
+    default String progress() {
+        return "";
+    }
 }

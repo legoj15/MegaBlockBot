@@ -23,14 +23,16 @@ public final class AcquisitionIndex {
     private final Map<ItemKey, List<Source>> sources;
     private final Set<ItemKey> items;
     private final Set<ItemKey> craftable;
+    private final Set<String> sourceBlocks;
     private final Map<String, Integer> unplannableRecipeTypes;
     private final List<String> notes;
 
     private AcquisitionIndex(Map<ItemKey, List<Source>> sources, Set<ItemKey> items, Set<ItemKey> craftable,
-                             Map<String, Integer> unplannableRecipeTypes, List<String> notes) {
+                             Set<String> sourceBlocks, Map<String, Integer> unplannableRecipeTypes, List<String> notes) {
         this.sources = sources;
         this.items = items;
         this.craftable = craftable;
+        this.sourceBlocks = sourceBlocks;
         this.unplannableRecipeTypes = unplannableRecipeTypes;
         this.notes = notes;
     }
@@ -53,6 +55,14 @@ public final class AcquisitionIndex {
     /** The items some loaded recipe produces. Sorted by id. */
     public Set<ItemKey> craftable() {
         return craftable;
+    }
+
+    /**
+     * The ids of the blocks some mining or harvesting source names: what a body has to look for in the world to know
+     * which of its ways to gather are at hand (the snapshot's sight, design 3.4). Sorted; the same instance on every call.
+     */
+    public Set<String> sourceBlocks() {
+        return sourceBlocks;
     }
 
     /** Recipe type id to recipe count, for the types no producer adapter reads yet. Their outputs still count as craftable. */
@@ -118,15 +128,21 @@ public final class AcquisitionIndex {
                 .thenComparing(s -> s.getClass().getSimpleName())
                 .thenComparing(Source::toString);
             Map<ItemKey, List<Source>> frozen = new HashMap<>();
+            Set<String> blocks = new TreeSet<>();
             for (Map.Entry<ItemKey, List<Source>> e : sources.entrySet()) {
                 List<Source> list = new ArrayList<>(e.getValue());
                 list.sort(order);
                 frozen.put(e.getKey(), List.copyOf(list));
+                for (Source source : list) {
+                    if (source instanceof Source.MineBlock mine) blocks.add(mine.block());
+                    else if (source instanceof Source.Harvest harvest) blocks.add(harvest.block());
+                }
             }
             return new AcquisitionIndex(
                 Collections.unmodifiableMap(frozen),
                 Collections.unmodifiableSet(new TreeSet<>(items)),
                 Collections.unmodifiableSet(new TreeSet<>(craftable)),
+                Collections.unmodifiableSet(blocks),
                 Collections.unmodifiableMap(new TreeMap<>(unplannable)),
                 List.copyOf(notes));
         }

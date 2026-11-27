@@ -54,8 +54,61 @@ container, moves an item or loads a chunk.
   `remembered` is set, so that the plan can walk over and count on them; one whose chunk is loaded and no longer holds
   the block is shown with nothing and may not be taken from. A named container the body has no note of is listed empty.
   A double chest is one sight, at the half with the lower position hash.
+- `nearbyBlocks` (the sight, `BodySight`): block id to the horizontal distance of the nearest such block, for the blocks
+  `AcquisitionIndex.sourceBlocks()` names (every mining or harvesting source's block). A scan reads the chunks that
+  are loaded now (`ServerChunkCache.getChunkNow`; a chunk that is not loaded is skipped, never loaded) within
+  `RADIUS_CHUNKS` of the body's chunk and from `BELOW` blocks under the body to `ABOVE` over it, and walks a section's
+  blocks only when its palette holds a wanted block that could still be nearer than the one found. A scan is kept in the body's `BotMemory` (not saved) and a
+  snapshot reads it while it is at most `MAX_AGE_TICKS` old and the body is within `MOVE_BLOCKS` of where it was
+  taken; the distances are measured from where the body is when the snapshot is taken. `collect` runs at every
+  executor node boundary (pre-check, then the goal), plan request and adoption, and for commands, never per task tick, so
+  a scan is taken about every 4 seconds at most while a body walks. `/aiplayer sight <name> [fresh [full]]` prints what
+  a body sees and, with `fresh`, what a new scan costs (chunks read, sections walked and skipped, milliseconds; `full`
+  walks every section that holds a wanted block, to compare). The cost numbers and the
+  measurement are in the section "The sight" below.
 - `structures` and `observations` are empty. They need the active goal's wants (blueprints, observation keys), which
   `collect` is not given yet; `SnapshotCollector.addGoalFacts` is where they go.
+
+## The sight (`BodySight`, issue #27)
+
+Why: the solver has to pick one item for a recipe slot that takes any plank, and with every log's mining source costing
+the same the tie fell to oak, so a bot on a mountain walked 215 blocks for oak past other trees. The planner now prices
+a source whose block the body can see below one it cannot (`GatherCosts`, design 4.1), so it takes the log that is there.
+
+Numbers and why (all named constants; change one and re-measure with `/aiplayer sight <name> fresh`):
+
+- `RADIUS_CHUNKS` 4 (9 by 9 chunks around the body's): every direction to at least 64 blocks, the far corner to 112. A
+  bigger radius costs more for blocks the bot would not walk to first.
+- `BELOW` 48 and `ABOVE` 32 blocks around the body's block: the trees on the slope under a mountain spawn, not the
+  ore at the bottom of the world. An ore deeper than that is out of sight, which the cost model treats as dearer.
+- `MAX_AGE_TICKS` 200 (10 s) and `MOVE_BLOCKS` 16 (one chunk): a felled tree is out of date by the first, and a body that
+  has moved a chunk has changed what is near by more than the cost model can tell apart (1 per block). A scan is kept
+  per body, in its `BotMemory`, never saved.
+- `PlannerConfig.sightStep` 1 (per block of horizontal distance, capped below the penalty) and `unseenPenalty` 250:
+  more than twice the farthest seen distance (112), less than one missing tool tier (400). With no sight at all the
+  model adds nothing, so a plan made without one is the plan it always was (charging only block sources would move them
+  against kills, fishing, trades, crafts and strategy proposals).
+
+Cost of one scan (dev server, `scripts/bot-server.ps1`, 1.21.1, fresh world with seed 4242, one body at spawn and
+teleported to three other places; 1026 wanted blocks; 81 chunks read, none missing). The scan reads chunks nearest first
+and walks a section only when its palette holds a wanted block that could still be nearer than the one found, so the
+stone, dirt and grass of far chunks are not walked once the body's own chunk has shown them at distance 0:
+
+| | sections walked of 486 | time, warm | time, first scan after start |
+|---|---|---|---|
+| pruned (what a snapshot runs) | 43 to 106 | 2.2 to 3.6 ms | 16 ms |
+| every section holding a wanted block (`fresh full`) | 332 to 389 | 14.6 to 17.4 ms | 103 ms |
+
+Both find the same blocks (`SightGameTests.theScanThatSkipsSectionsFindsWhatTheFullScanFinds`, and the same 20 nearest
+kinds in the radius-3 dev-server runs). With radius 3 (49 chunks) the pruned scan took 1.6 to 3.1 ms. A body that walks scans at
+most about every 4 seconds (16 blocks), one that stands still every 10 seconds, only when something takes a snapshot.
+
+End to end: a body spawned at the seed-4242 spawn, where only spruce is within reach, was given "make 1 stone pickaxe";
+its first step read "mine (get 3 spruce log)". Before this change the tie fell to oak whatever stood nearby
+(`SolverPlannerTest.theLogKindTheBodyCanSeeIsTheOneMinedAndItsPlankTheOneCrafted` pins the tie on a two-wood fixture).
+
+How often `collect` runs: at each executor node boundary (a pre-check, then the goal), at each plan request and plan
+adoption, when a held body is released, and for commands; never per task tick.
 
 ## BotMemory
 
@@ -74,3 +127,10 @@ count against the game's ingredients, the book rebuilt after a real reload (prov
 later build), the builder isolating a throwing source and a duplicate id, snapshot contents with a real body (offhand
 counted once, two stacks of one item as two entries), tool classes and tiers, a tool known only by its data component,
 a tool with two denying rules, the memory save round trip through `restore`.
+
+`SightGameTests` (same run): the nearest block of each kind at its horizontal distance (a block in the body's column is
+0 away, a 3-4-5 triangle is 5, a block no source names is absent); a block in a chunk nobody has loaded is absent and
+looking does not load the chunk; two snapshots in a row take one scan, a step inside the bounds reads the kept scan with
+the distance from where the body now stands, a walk or a climb past the bounds takes a new one, and so does a scan
+older than `MAX_AGE_TICKS`; the pruned scan equals the full scan from five centres. They live in `game.plan`, not in
+`game.gametest`, because they read the per-body scan counter, which is package-private.

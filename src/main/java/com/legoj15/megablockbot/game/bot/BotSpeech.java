@@ -81,7 +81,9 @@ public final class BotSpeech {
             case Failure.NoProgress f -> "made no progress for " + f.ticksUsed() + " ticks";
             case Failure.Died f -> "died at " + position(f.deathPos());
             case Failure.PreemptStalled f -> "was held up too long by " + f.reflexCause();
-            case Failure.Internal f -> "hit an internal error";
+            // An Internal with no exception is a condition a task stated and could do nothing about, not a crash: the detail
+            // that follows says which.
+            case Failure.Internal f -> f.exception() == null ? "gave up" : "hit an internal error";
         };
         String detail = failure.detail();
         return detail == null || detail.isBlank() ? what : what + ": " + detail;
@@ -105,6 +107,14 @@ public final class BotSpeech {
 
     /** The one-paragraph status: which goal, which step, what waits. {@code lastResult} is the line of the last goal. */
     static String status(ExecutorView view, String lastResult) {
+        return status(view, lastResult, -1, "");
+    }
+
+    /**
+     * As above, with how long the body has been on the step ({@code stepTicks}, negative when unknown) and the phrase its
+     * task gives for what it is doing now (empty for none): {@code On it for 2m 13s: heading for a block at 1 2 3.}
+     */
+    static String status(ExecutorView view, String lastResult, long stepTicks, String progress) {
         StringBuilder text = new StringBuilder();
         if (view.goal() == null) {
             text.append("Idle, no goal.");
@@ -112,6 +122,7 @@ public final class BotSpeech {
         } else {
             text.append("Goal: ").append(goal(view.goal())).append(" (").append(view.status().name().toLowerCase(Locale.ROOT)).append(").");
             text.append(' ').append(step(view));
+            text.append(onTheStep(stepTicks, progress));
             if (view.reflexHeld()) text.append(" A reflex holds the body.");
             if (view.totalReplans() > 0) text.append(" Replans: ").append(view.totalReplans()).append('.');
         }
@@ -121,6 +132,21 @@ public final class BotSpeech {
             text.append(" Queued: ").append(String.join("; ", queued)).append('.');
         }
         return text.toString();
+    }
+
+    /** {@code " On it for 2m 13s: heading for a block."}, or just the time, or just the phrase, or nothing. */
+    private static String onTheStep(long stepTicks, String progress) {
+        boolean phrase = progress != null && !progress.isBlank();
+        if (stepTicks < 0) return phrase ? " Now: " + progress.strip() + "." : "";
+        return " On it for " + duration(stepTicks) + (phrase ? ": " + progress.strip() + "." : ".");
+    }
+
+    /** Game ticks (twenty a second) as {@code 45s}, {@code 2m 13s} or {@code 1h 5m}. */
+    static String duration(long ticks) {
+        long seconds = Math.max(0, ticks) / 20;
+        if (seconds < 60) return seconds + "s";
+        if (seconds < 3600) return seconds / 60 + "m " + seconds % 60 + "s";
+        return seconds / 3600 + "h " + seconds % 3600 / 60 + "m";
     }
 
     /** The step the bot is on, as its place among the plan's leaves: {@code Step 3 of 5: craft (get 4 stick).} */

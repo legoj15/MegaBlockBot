@@ -1,5 +1,6 @@
 package com.legoj15.megablockbot.game.task;
 
+import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.ToolClass;
@@ -12,12 +13,14 @@ import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BodyInteractionManager;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -52,8 +55,17 @@ import net.minecraft.world.phys.Vec3;
  *       for any other failure of the navigator.</li>
  * </ol>
  *
- * <p>There is no clock of the task's own: a step of the search is bounded in ticks only so that it ends, and the
- * executor's budgets decide how long the whole task may take.
+ * <p><b>Blocks it cannot get at.</b> The navigator sets a block aside when the body has headed for it for
+ * {@link Search#targetStallTicks} ticks without getting closer, or when the engine finds no path to it. The task keeps
+ * those blocks for its whole life, whatever commands it gives the navigator (and in its checkpoint, so a retry does not
+ * go back to them). The task also watches itself: when neither the count held nor the best distance to a known block
+ * has improved for {@link Search#noGainTicks} ticks it sets every block the navigator knows aside (a stalled round) and
+ * looks elsewhere, as it does when the navigator finds nothing. After {@link Search#maxStalledRounds} stalled rounds, or
+ * when the search is spent, it fails: {@code Unreachable} when it set blocks aside (there were some, and none could be
+ * got at), {@code NoSource} when it never knew of any.
+ *
+ * <p>There is no clock of the task's own beyond that: a step of the search is bounded in ticks only so that it ends,
+ * and the executor's budgets decide how long the whole task may take.
  */
 public final class MineTask extends BodyTask {
 
@@ -65,9 +77,20 @@ public final class MineTask extends BodyTask {
      * @param stepTicks          ticks after which an exploring step ends whatever the body covered
      * @param maxExploredBlocks  horizontal distance explored over all steps before the search gives up
      * @param maxAttempts        steps (and detours) before the search gives up
+     * @param targetStallTicks   ticks the navigator may head for one block without getting closer before it sets it aside
+     * @param noGainTicks        ticks without a gain in the count held or in the best distance to a known block before
+     *                           the task sets every block it knows aside (a stalled round)
+     * @param maxStalledRounds   stalled rounds after which the task fails
      */
-    public record Search(int stepBlocks, int stepTicks, int maxExploredBlocks, int maxAttempts) {
-        public static final Search DEFAULT = new Search(32, 600, 256, 12);
+    public record Search(int stepBlocks, int stepTicks, int maxExploredBlocks, int maxAttempts, int targetStallTicks,
+                         int noGainTicks, int maxStalledRounds) {
+        /** 20 s per block, 30 s per round (a cluster of blocks is set aside together), three rounds. */
+        public static final Search DEFAULT = new Search(32, 600, 256, 12, BotNavigator.TARGET_STALL_TICKS, 600, 3);
+
+        /** The search bounds with the stall bounds of {@link #DEFAULT}. */
+        public Search(int stepBlocks, int stepTicks, int maxExploredBlocks, int maxAttempts) {
+            this(stepBlocks, stepTicks, maxExploredBlocks, maxAttempts, BotNavigator.TARGET_STALL_TICKS, 600, 3);
+        }
     }
 
     /** How far around the body the task looks for blocks the break rules forbid, when the navigator found none. */
@@ -76,6 +99,12 @@ public final class MineTask extends BodyTask {
     private static final int BEST_Y_SLACK = 2;
     /** How close to the place it last mined a restarted task goes first. */
     private static final int LAST_MINED_RADIUS = 3;
+    /** Getting this much closer to a block, in blocks, counts as a gain; less is the body swaying about. */
+    private static final double CLOSER_BY = 1.0;
+    /** The most set-aside blocks a checkpoint keeps (those nearest to where the task began). */
+    private static final int MAX_SAVED_SET_ASIDE = 64;
+    /** The most set-aside blocks a failure's text names. */
+    private static final int MAX_NAMED_SET_ASIDE = 3;
 
     private enum Phase { MINING, TO_LAST_MINED, TO_BEST_Y, EXPLORING }
 
@@ -97,6 +126,7 @@ public final class MineTask extends BodyTask {
     @Nullable private final Pos hintOrigin;
     private final int hintExplored;
     @Nullable private final Pos hintLastMined;
+    private final List<Pos> hintSetAside;
 
     private Item item;
     private final List<Block> blocks = new ArrayList<>();
@@ -110,6 +140,13 @@ public final class MineTask extends BodyTask {
     private double lookedBlocks;
     private boolean triedLastMined;
     private boolean triedBestY;
+    /** Blocks the task will not head for again: the navigator reads it (from search threads too) and adds to it. */
+    private final Set<BlockPos> setAside = ConcurrentHashMap.newKeySet();
+    private int bestHeld;
+    private double bestTargetDistance = Double.POSITIVE_INFINITY;
+    private int noGainTicks;
+    private int stalledRounds;
+    @Nullable private BlockPos headingFor;
     @Nullable private BlockPos lastMined;
     private int seenBroken;
     private Vec3 stepFrom = Vec3.ZERO;
@@ -140,6 +177,7 @@ public final class MineTask extends BodyTask {
         this.hintOrigin = hintPos(hints.get("origin"));
         this.hintExplored = Math.max(0, intHint(hints.get("explored")));
         this.hintLastMined = hintPos(hints.get("lastMined"));
+        this.hintSetAside = hintPositions(hints.get("setAside"));
     }
 
     public MineTask(NodeSpec leaf, Map<String, String> hints) {
@@ -168,6 +206,17 @@ public final class MineTask extends BodyTask {
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    /** Positions as {@code x,y,z} joined by semicolons; what does not read is dropped (a checkpoint is only a hint). */
+    private static List<Pos> hintPositions(@Nullable String text) {
+        List<Pos> out = new ArrayList<>();
+        if (text == null) return out;
+        for (String part : text.split(";")) {
+            Pos pos = hintPos(part);
+            if (pos != null) out.add(pos);
+        }
+        return out;
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -204,7 +253,13 @@ public final class MineTask extends BodyTask {
 
         boolean sameWorld = hintDimension.equals(dimension);
         origin = sameWorld && hintOrigin != null ? blockPos(hintOrigin) : body.blockPosition();
-        if (sameWorld) exploredBlocks = Math.min(hintExplored, search.maxExploredBlocks());
+        if (sameWorld) {
+            exploredBlocks = Math.min(hintExplored, search.maxExploredBlocks());
+            // What an earlier task for this node could not get at is not tried again. The navigator looks at the world
+            // all the same, so a block that is no longer there costs nothing.
+            for (Pos aside : hintSetAside) setAside.add(blockPos(aside));
+        }
+        bestHeld = held;
         startMining(body);
     }
 
@@ -220,7 +275,10 @@ public final class MineTask extends BodyTask {
 
     private void startMining(BotPlayer body) {
         phase = Phase.MINING;
-        nav(body).mine(blocks, List.of(item), Math.max(1, target - held(body)));
+        // A new command is a new set of blocks to measure the approach to.
+        bestTargetDistance = Double.POSITIVE_INFINITY;
+        noGainTicks = 0;
+        nav(body).mine(blocks, List.of(item), Math.max(1, target - held(body)), setAside, search.targetStallTicks());
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -238,6 +296,11 @@ public final class MineTask extends BodyTask {
         noteProgress(body);
         BotNavigator nav = nav(body);
         waiting = nav.breaking();
+        headingFor = phase == Phase.MINING ? nav.focusTarget() : null;
+        if (phase == Phase.MINING && nav.state() == BotNavigator.State.WORKING) {
+            TickResult stalled = watchGain(body, nav);
+            if (stalled != null) return stalled;
+        }
         return switch (phase) {
             case MINING -> tickMining(body, nav);
             case TO_LAST_MINED, TO_BEST_Y -> tickGoingTo(body, nav);
@@ -268,6 +331,8 @@ public final class MineTask extends BodyTask {
             release(body);
             return TickResult.failed(unreachable(blockLabel, reason, "could not mine " + blockLabel + ": " + reason));
         }
+        MegaBlockBot.LOGGER.info("{}: the navigator found nothing to mine of {}: {} ({} block(s) set aside)",
+            body.getGameProfile().getName(), blockLabel, reason, setAside.size());
         BlockPos forbidden = forbiddenTarget(body);
         if (forbidden != null) {
             release(body);
@@ -280,7 +345,7 @@ public final class MineTask extends BodyTask {
     /** The navigator found nothing to mine in range: look further, or say there is nothing to be found. */
     private TickResult nextStep(BotPlayer body) {
         attempts++;
-        if (attempts > search.maxAttempts() || exploredBlocks >= search.maxExploredBlocks()) return noSource(body);
+        if (attempts > search.maxAttempts() || exploredBlocks >= search.maxExploredBlocks()) return giveUp(body);
         BlockPos here = body.blockPosition();
         if (hintLastMined != null && !triedLastMined && hintDimension.equals(dimension)
             && hintLastMined.distSqXZ(corePos(here)) > (long) LAST_MINED_RADIUS * LAST_MINED_RADIUS) {
@@ -341,7 +406,7 @@ public final class MineTask extends BodyTask {
         if (nav.state() == BotNavigator.State.FAILED) {
             // No path toward anything unexplored: there is nowhere further to look.
             exploredBlocks += moved;
-            return noSource(body);
+            return giveUp(body);
         }
         if (nav.state() == BotNavigator.State.WORKING && moved < search.stepBlocks() && stepTicks < search.stepTicks()) {
             return TickResult.RUNNING;
@@ -351,11 +416,67 @@ public final class MineTask extends BodyTask {
         return TickResult.RUNNING;
     }
 
-    private TickResult noSource(BotPlayer body) {
+    /**
+     * Whether the body is getting anywhere: it is while the count it holds, or the best distance it has reached to a
+     * block it knows of, keeps improving. When neither has for {@link Search#noGainTicks} ticks, whatever the body is
+     * doing (one that keeps climbing out of a cave and falling back in moves all the time, so the executor's watchdog
+     * never fires), the blocks it knows of are set aside and it looks elsewhere. Null while it is getting somewhere.
+     */
+    @Nullable
+    private TickResult watchGain(BotPlayer body, BotNavigator nav) {
+        boolean gain = false;
+        int now = held(body);
+        if (now > bestHeld) {
+            bestHeld = now;
+            gain = true;
+        }
+        double nearest = nav.nearestTargetDistance();
+        if (!Double.isNaN(nearest) && nearest < bestTargetDistance - CLOSER_BY) {
+            bestTargetDistance = nearest;
+            gain = true;
+        }
+        if (gain) {
+            noGainTicks = 0;
+            return null;
+        }
+        if (++noGainTicks < search.noGainTicks()) return null;
+
+        List<BlockPos> known = nav.knownTargets();
+        setAside.addAll(known);
+        stalledRounds++;
+        MegaBlockBot.LOGGER.info("{}: mining {} made no gain in {} ticks (round {} of {}); set aside the {} block(s) it knew of, {} in all",
+            body.getGameProfile().getName(), blockLabel, search.noGainTicks(), stalledRounds, search.maxStalledRounds(), known.size(),
+            setAside.size());
+        if (stalledRounds >= search.maxStalledRounds()) return giveUp(body);
+        return nextStep(body);
+    }
+
+    /**
+     * The search is spent. Blocks of the kind were known and none could be got at: {@code Unreachable}, saying how many
+     * and where, and what was tried. None was ever known: {@code NoSource}, saying how far it looked.
+     */
+    private TickResult giveUp(BotPlayer body) {
         release(body);
-        String detail = String.format(Locale.ROOT, "found no %s to get %s from: looked about %d blocks around %s (explored %d blocks in %d attempts)",
-            blockLabel, itemKey.id(), (int) Math.ceil(lookedBlocks), origin.toShortString(), (int) exploredBlocks, attempts);
-        return TickResult.failed(new Failure.NoSource(itemKey, sourceId, detail));
+        if (setAside.isEmpty()) {
+            String detail = String.format(Locale.ROOT, "found no %s to get %s from: looked about %d blocks around %s (explored %d blocks in %d attempts)",
+                blockLabel, itemKey.id(), (int) Math.ceil(lookedBlocks), origin.toShortString(), (int) exploredBlocks, attempts);
+            MegaBlockBot.LOGGER.info("{}: gave up mining {}: {}", body.getGameProfile().getName(), blockLabel, detail);
+            return TickResult.failed(new Failure.NoSource(itemKey, sourceId, detail));
+        }
+        List<BlockPos> named = setAside.stream().sorted(Comparator.comparingDouble(origin::distSqr)).limit(MAX_NAMED_SET_ASIDE).toList();
+        StringBuilder where = new StringBuilder();
+        for (BlockPos at : named) {
+            if (where.length() > 0) where.append("; ");
+            where.append(at.getX()).append(' ').append(at.getY()).append(' ').append(at.getZ());
+        }
+        String detail = String.format(Locale.ROOT,
+            "knew of %d %s block(s) and could not get at any of them (nearest: %s); a block was set aside after %d ticks without getting closer to it"
+                + " or when the engine found no path to it; %d stalled round(s) of %d ticks; explored %d blocks in %d attempts around %s and found no other",
+            setAside.size(), blockLabel, where, search.targetStallTicks(), stalledRounds, search.noGainTicks(), (int) exploredBlocks, attempts,
+            origin.toShortString());
+        MegaBlockBot.LOGGER.info("{}: gave up mining {}: {}", body.getGameProfile().getName(), blockLabel, detail);
+        return TickResult.failed(unreachable(blockLabel + " at " + named.get(0).toShortString(),
+            "set aside: the body could not get closer to " + setAside.size() + " known block(s)", detail));
     }
 
     private void noteProgress(BotPlayer body) {
@@ -454,6 +575,30 @@ public final class MineTask extends BodyTask {
         out.put("explored", Integer.toString((int) exploredBlocks));
         if (lastMined != null) out.put("lastMined", corePos(lastMined).encode());
         else if (hintLastMined != null) out.put("lastMined", hintLastMined.encode());
+        if (!setAside.isEmpty()) {
+            StringBuilder aside = new StringBuilder();
+            setAside.stream().sorted(Comparator.comparingDouble(origin::distSqr)).limit(MAX_SAVED_SET_ASIDE).forEach(at -> {
+                if (aside.length() > 0) aside.append(';');
+                aside.append(corePos(at).encode());
+            });
+            out.put("setAside", aside.toString());
+        }
         return out;
+    }
+
+    /** What the task is doing now, for the status line: where it is heading, and how many blocks it has given up on. */
+    @Override
+    public String progress() {
+        String block = blockLabel.replace("minecraft:", "");
+        String what = switch (phase) {
+            case MINING -> headingFor != null
+                ? "heading for a block at " + headingFor.getX() + " " + headingFor.getY() + " " + headingFor.getZ()
+                : "looking for " + block;
+            case TO_LAST_MINED -> "going back to where it last mined";
+            case TO_BEST_Y -> "going to y=" + targetY() + " to look for " + block;
+            case EXPLORING -> "exploring for " + block;
+        };
+        int aside = setAside.size();
+        return aside == 0 ? what : what + "; " + aside + " block" + (aside == 1 ? "" : "s") + " set aside as out of reach";
     }
 }

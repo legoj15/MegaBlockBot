@@ -117,6 +117,28 @@ runs wherever the command tree is built (a worker thread while data loads).
   why a command failed so that a task routes on it, never on the text; a stopped command also aborts a break in
   progress (the engine is no longer ticked to do it); `BotNavigator.sweep` (called every 100 ticks from `NavFeature`)
   drops the navigator of a body that was despawned and not replaced.
+- A mine command that cannot get at its blocks (issue 27): `mine(blocks, wanted, count, setAside, stallTicks)` takes the
+  caller's concurrent set of blocks to leave alone and adds to it the block the body has headed for (the known block nearest to
+  where the engine's path ends) for `stallTicks` ticks without getting a block closer or breaking anything
+  (`TARGET_STALL_TICKS`, 400), and every block the engine itself gave up on for want of a path (when a command ends or is
+  replaced, and only after one more go when it gave up on a single block: a path search already running when the targets
+  change can fail afterwards and take the blame on the wrong block). A command that ends with nothing known is asked
+  once more after `LOOK_AGAIN_TICKS` too: the engine's scan stops at the first ring of chunks it cannot read, so a chunk
+  out of its sight for a moment answers "nothing". The engine only sees what
+  is left, through `IMineTargetPolicy` (`src/nav/resources/UPSTREAM.md`); with none left the command fails
+  `NOTHING_TO_MINE`, as it does when none is known. A block with water in its cell or in any cell touching it is taken
+  only when no dry block is known, and not while the body's air is below full (the command waits up to
+  `AIR_WAIT_TICKS` for it, then fails `NOTHING_TO_MINE`); once it has started for one, the air falling on the way does
+  not stop it. "Water" here is water in the cells the body works in to get at the block: its own cell and the two above and
+  two below it; the engine already refuses a block with water directly above or beside it (infinite break cost), so such a
+  block is never a target, and a wet one is a block with water under it or two cells up. The navigator also sets the
+  engine's `ignoreBreath` off, so a path that dives is costed with the air the body has and refused when it would run out.
+  `knownTargets()`, `focusTarget()` and `nearestTargetDistance()` let a task watch the approach.
+  `MineTask` owns the set for its life (and its checkpoint carries it as `setAside`), watches the count held and the best
+  distance to a known block, and when neither improves for `Search.noGainTicks` sets every known block aside, a stalled round;
+  after `Search.maxStalledRounds` of them, or when the search is spent, it fails `Unreachable` if it set blocks aside
+  and `NoSource` if it never knew of any. The bounds are `MineTask.Search`; its four-argument form keeps the stall bounds
+  of `Search.DEFAULT`.
 - Tasks (`game.task`): `TaskFeature.init()` registers the plan-leaf kinds `navigate`, `reach`, `mine`, `recover_drops`
   and `deposit` with `TaskRegistry` (called from `NavFeature.init()` until the bot runtime takes it over). They drive the
   body only through its navigator, its menus and its game mode, release the body themselves before they report (the

@@ -23,6 +23,7 @@ public final class PlanFeature {
             BotMemory.clearAll();
         });
 
-        Platform.loader().registerGameTests(PlanInputGameTests.class);
+        SightCommand.init();
+        Platform.loader().registerGameTests(PlanInputGameTests.class, SightGameTests.class);
     }
 }

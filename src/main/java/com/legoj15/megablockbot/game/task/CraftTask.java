@@ -1,15 +1,16 @@
 package com.legoj15.megablockbot.game.task;
 
+import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.goal.Goal;
 import com.legoj15.megablockbot.core.plan.NodeSpec;
 import com.legoj15.megablockbot.core.planner.RecipeDef;
-import com.legoj15.megablockbot.core.task.AbstractTask;
 import com.legoj15.megablockbot.core.task.Failure;
 import com.legoj15.megablockbot.core.task.Task;
 import com.legoj15.megablockbot.core.task.TickResult;
 import com.legoj15.megablockbot.game.body.BotPlayer;
+import com.legoj15.megablockbot.game.nav.BotNavigator;
 import com.legoj15.megablockbot.game.plan.BotMemory;
 import com.legoj15.megablockbot.game.plan.ItemKeys;
 import com.legoj15.megablockbot.game.safety.BlockSafety;
@@ -17,6 +18,7 @@ import com.legoj15.megablockbot.game.safety.Verdict;
 import com.legoj15.megablockbot.nav.engine.api.entity.IInteractionManager;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -57,20 +59,39 @@ import net.minecraft.world.phys.Vec3;
  * the body carries. The grid positions come from the game's recipe, found again by id: a shaped recipe's shape is
  * not in the planner's book.
  *
+ * <p><b>What it draws from.</b> The main inventory and the hotbar ({@link MenuHand#CARRIED_SLOTS}); an item worn or held
+ * in the off hand is in use, and is neither an ingredient nor the table to put down. The result goes to the same slots,
+ * and a result that does not wholly fit is not taken at all: the ingredients are given back from the grid, so a craft
+ * never turns part of its result into something on the floor.
+ *
  * <p><b>Stations.</b> No station: the inventory's own 2x2 grid. A crafting table: one within reach is used where it
- * stands; otherwise the table item is placed on a free spot beside the body through the player's game mode, used, and
- * broken again as a player breaks it (start, wait out the break time, finish), and the task waits for the item to come
- * back. A table the body did not place is left standing. What the task placed is in the body's {@link BotMemory}, which
- * is saved with the brain, so a task started after a restart finds the table it left and takes it up.
+ * stands. Otherwise the table item is put down the way a player does it, then used and broken again. A spot is usable
+ * when a player could place a block there ({@link TableSites}: replaceable, and a neighbour whose face the eyes can see
+ * and reach; leaves will do). When none is within reach the body walks, through the navigator, to the nearest place with
+ * one beside it, within {@link TableSites#DEFAULT_RADIUS} blocks, and puts the table down there; the click is made
+ * sneaking. The table is broken as a player breaks it (start, wait out the break time, finish), and the task waits for
+ * the item to come back. A table the body did not place is left standing. What the task placed is in the body's
+ * {@link BotMemory}, which is saved with the brain, so a task started after a restart finds the table it left and takes
+ * it up. A remembered table found gone is forgotten.
  *
  * <p><b>Exits.</b> The cursor and the grid are empty on every exit: after each craft, on a failure, on pause and on abort.
- * A paused or aborted task closes the table's menu and stops breaking; the table it placed stays, remembered.
+ * A paused or aborted task closes the table's menu and stops breaking; the table it placed stays, remembered. A break the
+ * body may not make (a claim that arrived after the table was put down) ends the craft as a success all the same, because
+ * the craft's result is what the goal asked for: the table stays, remembered as the body's, the log says why, and the
+ * tidy step or the next craft takes it up.
  *
- * <p>Failures: {@code MissingInput} when an ingredient is not carried, {@code TargetGone} for a recipe id the game does
- * not have, {@code Protected} when every spot for the table is one the body may not break again, {@code Unreachable}
- * when there is no free spot, {@code TimedOut} when the table never comes back; the executor adds its own budget.
+ * <p><b>Failures.</b> {@code MissingInput} when an ingredient or the table is not carried, {@code TargetGone} for a recipe
+ * id the game does not have, {@code Protected} when every spot for the table is one the body may not break again,
+ * {@code Unreachable} when the body could not walk to a place for the table or the game would not let it put the table
+ * down, {@code NoProgress} when the result would not
+ * fit in the inventory, {@code TimedOut} when the table never comes back. With no place for the table within the radius
+ * the failure is {@code Internal} with no exception, which the executor answers by giving up at once. That is chosen on
+ * purpose: nothing a replan can change would alter the answer (the planner does not see where a table fits), and every
+ * other kind that does not give up is answered by the same plan again, three times, before the goal ends all the same.
+ * {@code Internal} is the stand-in until the design has a kind for "this plan cannot work here"; its detail says how far
+ * the task looked. The executor adds its own budget.
  */
-public final class CraftTask extends AbstractTask<BotPlayer> {
+public final class CraftTask extends BodyTask {
     public static final String KIND = RecipeDef.CRAFT;
 
     /** Ticks between two crafts: a few, like a player clicking through them. */
@@ -90,10 +111,22 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
     static final int BREAK_WAIT_TICKS = 400;
     /** How many times the game may refuse to open or start breaking before the task stops asking. */
     static final int REFUSALS_ALLOWED = 3;
+    /** How many places the body walks to, one after another, looking for one with a usable spot beside it. */
+    static final int WALKS_ALLOWED = 4;
+    /** From the eyes to the middle of the table: inside the 4.5 blocks a survival player can break at. */
+    static final double TABLE_BREAK_REACH = 4.0;
+    /** How many sites one tick of placing tries before it looks again from the top. */
+    static final int SITES_TRIED = 6;
+    /** How many times placing starts over before the task fails. */
+    static final int PLACE_ROUNDS_ALLOWED = 3;
+    /** Ticks the sneak may take to show on the body before the click is given up. */
+    static final int SNEAK_WAIT_TICKS = 5;
+    /** Ticks a walk may be found idle (something stopped the navigator) before the task stops asking it to go. */
+    static final int WALK_RESTARTS_ALLOWED = 3;
 
     private static final ItemKey CRAFTING_TABLE = ItemKey.of("minecraft:crafting_table");
 
-    private enum Phase { PREPARE, OPEN, CRAFT, BREAK, PICKUP }
+    private enum Phase { PREPARE, WALK, PLACE, OPEN, CRAFT, BREAK, PICKUP }
 
     /** One ingredient position: where it goes in the grid and what the recipe accepts there. */
     private record Cell(int gridIndex, Ingredient ingredient) {}
@@ -106,7 +139,7 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
     /** True for the task made by {@link #takeUp}: it crafts nothing and only takes a table this body left standing. */
     private final boolean takeUpOnly;
 
-    // Read from the leaf and the game in onStart.
+    // Read from the leaf and the game in begin.
     private CraftingRecipe recipe;
     private boolean needsTable;
     private int gridWidth;
@@ -129,6 +162,26 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
     private int tablesBefore;
     /** The body is walking toward the table's drop on this task's input. */
     private boolean walking;
+    /** The table is broken and its item is not in the inventory yet: what a resumed task goes back to. */
+    private boolean awaitingDrop;
+
+    // Finding a place for the table.
+    /** Places the body stood at or walked to without finding a usable spot, so that they are not offered again. */
+    private final Set<BlockPos> triedStands = new HashSet<>();
+    private final TableSites.Refusal refusal = new TableSites.Refusal();
+    private int walks;
+    /** Walks back to the body's own table, counted apart from the walks to a place for one. */
+    private int tableWalks;
+    /** How near the walk in progress has to get: the exact place to stand, or within reach of a table. */
+    private int walkRadius;
+    private int walkRestarts;
+    @Nullable
+    private BlockPos walkingTo;
+    @Nullable
+    private String walkFailure;
+    /** This task holds the sneak key for the click. */
+    private boolean sneaking;
+    private int placeRounds;
 
     public CraftTask(NodeSpec leaf, Map<String, String> hints) {
         this.leaf = leaf;
@@ -183,7 +236,7 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
     // ---------------------------------------------------------------------------------------------------------
 
     @Override
-    protected void onStart(BotPlayer body) {
+    protected void begin(BotPlayer body) {
         if (takeUpOnly) {
             needsTable = true;
             tableItem = Items.CRAFTING_TABLE;
@@ -231,10 +284,10 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
         }
 
         // The leaf's goal is the absolute count after this step, so a task started again after a restart (some crafts
-        // already done) makes only what is still missing.
+        // already done) makes only what is still missing. The count is of the slots a craft puts its result in.
         int needed = times;
         if (leaf.goal() instanceof Goal.HaveItem have) {
-            int missing = have.count() - body.getInventory().countItem(resultItem);
+            int missing = have.count() - MenuHand.carriedCount(body, resultItem);
             needed = Math.floorDiv(missing + resultCount - 1, resultCount);
         }
         remaining = Math.max(0, Math.min(times, needed));
@@ -273,6 +326,8 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
         }
         return switch (phase) {
             case PREPARE -> prepare(body);
+            case WALK -> walk(body);
+            case PLACE -> place(body);
             case OPEN -> open(body);
             case CRAFT -> craft(body);
             case BREAK -> breakTable(body);
@@ -281,21 +336,13 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
     }
 
     @Override
-    protected void onPause(BotPlayer body, String reason) {
-        release(body);
-    }
-
-    @Override
-    protected void onResume(BotPlayer body) {
-        // The world may have changed while paused: everything is looked at again from the top.
-        phase = Phase.PREPARE;
+    protected void resumeWork(BotPlayer body) {
+        // The world may have changed while paused: everything is looked at again from the top. Except when the table
+        // was already broken and its item not yet picked up: starting over would find no table and no table item, and
+        // the goal would go and make another while this one lies on the ground (a reflex hold in that moment did it).
+        phase = awaitingDrop ? Phase.PICKUP : Phase.PREPARE;
         cooldown = 0;
         phaseTicks = 0;
-    }
-
-    @Override
-    protected void onAbort(BotPlayer body, String reason) {
-        release(body);
     }
 
     /** True while the task waits on the game and not on the body: a table being broken, an item coming back. */
@@ -322,16 +369,33 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
             BlockPos standing = findTable(body);
             if (standing != null) {
                 table = standing;
-            } else {
-                Failure refused = placeTable(body);
-                if (refused != null) return stop(body, refused);
-                cooldown = 1;
+                phase = Phase.OPEN;
+                return TickResult.RUNNING;
             }
-            phase = Phase.OPEN;
-            return TickResult.RUNNING;
+            return seekSite(body);
         }
         // Every craft is done. A table this body put down comes up again; one it found is left standing.
         if (needsTable && table != null && isOurs(body)) {
+            if (!body.serverLevel().getBlockState(table).is(Blocks.CRAFTING_TABLE)) {
+                // Gone before it could be taken up: nothing to take, and nothing left to remember.
+                forgetTable(body);
+                return TickResult.COMPLETED;
+            }
+            if (body.getEyePosition().distanceToSqr(Vec3.atCenterOf(table)) > TABLE_BREAK_REACH * TABLE_BREAK_REACH) {
+                // The body is not beside its table: it came back to the world somewhere else, or a reflex carried it off.
+                // The break would be refused from here, so it walks back first.
+                if (tableWalks++ >= WALKS_ALLOWED) {
+                    return stop(body, new Failure.Unreachable("the crafting table at " + table.toShortString(),
+                        walkFailure == null ? "could not get back to it" : walkFailure, ""));
+                }
+                walkRestarts = 0;
+                walkingTo = table;
+                walkRadius = 2;
+                nav(body).goTo(table, walkRadius);
+                phase = Phase.WALK;
+                phaseTicks = 0;
+                return TickResult.RUNNING;
+            }
             phase = Phase.BREAK;
             phaseTicks = 0;
             refusals = 0;
@@ -340,11 +404,139 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
         return TickResult.COMPLETED;
     }
 
+    /**
+     * No table stands within reach: either a spot beside the body will do, or the body walks to a place that has one, or
+     * there is none within the radius and the task fails saying how far it looked.
+     */
+    private TickResult seekSite(BotPlayer body) {
+        ServerLevel level = body.serverLevel();
+        if (MenuHand.carriedCount(body, tableItem) == 0) {
+            return stop(body, new Failure.MissingInput(CRAFTING_TABLE, 1, "no crafting table stands within reach and none is carried"));
+        }
+        BlockPos feet = body.blockPosition();
+        if (!TableSites.sitesFrom(body, level, feet, TableSites.sneakingEye(body, feet, true), true, 1, refusal).isEmpty()) {
+            // The click is made sneaking, which takes a tick to show on the body: see place().
+            body.input().sneak = true;
+            sneaking = true;
+            phase = Phase.PLACE;
+            phaseTicks = 0;
+            return TickResult.RUNNING;
+        }
+        triedStands.add(feet.immutable());
+        int radius = TableSites.radius(body.getUUID());
+        BlockPos stand = walks >= WALKS_ALLOWED ? null : TableSites.nearestStand(body, level, radius, triedStands, refusal);
+        if (stand == null) return stop(body, noSite(feet, radius));
+        walks++;
+        walkRestarts = 0;
+        walkingTo = stand;
+        walkRadius = 0;
+        triedStands.add(stand);
+        nav(body).goTo(stand, 0);
+        phase = Phase.WALK;
+        phaseTicks = 0;
+        return TickResult.RUNNING;
+    }
+
+    /** Why there is nowhere to put the table, in the type that says what the executor should do about it. */
+    private Failure noSite(BlockPos feet, int radius) {
+        if (walkFailure != null) {
+            return new Failure.Unreachable("a place for the crafting table", walkFailure,
+                "walked to " + walks + " place(s) with a spot for a crafting table beside them and could not get to the last: " + walkFailure);
+        }
+        if (walks >= WALKS_ALLOWED) {
+            return new Failure.Unreachable("a place for the crafting table", "no spot beside any of the " + walks + " places walked to",
+                "walked to " + walks + " places and found no usable spot for a crafting table at any of them");
+        }
+        if (refusal.any()) return refusal.verdict.toFailure(refusal.at);
+        // Nothing a replan can change: see the class comment on why this is the kind it is.
+        return new Failure.Internal(null, "no place to put a crafting table within " + radius + " blocks of " + feet.toShortString()
+            + ": nowhere to stand with a free spot beside it that a block can be placed on and the table taken up from");
+    }
+
+    private TickResult walk(BotPlayer body) {
+        BotNavigator nav = nav(body);
+        switch (nav.state()) {
+            case DONE -> {
+                nav.stop();
+                phase = Phase.PREPARE; // looked at again from where the body now is
+            }
+            case FAILED -> {
+                walkFailure = nav.failure();
+                nav.stop();
+                phase = Phase.PREPARE; // the next nearest place, or the failure
+            }
+            case IDLE -> {
+                // Something else stopped the navigator: this task still owns the body.
+                if (++walkRestarts > WALK_RESTARTS_ALLOWED) {
+                    return stop(body, new Failure.Unreachable("a place for the crafting table", "the navigator would not walk there",
+                        "the navigator stopped " + walkRestarts + " times on the way to " + walkingTo.toShortString()));
+                }
+                nav.goTo(walkingTo, walkRadius);
+            }
+            case WORKING -> { }
+        }
+        return TickResult.RUNNING;
+    }
+
+    /**
+     * Puts the table item down on a spot beside the body, through the player's own item use, sneaking. The sites are
+     * looked at again from the sneaking eye, because the world is the judge: the one clicked first that takes is the table.
+     */
+    private TickResult place(BotPlayer body) {
+        ServerLevel level = body.serverLevel();
+        if (!body.isShiftKeyDown()) {
+            if (++phaseTicks > SNEAK_WAIT_TICKS) return stop(body, new Failure.Internal(null, "the body would not sneak to place the crafting table"));
+            return TickResult.RUNNING;
+        }
+        if (!hold(body, tableItem)) {
+            return stop(body, new Failure.Internal(null, "the crafting table could not be taken into the hand"));
+        }
+        BlockPos feet = body.blockPosition();
+        List<TableSites.Site> sites = TableSites.sitesFrom(body, level, feet, body.getEyePosition(), true, SITES_TRIED, refusal);
+        for (TableSites.Site site : sites) {
+            body.input().lookAt(site.click());
+            body.getInteractionManager().interactBlock(body, level, body.getMainHandItem(), InteractionHand.MAIN_HAND,
+                new BlockHitResult(site.click(), site.face(), site.against(), false));
+            if (!level.getBlockState(site.spot()).is(Blocks.CRAFTING_TABLE)) continue;
+            table = site.spot().immutable();
+            placedHere = true;
+            tablesBefore = MenuHand.carriedCount(body, tableItem);
+            BotMemory.of(body.getUUID()).notePlaced(dimension(level), table);
+            BlockSafety.of(level.getServer()).noteBotPlaced(body, level, table);
+            letGoOfSneak(body);
+            // The sneak is released a tick before the table is used: a click that sneaks would place another, not open.
+            cooldown = 1;
+            phase = Phase.OPEN;
+            return TickResult.RUNNING;
+        }
+        // Nothing took (a look from the sneaking eye that found no site, or the game refused each): from the top again.
+        letGoOfSneak(body);
+        if (++placeRounds > PLACE_ROUNDS_ALLOWED) {
+            return stop(body, new Failure.Unreachable("a place for the crafting table", "the game would not let the body put it down",
+                "the crafting table was not placed from " + feet.toShortString() + " in " + placeRounds + " tries"));
+        }
+        phase = Phase.PREPARE;
+        return TickResult.RUNNING;
+    }
+
+    private void letGoOfSneak(BotPlayer body) {
+        if (!sneaking) return;
+        body.input().sneak = false;
+        body.input().clearLook();
+        sneaking = false;
+    }
+
     private TickResult open(BotPlayer body) {
         ServerLevel level = body.serverLevel();
         if (table == null || !level.getBlockState(table).is(Blocks.CRAFTING_TABLE)) {
-            table = null; // gone since it was chosen: choose again
+            forgetTable(body); // gone since it was chosen: the memory forgets it, and a table is chosen again
             phase = Phase.PREPARE;
+            return TickResult.RUNNING;
+        }
+        if (body.isShiftKeyDown()) {
+            // A use-click while sneaking with the table in the hand would put a second table down, not open this one.
+            body.input().sneak = false;
+            cooldown = 1;
             return TickResult.RUNNING;
         }
         if (!(body.containerMenu instanceof CraftingMenu)) {
@@ -398,6 +590,7 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
             BotMemory.of(body.getUUID()).forgetPlaced(dimension(level), table);
             phase = Phase.PICKUP;
             phaseTicks = 0;
+            awaitingDrop = true;
             return TickResult.RUNNING;
         }
         if (++phaseTicks > BREAK_WAIT_TICKS) {
@@ -407,11 +600,14 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
         if (!hand.isMining()) {
             Verdict verdict = BlockSafety.of(level.getServer()).mayBreak(body, level, table, state);
             if (!verdict.allowed()) {
-                // It stays where it is: the body may not break it, whoever put it there.
+                // The craft is made, and that is what the goal asked for, so this is a success. The table stays where it is,
+                // and stays in the body's memory as its own: the tidy step and the next craft that finds it take it up.
+                MegaBlockBot.LOGGER.info("{} leaves the crafting table at {} standing: it may not break it ({}: {})",
+                    body.getGameProfile().getName(), table.toShortString(), verdict.rule(), verdict.detail());
                 table = null;
                 return TickResult.COMPLETED;
             }
-            if (phaseTicks == 1) tablesBefore = body.getInventory().countItem(tableItem);
+            if (phaseTicks == 1) tablesBefore = MenuHand.carriedCount(body, tableItem);
             if (refusals > REFUSALS_ALLOWED) {
                 return stop(body, new Failure.Unreachable("the crafting table at " + table.toShortString(),
                         "the game would not start breaking it", ""));
@@ -430,10 +626,11 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
     }
 
     private TickResult pickUp(BotPlayer body) {
-        if (body.getInventory().countItem(tableItem) > tablesBefore) {
+        if (MenuHand.carriedCount(body, tableItem) > tablesBefore) {
             if (walking) body.input().reset();
             walking = false;
             table = null;
+            awaitingDrop = false;
             return TickResult.COMPLETED;
         }
         if (++phaseTicks > PICKUP_WAIT_TICKS) {
@@ -447,7 +644,7 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
      * A dropped item hops away from the block it came from, and the pickup box of a standing player is only a block
      * wide on each side, so now and then the table's item comes to rest just out of reach. The body walks over to it,
      * by its movement input like anything else it does (nothing is moved or teleported), and the input is reset the
-     * tick the item is in the inventory, and by {@link #release} on every other exit.
+     * tick the item is in the inventory, and by {@link #letGo} on every other exit.
      */
     private void stepTowardDrop(BotPlayer body) {
         ItemEntity nearest = null;
@@ -480,6 +677,29 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
         return TickResult.failed(failure);
     }
 
+    /** Lets go of everything: the break, the sneak, the open menu, the cursor and the grid. Never throws on a body in any state. */
+    @Override
+    protected void letGo(BotPlayer body) {
+        phase = Phase.PREPARE;
+        phaseTicks = 0;
+        if (body == null) return;
+        letGoOfSneak(body);
+        if (walking) {
+            body.input().reset();
+            walking = false;
+        }
+        IInteractionManager hand = body.getInteractionManager();
+        if (hand.isMining() && table != null && table.equals(hand.getMiningPos())) {
+            hand.processBlockBreakingAction(table, Action.ABORT_DESTROY_BLOCK, Direction.UP,
+                    body.level().getMaxBuildHeight(), sequence++);
+        }
+        // Closing a menu hands back its grid and cursor (AbstractContainerMenu.removed).
+        if (body.containerMenu != body.inventoryMenu) body.closeContainer();
+        MenuHand own = new MenuHand(body, body.inventoryMenu);
+        own.putBack();
+        own.emptyGrid(1, 4);
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // One craft, through the menu
     // ---------------------------------------------------------------------------------------------------------
@@ -506,10 +726,21 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
                         + (offered.isEmpty() ? "nothing" : ItemKeys.of(offered.getItem()).id()) + " from the layout of "
                         + leaf.params().get("recipe") + ", not " + ItemKeys.of(resultItem).id());
             }
-            int before = body.getInventory().countItem(resultItem);
+            // Taking the result takes the ingredients with it, and a result that does not wholly fit is dropped at the
+            // feet by the game (a shift click moves what fits and drops the rest). So the result is taken only when all of
+            // it has room; otherwise it stays in its slot, and the finally below gives the ingredients back.
+            int made = offered.getCount();
+            int room = MenuHand.roomFor(body, offered);
+            if (room < made) {
+                return new Failure.NoProgress(0, "there is no room in the inventory for the " + made + " "
+                        + ItemKeys.of(resultItem).id() + " this craft makes (room for " + room + ")");
+            }
+            int before = MenuHand.carriedCount(body, resultItem);
             hand.moveOut(0);
-            if (body.getInventory().countItem(resultItem) <= before) {
-                return new Failure.NoProgress(0, "there is no room in the inventory for " + ItemKeys.of(resultItem).id());
+            int arrived = MenuHand.carriedCount(body, resultItem) - before;
+            if (arrived < made) {
+                return new Failure.NoProgress(0, "only " + arrived + " of the " + made + " " + ItemKeys.of(resultItem).id()
+                        + " this craft made reached the inventory; the rest was dropped at the feet");
             }
             return null;
         } finally {
@@ -609,13 +840,16 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
     // The table
     // ---------------------------------------------------------------------------------------------------------
 
-    /** The nearest crafting table the body can use from where it stands, or null. A remembered one is tried first. */
+    /**
+     * The nearest crafting table the body can use from where it stands, or null. A remembered one is tried first; a
+     * remembered one that is gone is forgotten.
+     */
     @Nullable
     private BlockPos findTable(BotPlayer body) {
         ServerLevel level = body.serverLevel();
-        if (table != null && level.isLoaded(table) && level.getBlockState(table).is(Blocks.CRAFTING_TABLE)
-                && body.canInteractWithBlock(table, 0.0)) {
-            return table;
+        if (table != null && level.isLoaded(table)) {
+            if (!level.getBlockState(table).is(Blocks.CRAFTING_TABLE)) forgetTable(body);
+            else if (body.canInteractWithBlock(table, 0.0)) return table;
         }
         BlockPos centre = body.blockPosition();
         BlockPos best = null;
@@ -633,72 +867,16 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
         return best;
     }
 
-    /**
-     * Puts the table item down on a free spot beside the body, through the player's own item use. A spot must be
-     * replaceable, stand on something that holds a block up, and be one the body may break again (a table it could not
-     * pick up would be left behind in someone's protected ground). Null when it is down, otherwise why not.
-     */
-    @Nullable
-    private Failure placeTable(BotPlayer body) {
-        ServerLevel level = body.serverLevel();
-        if (body.getInventory().countItem(tableItem) == 0) {
-            return new Failure.MissingInput(CRAFTING_TABLE, 1, "no crafting table stands within reach and none is carried");
-        }
-        if (!hold(body, tableItem)) {
-            return new Failure.Internal(null, "the crafting table could not be taken into the hand");
-        }
-        BlockSafety safety = BlockSafety.of(level.getServer());
-        BlockPos feet = body.blockPosition();
-        Verdict denied = null;
-        BlockPos deniedAt = null;
-        boolean tried = false;
-        for (BlockPos spot : spotsAround(feet)) {
-            if (!level.isLoaded(spot) || !level.getBlockState(spot).canBeReplaced()) continue;
-            BlockPos support = spot.below();
-            if (!level.getBlockState(support).isFaceSturdy(level, support, Direction.UP)) continue;
-            Verdict verdict = safety.mayBreak(body, level, spot, Blocks.CRAFTING_TABLE.defaultBlockState());
-            if (!verdict.allowed()) {
-                if (denied == null) {
-                    denied = verdict;
-                    deniedAt = spot;
-                }
-                continue;
-            }
-            tried = true;
-            Vec3 at = new Vec3(spot.getX() + 0.5, spot.getY(), spot.getZ() + 0.5);
-            body.getInteractionManager().interactBlock(body, level, body.getMainHandItem(), InteractionHand.MAIN_HAND,
-                    new BlockHitResult(at, Direction.UP, support, false));
-            // Whether it worked is the world's answer: the game refuses a spot an entity (the body itself) is in.
-            if (level.getBlockState(spot).is(Blocks.CRAFTING_TABLE)) {
-                table = spot.immutable();
-                placedHere = true;
-                tablesBefore = body.getInventory().countItem(tableItem);
-                BotMemory.of(body.getUUID()).notePlaced(dimension(level), table);
-                safety.noteBotPlaced(body, level, table);
-                return null;
-            }
-        }
-        if (!tried && denied != null) return denied.toFailure(deniedAt);
-        return new Failure.Unreachable("a place for the crafting table", "no free spot beside the body",
-                "no free, supported spot within two blocks of " + feet.toShortString());
-    }
-
-    /** The positions at the body's feet level around it, nearest ring first, straight neighbours before diagonals. */
-    private static List<BlockPos> spotsAround(BlockPos feet) {
-        List<BlockPos> spots = new ArrayList<>();
-        int[][] near = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, 1}, {1, -1}, {-1, -1}};
-        for (int[] d : near) spots.add(feet.offset(d[0], 0, d[1]));
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                if (Math.max(Math.abs(dx), Math.abs(dz)) == 2) spots.add(feet.offset(dx, 0, dz));
-            }
-        }
-        return spots;
+    /** The table this task had in mind is not there: the body's memory of having placed it goes too. */
+    private void forgetTable(BotPlayer body) {
+        if (table != null) BotMemory.of(body.getUUID()).forgetPlaced(dimension(body.serverLevel()), table);
+        table = null;
+        placedHere = false;
     }
 
     /**
      * Takes the item into the main hand as a player would: it is selected when it is on the hotbar, otherwise the
-     * inventory menu swaps it into the selected hotbar slot.
+     * inventory menu swaps it into the selected hotbar slot. Only carried storage is looked at (see {@link MenuHand}).
      */
     private static boolean hold(BotPlayer body, Item item) {
         var inventory = body.getInventory();
@@ -742,27 +920,6 @@ public final class CraftTask extends AbstractTask<BotPlayer> {
     /** The table is this body's to take up: this task put it down, or the body's memory says an earlier one did. */
     private boolean isOurs(BotPlayer body) {
         return table != null && (placedHere || BotMemory.of(body.getUUID()).isPlaced(dimension(body.serverLevel()), table));
-    }
-
-    /** Lets go of everything: the break, the open menu, the cursor and the grid. Never throws on a body in any state. */
-    private void release(@Nullable BotPlayer body) {
-        phase = Phase.PREPARE;
-        phaseTicks = 0;
-        if (body == null) return;
-        if (walking) {
-            body.input().reset();
-            walking = false;
-        }
-        IInteractionManager hand = body.getInteractionManager();
-        if (hand.isMining() && table != null && table.equals(hand.getMiningPos())) {
-            hand.processBlockBreakingAction(table, Action.ABORT_DESTROY_BLOCK, Direction.UP,
-                    body.level().getMaxBuildHeight(), sequence++);
-        }
-        // Closing a menu hands back its grid and cursor (AbstractContainerMenu.removed).
-        if (body.containerMenu != body.inventoryMenu) body.closeContainer();
-        MenuHand own = new MenuHand(body, body.inventoryMenu);
-        own.putBack();
-        own.emptyGrid(1, 4);
     }
 
     private static String dimension(ServerLevel level) {

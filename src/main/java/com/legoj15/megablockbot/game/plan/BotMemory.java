@@ -68,6 +68,9 @@ public final class BotMemory {
     private final Map<String, Set<Long>> placed = new HashMap<>();
     private final Map<ContainerKey, RememberedContainer> containers = new LinkedHashMap<>();
     private final Map<ContainerKey, SupplyContainer> supply = new LinkedHashMap<>();
+    // The last scan of the blocks around the body (BodySight). A cache of the world, so it is never saved.
+    private BodySight.Taken sight;
+    private int sightScans;
 
     public static BotMemory of(UUID body) {
         return BY_BODY.computeIfAbsent(body, id -> new BotMemory());
@@ -174,6 +177,23 @@ public final class BotMemory {
     /** The containers the owner named, in the order named. */
     public List<SupplyContainer> supply() {
         return List.copyOf(supply.values());
+    }
+
+    // ---- the sight ---------------------------------------------------------------------------------------------
+
+    /** The scan {@link BodySight} kept for this body, or null when it has taken none. */
+    BodySight.Taken sight() {
+        return sight;
+    }
+
+    void keepSight(BodySight.Taken taken) {
+        sight = taken;
+        sightScans++;
+    }
+
+    /** How many scans this body has had kept; a snapshot that reads the kept one adds none. */
+    int sightScans() {
+        return sightScans;
     }
 
     // ---- persistence -------------------------------------------------------------------------------------------

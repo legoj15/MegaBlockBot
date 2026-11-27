@@ -22,22 +22,48 @@ import java.util.TreeMap;
  * @param fish            cost of one cast, before yield
  * @param trade           cost of one villager trade attempt: divided by the offer's chance, and added to the
  *                        unit cost of what the trade charges (a trade gives one item, so there is no yield)
+ * @param sightStep       cost per block of horizontal distance charged to a mining or harvesting source whose block
+ *                        is in the snapshot's sight (design 4.1): a nearer block is cheaper than a farther one
+ * @param unseenPenalty   cost added to a mining or harvesting source whose block is not in the sight, once the sight
+ *                        holds anything. Larger than any seen block's charge, which {@link #sightCharge} caps at
+ *                        {@code unseenPenalty - 1}, so a block in sight is always cheaper than the same one out of it
  * @param maxTotalReplans the replan total a plan carries when no strategy declares a higher one (design 3.4)
  * @param toolItems       tool item per class and tier, keyed by {@link #toolKey}; see {@link #toolItem}
  */
 public record PlannerConfig(long mineBase, long deepOre, long toolStep, long harvest, long kill, long fish,
-                            long trade, int maxTotalReplans, Map<String, ItemKey> toolItems) {
+                            long trade, long sightStep, long unseenPenalty, int maxTotalReplans,
+                            Map<String, ItemKey> toolItems) {
     /**
      * Sorted, defensively copied, read-only: table iteration must not depend on how it was built. ({@code Map.copyOf}
      * would drop the order, and its own iteration order differs from one JVM to the next.)
      */
     public PlannerConfig {
+        if (sightStep < 0 || unseenPenalty < 1) {
+            throw new IllegalArgumentException("sightStep must be at least 0 and unseenPenalty at least 1, got "
+                    + sightStep + " and " + unseenPenalty);
+        }
         toolItems = Collections.unmodifiableMap(new TreeMap<>(toolItems));
     }
 
-    /** The documented defaults of the table above: vanilla costs, the executor's replan budget. */
+    /**
+     * The documented defaults of the table above: vanilla costs, the executor's replan budget. A block in sight
+     * costs one per block of distance, at most 112 away with the collector's radius of 4 chunks; a block out of
+     * sight costs 250 more, over twice that, and still below a tool step (400) so that what the body can see
+     * reorders choices between alternatives without outweighing a missing tool.
+     */
     public static PlannerConfig defaults() {
-        return new PlannerConfig(40, 600, 400, 200, 600, 1200, 3000, 12, vanillaToolItems());
+        return new PlannerConfig(40, 600, 400, 200, 600, 1200, 3000, 1, 250, 12, vanillaToolItems());
+    }
+
+    /**
+     * What a mining or harvesting source whose block is {@code distance} blocks away (horizontally) costs on top of
+     * its breaking cost: {@code sightStep} per block, never reaching {@code unseenPenalty}.
+     */
+    public long sightCharge(long distance) {
+        long cap = unseenPenalty - 1;
+        if (sightStep == 0) return 0;
+        long blocks = Math.max(0, distance);
+        return blocks > cap / sightStep ? cap : blocks * sightStep;
     }
 
     /** The vanilla tool ids. Shears are one item at every tier, so they sit under one key. */
@@ -71,6 +97,7 @@ public record PlannerConfig(long mineBase, long deepOre, long toolStep, long har
 
     /** A copy of this config whose tool table is replaced, for a modded or test table. */
     public PlannerConfig withToolItems(Map<String, ItemKey> replacement) {
-        return new PlannerConfig(mineBase, deepOre, toolStep, harvest, kill, fish, trade, maxTotalReplans, replacement);
+        return new PlannerConfig(mineBase, deepOre, toolStep, harvest, kill, fish, trade, sightStep, unseenPenalty,
+                maxTotalReplans, replacement);
     }
 }

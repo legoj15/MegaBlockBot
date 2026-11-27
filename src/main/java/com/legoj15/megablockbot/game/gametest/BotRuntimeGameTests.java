@@ -3,10 +3,20 @@ package com.legoj15.megablockbot.game.gametest;
 import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.core.EquipSlot;
 import com.legoj15.megablockbot.core.ItemKey;
+import com.legoj15.megablockbot.core.exec.ExecutorView;
 import com.legoj15.megablockbot.core.exec.GoalResult;
 import com.legoj15.megablockbot.core.exec.GoalStatus;
+import com.legoj15.megablockbot.core.exec.NodeState;
+import com.legoj15.megablockbot.core.exec.ReflexHold;
 import com.legoj15.megablockbot.core.goal.Goal;
+import com.legoj15.megablockbot.core.plan.Exclusions;
 import com.legoj15.megablockbot.core.plan.NodeSpec;
+import com.legoj15.megablockbot.core.plan.PlanOutcome;
+import com.legoj15.megablockbot.core.plan.PlanRequest;
+import com.legoj15.megablockbot.core.plan.Profile;
+import com.legoj15.megablockbot.core.planner.CraftLayout;
+import com.legoj15.megablockbot.core.planner.PlannerConfig;
+import com.legoj15.megablockbot.core.planner.SolverPlanner;
 import com.legoj15.megablockbot.core.task.Failure;
 import com.legoj15.megablockbot.core.task.Task;
 import com.legoj15.megablockbot.core.task.TaskState;
@@ -17,7 +27,15 @@ import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.bot.BotRuntime;
 import com.legoj15.megablockbot.game.bot.BotSpeech;
 import com.legoj15.megablockbot.game.bot.NbtForm;
+import com.legoj15.megablockbot.game.bot.ReflexSource;
+import com.legoj15.megablockbot.game.bot.ReflexSources;
 import com.legoj15.megablockbot.game.plan.BotMemory;
+import com.legoj15.megablockbot.game.plan.RecipeBooks;
+import com.legoj15.megablockbot.game.plan.SnapshotCollector;
+import com.legoj15.megablockbot.game.resolver.AcquisitionIndexes;
+import com.legoj15.megablockbot.game.safety.BlockSafety;
+import com.legoj15.megablockbot.game.safety.ClaimProvider;
+import com.legoj15.megablockbot.game.task.TableSites;
 import com.legoj15.megablockbot.game.task.TaskRegistry;
 import com.mojang.authlib.GameProfile;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
@@ -28,6 +46,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import net.minecraft.commands.CommandSource;
 import net.minecraft.commands.CommandSourceStack;
@@ -42,12 +61,18 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.inventory.CraftingMenu;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.LeavesBlock;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec2;
 import net.minecraft.world.phys.Vec3;
 
@@ -103,7 +128,10 @@ public final class BotRuntimeGameTests {
         Feedback feedback = new Feedback();
         helper.assertTrue(run(rig.server(), rig.ownerSource(feedback), "aiplayer goal " + rig.name() + " make 4 stick") == 1,
             "the goal command failed: " + feedback.messages);
-        helper.assertTrue(feedback.contains("get 4 stick"), "the bot did not say what it took on: " + feedback.messages);
+        // What the words became is the executor's goal, not the bot's sentence about it.
+        helper.assertTrue(isHaveItem(rig.runtime().view().goal(), "minecraft:stick", 4),
+            "the command did not become a goal of 4 sticks: " + rig.runtime().view().goal());
+        helper.assertTrue(!feedback.messages.isEmpty(), "the bot told the command's source nothing");
         rig.onEachTick(() -> {
             GoalResult result = rig.runtime().lastResult();
             if (result == null) return;
@@ -112,7 +140,7 @@ public final class BotRuntimeGameTests {
             helper.assertTrue(rig.count(Items.STICK) == 4 && rig.count(Items.OAK_PLANKS) == 2 && rig.count(Items.OAK_LOG) == 0,
                 "expected 4 sticks, 2 planks and no log, got " + rig.count(Items.STICK) + ", " + rig.count(Items.OAK_PLANKS) + ", "
                     + rig.count(Items.OAK_LOG));
-            helper.assertTrue(BotSpeech.result(result).startsWith("Done: get 4 stick"), "the result reads " + BotSpeech.result(result));
+            helper.assertTrue(isHaveItem(result.goal(), "minecraft:stick", 4), "the result is for " + result.goal());
             rig.pass();
         });
     }
@@ -243,6 +271,406 @@ public final class BotRuntimeGameTests {
             rig.assertHandsEmpty();
             rig.pass();
         });
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Where the table goes, and what a craft never loses (issue 27)
+    // ---------------------------------------------------------------------------------------------------------
+
+    /** The wooden pickaxe's materials and a table to put down: the plan is the one craft that needs the 3x3 grid. */
+    private static void giveThePickaxeMaterials(Rig rig) {
+        rig.give(Items.OAK_PLANKS, 3);
+        rig.give(Items.STICK, 2);
+        rig.give(Items.CRAFTING_TABLE, 1);
+    }
+
+    private static Task<BotPlayer> craftTask(String recipe, int times, String station, Goal goal) {
+        return TaskRegistry.create(NodeSpec.leaf(goal, "craft", Map.of("recipe", recipe, "times", Integer.toString(times), "station", station), ""),
+            Map.of());
+    }
+
+    private static Task<BotPlayer> pickaxeTask() {
+        return craftTask("minecraft:wooden_pickaxe", 1, "minecraft:crafting_table", new Goal.HaveItem(ItemKey.of("wooden_pickaxe"), 1));
+    }
+
+    /**
+     * The body stands on a pillar five blocks high with air all round. From there no face of any block is within reach,
+     * so a table cannot go down where it stands: the craft has to walk to a place with a spot beside it (here, down off
+     * the pillar), put the table there, craft and take it up again.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600)
+    public static void aCraftWalksToAPlaceForItsTable(GameTestHelper helper) {
+        floor(helper);
+        for (int y = FLOOR_Y + 1; y <= FLOOR_Y + 5; y++) helper.setBlock(8, y, 8, Blocks.STONE);
+        Rig rig = Rig.spawnAt(helper, "pillar", 600, new Vec3(8.5, FLOOR_Y + 6.0, 8.5));
+        giveThePickaxeMaterials(rig);
+        rig.runtime().submit(new Goal.HaveItem(ItemKey.of("wooden_pickaxe"), 1));
+        BlockPos[] placedAt = {null};
+        double[] bodyYThen = {Double.NaN};
+        rig.onEachTick(() -> {
+            if (placedAt[0] == null) {
+                List<BlockPos> tables = rig.tablesInArena();
+                if (!tables.isEmpty()) {
+                    placedAt[0] = tables.get(0);
+                    bodyYThen[0] = rig.body().getY();
+                }
+            }
+            GoalResult result = rig.runtime().lastResult();
+            if (result == null) return;
+            helper.assertTrue(result.status() == GoalResult.Status.SATISFIED, "the goal ended " + BotSpeech.result(result));
+            helper.assertTrue(rig.count(Items.WOODEN_PICKAXE) == 1, "no wooden pickaxe in the inventory");
+            helper.assertTrue(placedAt[0] != null, "no table was ever put down");
+            helper.assertTrue(placedAt[0].getY() <= FLOOR_Y + 2, "the table went down at " + placedAt[0] + ", not on the ground");
+            helper.assertTrue(bodyYThen[0] < FLOOR_Y + 3.0, "the body was still up on the pillar (y " + bodyYThen[0] + ") when the table went down");
+            helper.assertTrue(rig.count(Items.CRAFTING_TABLE) == 1, "the table is not back in the inventory: " + rig.count(Items.CRAFTING_TABLE));
+            helper.assertTrue(rig.tablesInArena().isEmpty(), "a crafting table was left standing at " + rig.tablesInArena());
+            helper.assertTrue(BotMemory.of(rig.id()).placedCount() == 0, "the body still remembers a block it placed");
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * What a player in a tree canopy does: puts the table on the leaves. Leaves hold no sturdy face, and a table does not
+     * need one, so the only thing that can stop it is a rule stricter than the game's.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600)
+    public static void aCraftPlacesItsTableOnLeaves(GameTestHelper helper) {
+        floor(helper);
+        BlockState leaf = Blocks.OAK_LEAVES.defaultBlockState().setValue(LeavesBlock.PERSISTENT, true);
+        for (int x = 6; x <= 10; x++) {
+            for (int z = 6; z <= 10; z++) helper.setBlock(new BlockPos(x, 5, z), leaf);
+        }
+        Rig rig = Rig.spawnAt(helper, "leaves", 600, new Vec3(8.5, 6.0, 8.5));
+        giveThePickaxeMaterials(rig);
+        rig.runtime().submit(new Goal.HaveItem(ItemKey.of("wooden_pickaxe"), 1));
+        BlockPos[] placedAt = {null};
+        boolean[] onLeaves = {false};
+        rig.onEachTick(() -> {
+            if (placedAt[0] == null) {
+                List<BlockPos> tables = rig.tablesInArena();
+                if (!tables.isEmpty()) {
+                    placedAt[0] = tables.get(0);
+                    onLeaves[0] = helper.getBlockState(placedAt[0].below()).is(BlockTags.LEAVES);
+                }
+            }
+            GoalResult result = rig.runtime().lastResult();
+            if (result == null) return;
+            helper.assertTrue(result.status() == GoalResult.Status.SATISFIED, "the goal ended " + BotSpeech.result(result));
+            helper.assertTrue(rig.count(Items.WOODEN_PICKAXE) == 1, "no wooden pickaxe in the inventory");
+            helper.assertTrue(placedAt[0] != null && onLeaves[0], "the table did not stand on leaves: " + placedAt[0]);
+            helper.assertTrue(rig.count(Items.CRAFTING_TABLE) == 1, "the table is not back in the inventory: " + rig.count(Items.CRAFTING_TABLE));
+            helper.assertTrue(rig.tablesInArena().isEmpty(), "a crafting table was left standing at " + rig.tablesInArena());
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * The body is in a shaft cut in solid stone, thicker than the search is wide (narrowed to three blocks for this
+     * body; the real one is twelve): nowhere to put a table and nowhere to stand beside one. The craft fails, the goal
+     * ends at once with the failure, and nothing is lost. A replan cannot change this answer, so the executor must not
+     * be given a failure it answers with the same plan again.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 300)
+    public static void aCraftWithNowhereForItsTableGivesUpAtOnce(GameTestHelper helper) {
+        for (int x = 3; x <= 13; x++) {
+            for (int y = 3; y <= 13; y++) {
+                for (int z = 3; z <= 13; z++) helper.setBlock(x, y, z, Blocks.STONE);
+            }
+        }
+        helper.setBlock(8, 8, 8, Blocks.AIR);
+        helper.setBlock(8, 9, 8, Blocks.AIR);
+        Rig rig = Rig.spawnAt(helper, "shaft", 300, new Vec3(8.5, 8.0, 8.5));
+        TableSites.setRadius(rig.id(), 3);
+        giveThePickaxeMaterials(rig);
+        rig.runtime().submit(new Goal.HaveItem(ItemKey.of("wooden_pickaxe"), 1));
+        int[] ticks = {0};
+        int[] mostReplans = {0};
+        rig.onEachTick(() -> {
+            ticks[0]++;
+            mostReplans[0] = Math.max(mostReplans[0], rig.runtime().view().totalReplans());
+            GoalResult result = rig.runtime().lastResult();
+            if (result == null) return;
+            helper.assertTrue(ticks[0] <= 100, "the goal took " + ticks[0] + " ticks to end");
+            helper.assertTrue(result.status() == GoalResult.Status.FAILED, "the goal ended " + BotSpeech.result(result));
+            helper.assertTrue(result.failure() instanceof Failure.Internal none && none.exception() == null
+                    && none.detail().contains("within 3 blocks"),
+                "the failure does not say how far the task looked: " + result.failure());
+            helper.assertTrue(mostReplans[0] == 0, "the executor answered the failure with " + mostReplans[0] + " replans");
+            helper.assertTrue(rig.count(Items.OAK_PLANKS) == 3 && rig.count(Items.STICK) == 2 && rig.count(Items.CRAFTING_TABLE) == 1,
+                "something was lost: planks " + rig.count(Items.OAK_PLANKS) + ", sticks " + rig.count(Items.STICK) + ", tables "
+                    + rig.count(Items.CRAFTING_TABLE));
+            helper.assertTrue(rig.tablesInArena().isEmpty(), "a crafting table was put down at " + rig.tablesInArena());
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * Four planks come out of one log, and the inventory has room for two of them: 34 slots of unstackable tools, 62 planks
+     * and two logs. A craft takes its result whole or not at all. Taking it partly would count the craft as made, use up
+     * its log, and leave the other two planks lying at the feet of a body with no room to pick them up.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
+    public static void aResultThatDoesNotFitIsNotTakenAtAll(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawn(helper, "room", null, 100);
+        Inventory inventory = rig.body().getInventory();
+        for (int slot = 0; slot < 34; slot++) inventory.setItem(slot, new ItemStack(Items.STONE_PICKAXE));
+        inventory.setItem(34, new ItemStack(Items.OAK_PLANKS, 62));
+        inventory.setItem(35, new ItemStack(Items.OAK_LOG, 2));
+        TaskRun run = new TaskRun(craftTask("minecraft:oak_planks", 1, "", new Goal.HaveItem(ItemKey.of("oak_planks"), 66)));
+        rig.onEachTick(() -> {
+            if (!run.tick(rig.body())) return;
+            int onTheFloor = itemsOnTheFloor(helper, rig.body(), Items.OAK_PLANKS);
+            String state = "planks " + rig.count(Items.OAK_PLANKS) + ", logs " + rig.count(Items.OAK_LOG) + ", on the floor " + onTheFloor;
+            helper.assertTrue(run.failure() instanceof Failure.NoProgress, "the craft ended " + run.result + " (" + state + ")");
+            helper.assertTrue(rig.count(Items.OAK_PLANKS) == 62 && rig.count(Items.OAK_LOG) == 2 && onTheFloor == 0, "an item moved: " + state);
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * A table the body put down is gone when it comes to use it (someone broke it in the tick between): the body's memory
+     * of having placed one there goes too, instead of staying for ever. The craft fails, since the only table was the one
+     * put down.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
+    public static void aRememberedTableThatIsGoneIsForgotten(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawn(helper, "gone", null, 100);
+        giveThePickaxeMaterials(rig);
+        TaskRun run = new TaskRun(pickaxeTask());
+        boolean[] removed = {false};
+        rig.onEachTick(() -> {
+            if (!removed[0]) {
+                List<BlockPos> tables = rig.tablesInArena();
+                if (!tables.isEmpty()) {
+                    helper.assertTrue(BotMemory.of(rig.id()).placedCount() == 1, "the body does not remember placing the table");
+                    helper.setBlock(tables.get(0), Blocks.AIR);
+                    removed[0] = true;
+                }
+            }
+            if (!run.tick(rig.body())) return;
+            helper.assertTrue(removed[0], "no table was ever put down, so nothing was tested");
+            helper.assertTrue(run.failure() instanceof Failure.MissingInput, "the craft ended " + run.result);
+            helper.assertTrue(BotMemory.of(rig.id()).placedCount() == 0, "the body still remembers a table that is gone: " + BotMemory.of(rig.id()));
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * The body may not break the table it put down (a claim arrived while the craft was made). The craft is what the goal
+     * asked for, so it still succeeds; the table stays where it is and stays the body's, so that the tidy step or the next
+     * craft takes it up.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 200)
+    public static void aRefusedTableBreakStillCompletesTheCraft(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawn(helper, "claim", null, 200);
+        giveThePickaxeMaterials(rig);
+        AABB arena = arenaBox(helper);
+        AtomicBoolean claimed = new AtomicBoolean();
+        ClaimProvider claim = (level, pos, actingFor) -> claimed.get() && arena.contains(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+        BlockSafety.registerClaimProvider(claim);
+        rig.atEnd(() -> BlockSafety.unregisterClaimProvider(claim));
+        TaskRun run = new TaskRun(pickaxeTask());
+        rig.onEachTick(() -> {
+            if (!rig.tablesInArena().isEmpty()) claimed.set(true); // from the moment the table stands
+            if (!run.tick(rig.body())) return;
+            helper.assertTrue(run.result instanceof TickResult.Completed, "the craft ended " + run.result);
+            helper.assertTrue(rig.count(Items.WOODEN_PICKAXE) == 1, "no wooden pickaxe in the inventory");
+            List<BlockPos> tables = rig.tablesInArena();
+            helper.assertTrue(tables.size() == 1, "expected the table to be left standing, found " + tables);
+            helper.assertTrue(BotMemory.of(rig.id()).isPlaced(helper.getLevel().dimension().location().toString(), helper.absolutePos(tables.get(0))),
+                "the body no longer remembers the table it left standing");
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * What is worn or held in the off hand is in use: a craft draws neither its ingredients nor its table from there, and
+     * what it finds is the same as what it counts. A table in the off hand is no table to put down, which is a missing
+     * input (a replan from the live inventory), not an internal failure; ingredients in the off hand are missing too.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
+    public static void whatIsHeldInTheOffHandIsNotDrawnFrom(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawn(helper, "offhand", null, 100);
+        rig.give(Items.OAK_PLANKS, 3);
+        rig.give(Items.STICK, 2);
+        rig.body().getInventory().setItem(Inventory.SLOT_OFFHAND, new ItemStack(Items.CRAFTING_TABLE));
+        TaskRun table = new TaskRun(pickaxeTask());
+        TaskRun planks = new TaskRun(craftTask("minecraft:stick", 1, "", new Goal.HaveItem(ItemKey.of("stick"), 6)));
+        int[] stage = {0};
+        rig.onEachTick(() -> {
+            if (stage[0] == 0) {
+                if (!table.tick(rig.body())) return;
+                helper.assertTrue(table.failure() instanceof Failure.MissingInput missing && missing.key().id().equals("minecraft:crafting_table"),
+                    "a table in the off hand: the craft ended " + table.result);
+                helper.assertTrue(rig.count(Items.CRAFTING_TABLE) == 1 && rig.tablesInArena().isEmpty(), "the off-hand table moved");
+                // Now the planks go to the off hand too (the table's craft above left them where they were).
+                Inventory inventory = rig.body().getInventory();
+                inventory.clearContent();
+                inventory.setItem(Inventory.SLOT_OFFHAND, new ItemStack(Items.OAK_PLANKS, 4));
+                stage[0] = 1;
+                return;
+            }
+            if (!planks.tick(rig.body())) return;
+            helper.assertTrue(planks.failure() instanceof Failure.MissingInput, "planks in the off hand: the craft ended " + planks.result);
+            helper.assertTrue(rig.count(Items.OAK_PLANKS) == 4 && rig.count(Items.STICK) == 0, "an off-hand item was used");
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * A craft that needs a table goes through the table's menu: the menu is open while the craft runs, which takes more than
+     * one tick, and the item is not in the inventory until the craft has been clicked through. Items written straight into
+     * the inventory could do neither.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 200)
+    public static void aCraftAtATableGoesThroughItsMenu(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawn(helper, "menu", null, 200);
+        giveThePickaxeMaterials(rig);
+        rig.runtime().submit(new Goal.HaveItem(ItemKey.of("wooden_pickaxe"), 1));
+        int[] menuTicks = {0};
+        int[] pickaxesWhenItOpened = {-1};
+        rig.onEachTick(() -> {
+            if (rig.body().containerMenu instanceof CraftingMenu) {
+                if (menuTicks[0]++ == 0) pickaxesWhenItOpened[0] = rig.count(Items.WOODEN_PICKAXE);
+            }
+            GoalResult result = rig.runtime().lastResult();
+            if (result == null) return;
+            helper.assertTrue(result.status() == GoalResult.Status.SATISFIED, "the goal ended " + BotSpeech.result(result));
+            helper.assertTrue(menuTicks[0] >= 2, "the crafting menu was open for " + menuTicks[0] + " ticks: nothing was clicked through it");
+            helper.assertTrue(pickaxesWhenItOpened[0] == 0, "the pickaxe was already in the inventory when the menu opened");
+            helper.assertTrue(rig.count(Items.WOODEN_PICKAXE) == 1, "no wooden pickaxe in the inventory");
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * A goal typed while the reflex layer holds the body is queued and has not started, and the body is still wanted: it
+     * must be there when the hold lifts, so it stays loaded.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 200)
+    public static void aQueuedGoalKeepsTheBodyLoaded(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawn(helper, "queued", null, 200);
+        rig.give(Items.OAK_LOG, 1);
+        ReflexSource before = ReflexSources.current();
+        boolean[] held = {true};
+        ReflexSources.set(body -> body.getUUID().equals(rig.id()) && held[0] ? new ReflexHold(true, "a test") : before.holdFor(body));
+        rig.atEnd(() -> ReflexSources.set(before));
+        int[] tick = {0};
+        boolean[] queued = {false};
+        rig.onEachTick(() -> {
+            if (!queued[0]) {
+                if (++tick[0] < 3) return; // the executor has been ticked, so it knows the body is held
+                helper.assertTrue(!rig.runtime().wantsToStayLoaded(), "an idle body wants to stay loaded");
+                rig.runtime().submit(new Goal.HaveItem(ItemKey.of("oak_planks"), 4));
+                helper.assertTrue(!rig.runtime().hasGoal(), "a goal started while the reflex layer held the body");
+                helper.assertTrue(rig.runtime().wantsToStayLoaded(), "a goal that is queued and not started does not keep the body loaded");
+                held[0] = false;
+                queued[0] = true;
+                return;
+            }
+            GoalResult result = rig.runtime().lastResult();
+            if (result == null) return;
+            helper.assertTrue(result.status() == GoalResult.Status.SATISFIED, "the goal ended " + BotSpeech.result(result));
+            rig.pass();
+        });
+    }
+
+    /**
+     * What the real planner writes for a craft is what the craft follows. A pickaxe's slots matter (planks in the top row,
+     * sticks below) and the stock holds two kinds of planks. The layout the planner wrote names the items in the recipe's
+     * slot order; the runtime crafts with exactly those, and a task given the same leaf with a stock that cannot supply
+     * them fails instead of choosing again (a layout is followed, never re-decided).
+     *
+     * <p>Run on the code before this change this passes too: the layout format and the slot order of the planner and of
+     * the task agree. What it pins is that they keep agreeing.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 300)
+    public static void aCraftFollowsTheLayoutThePlannerWrote(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawn(helper, "planned", null, 300);
+        rig.give(Items.SPRUCE_PLANKS, 3);
+        rig.give(Items.OAK_PLANKS, 3);
+        rig.give(Items.STICK, 2);
+        rig.give(Items.CRAFTING_TABLE, 1);
+        Goal goal = new Goal.HaveItem(ItemKey.of("wooden_pickaxe"), 1);
+        NodeSpec leaf = plannedCraft(rig, goal, "minecraft:wooden_pickaxe");
+        String text = leaf.params().get("layout");
+        helper.assertTrue(text != null && !text.isBlank(), "the planner wrote no layout for the pickaxe: " + leaf.params());
+        List<CraftLayout.Run> runs = CraftLayout.decode(text);
+        helper.assertTrue(runs.size() == 1 && runs.get(0).crafts() == 1, "the layout is not one craft: " + text);
+        List<ItemKey> items = runs.get(0).items();
+        helper.assertTrue(items.size() == 5, "the layout names " + items.size() + " items for the pickaxe's five slots: " + text);
+        for (int slot = 0; slot < 3; slot++) {
+            helper.assertTrue(items.get(slot).id().endsWith("_planks"), "slot " + slot + " (the top row) is " + items.get(slot).id());
+        }
+        helper.assertTrue(items.get(3).id().equals("minecraft:stick") && items.get(4).id().equals("minecraft:stick"),
+            "the slots below the top row are " + items.get(3).id() + " and " + items.get(4).id());
+        int plannedOak = (int) items.stream().filter(item -> item.id().equals("minecraft:oak_planks")).count();
+        int plannedSpruce = 3 - plannedOak;
+
+        rig.runtime().submit(goal);
+        int[] stage = {0};
+        TaskRun again = new TaskRun(TaskRegistry.create(leaf, Map.of()));
+        rig.onEachTick(() -> {
+            if (stage[0] == 0) {
+                GoalResult result = rig.runtime().lastResult();
+                if (result == null) return;
+                helper.assertTrue(result.status() == GoalResult.Status.SATISFIED, "the goal ended " + BotSpeech.result(result));
+                helper.assertTrue(rig.count(Items.WOODEN_PICKAXE) == 1, "no wooden pickaxe in the inventory");
+                helper.assertTrue(rig.count(Items.OAK_PLANKS) == 3 - plannedOak && rig.count(Items.SPRUCE_PLANKS) == 3 - plannedSpruce,
+                    "the layout used " + plannedOak + " oak and " + plannedSpruce + " spruce planks, the craft left "
+                        + rig.count(Items.OAK_PLANKS) + " oak and " + rig.count(Items.SPRUCE_PLANKS) + " spruce");
+                // The same leaf again, with only the kind of planks the layout did not name: any plank would do for the
+                // recipe, so a task that chose for itself would make the pickaxe.
+                Inventory inventory = rig.body().getInventory();
+                inventory.clearContent();
+                inventory.add(new ItemStack(plannedOak == 3 ? Items.SPRUCE_PLANKS : Items.OAK_PLANKS, 3));
+                inventory.add(new ItemStack(Items.STICK, 2));
+                inventory.add(new ItemStack(Items.CRAFTING_TABLE, 1));
+                stage[0] = 1;
+                return;
+            }
+            if (!again.tick(rig.body())) return;
+            helper.assertTrue(again.failure() instanceof Failure.MissingInput, "the task chose for itself instead of following the layout: "
+                + again.result + ", pickaxes " + rig.count(Items.WOODEN_PICKAXE));
+            helper.assertTrue(rig.count(Items.WOODEN_PICKAXE) == 0, "a pickaxe was made from planks the layout did not name");
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /** The craft leaf for a recipe in the plan the real planner makes for the goal from what the body carries now. */
+    private static NodeSpec plannedCraft(Rig rig, Goal goal, String recipe) {
+        SolverPlanner planner = new SolverPlanner(RecipeBooks.current(), AcquisitionIndexes.current(), PlannerConfig.defaults(), List.of());
+        PlanOutcome outcome = planner.plan(new PlanRequest(goal, SnapshotCollector.collect(rig.body()), Exclusions.NONE,
+            Profile.STRICT_SURVIVAL, Map.of()));
+        if (!(outcome instanceof PlanOutcome.Planned planned)) throw new IllegalStateException("the planner made no plan for " + goal + ": " + outcome);
+        NodeSpec found = craftOf(planned.plan().roots(), recipe);
+        if (found == null) throw new IllegalStateException("the plan for " + goal + " has no craft of " + recipe + ": " + planned.plan().roots());
+        return found;
+    }
+
+    private static NodeSpec craftOf(List<NodeSpec> nodes, String recipe) {
+        for (NodeSpec node : nodes) {
+            if (node.isLeaf() && recipe.equals(node.params().get("recipe"))) return node;
+            NodeSpec inside = craftOf(node.children(), recipe);
+            if (inside != null) return inside;
+        }
+        return null;
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -412,8 +840,12 @@ public final class BotRuntimeGameTests {
             stage[0] = 1;
             Feedback status = new Feedback();
             helper.assertTrue(run(server, rig.ownerSource(status), "aiplayer status " + rig.name()) == 1, "status failed: " + status.messages);
-            helper.assertTrue(status.contains("get 1 wooden pickaxe") && status.contains("Step "),
-                "status does not say which goal and which step: " + status.messages);
+            // What status reports is the executor's view: the goal, and a step of the plan still to do.
+            ExecutorView view = rig.runtime().view();
+            helper.assertTrue(!status.messages.isEmpty(), "status answered nothing");
+            helper.assertTrue(isHaveItem(view.goal(), "minecraft:wooden_pickaxe", 1), "the executor's goal is " + view.goal());
+            helper.assertTrue(view.nodes().stream().anyMatch(node -> node.taskKind() != null && node.state() != NodeState.SATISFIED),
+                "the executor shows no step still to do: " + view.nodes());
 
             Feedback pause = new Feedback();
             run(server, rig.ownerSource(pause), "aiplayer pause " + rig.name());
@@ -425,13 +857,15 @@ public final class BotRuntimeGameTests {
             helper.assertTrue(run(server, rig.ownerSource(cancel), "aiplayer cancel " + rig.name()) == 1, "cancel failed: " + cancel.messages);
             GoalResult result = rig.runtime().lastResult();
             helper.assertTrue(result != null && result.status() == GoalResult.Status.CANCELLED, "the goal did not end CANCELLED: " + result);
-            helper.assertTrue(cancel.contains("Cancelled"), "the cancel was not told to its source: " + cancel.messages);
+            helper.assertTrue(!cancel.messages.isEmpty(), "the cancel was not told to its source");
             helper.assertTrue(!rig.runtime().hasGoal(), "a cancelled goal is still active");
             rig.assertHandsEmpty();
 
             Feedback idle = new Feedback();
             run(server, rig.ownerSource(idle), "aiplayer status " + rig.name());
-            helper.assertTrue(idle.contains("Idle"), "an idle bot says " + idle.messages);
+            helper.assertTrue(!idle.messages.isEmpty(), "an idle bot answered a status with nothing");
+            helper.assertTrue(rig.runtime().view().goal() == null && rig.runtime().view().status() == null,
+                "the executor of an idle bot shows " + rig.runtime().view().goal() + " " + rig.runtime().view().status());
 
             Feedback stranger = new Feedback();
             helper.assertTrue(run(server, rig.strangerSource(stranger), "aiplayer goal " + rig.name() + " make 4 planks") == 0,
@@ -502,6 +936,49 @@ public final class BotRuntimeGameTests {
         }
     }
 
+    /** The goal is to have {@code count} of the item: what a typed "make 4 stick" becomes. */
+    private static boolean isHaveItem(Goal goal, String id, int count) {
+        return goal instanceof Goal.HaveItem have && have.key().id().equals(id) && have.count() == count;
+    }
+
+    /** This test's arena as an absolute box. */
+    private static AABB arenaBox(GameTestHelper helper) {
+        BlockPos corner = helper.absolutePos(BlockPos.ZERO);
+        return new AABB(corner.getX(), corner.getY(), corner.getZ(), corner.getX() + 16, corner.getY() + 16, corner.getZ() + 16);
+    }
+
+    /** How many of the item lie on the ground as item entities within four blocks of the body. */
+    private static int itemsOnTheFloor(GameTestHelper helper, BotPlayer body, Item item) {
+        int total = 0;
+        for (ItemEntity drop : helper.getLevel().getEntitiesOfClass(ItemEntity.class, body.getBoundingBox().inflate(4.0),
+            candidate -> !candidate.isRemoved() && candidate.getItem().is(item))) {
+            total += drop.getItem().getCount();
+        }
+        return total;
+    }
+
+    /** One task ticked the way the executor ticks it, keeping how it ended. */
+    private static final class TaskRun {
+        private final Task<BotPlayer> task;
+        TickResult result;
+
+        TaskRun(Task<BotPlayer> task) {
+            this.task = task;
+        }
+
+        /** One tick of the task, starting it first; true once it has ended. */
+        boolean tick(BotPlayer body) {
+            if (result != null && !(result instanceof TickResult.Running)) return true;
+            if (task.state() == TaskState.PENDING) task.start(body);
+            result = task.tick(body);
+            return !(result instanceof TickResult.Running);
+        }
+
+        Failure failure() {
+            return result instanceof TickResult.Failed failed ? failed.failure() : null;
+        }
+    }
+
     /** A chat line as the client sends it: through the packet handler, which fires the loader's chat event. */
     private static void say(BotPlayer speaker, String line) {
         speaker.connection.handleChat(new ServerboundChatPacket(line, Instant.now(), 0L, null, new LastSeenMessages.Update(0, new BitSet())));
@@ -546,6 +1023,7 @@ public final class BotRuntimeGameTests {
         private final GameProfile owner;
         private final ServerPlayer ownerPlayer;
         private final List<Rig> companions = new ArrayList<>();
+        private final List<Runnable> endings = new ArrayList<>();
 
         private Rig(GameTestHelper helper, String tag, GameProfile owner, ServerPlayer ownerPlayer) {
             this.helper = helper;
@@ -560,6 +1038,14 @@ public final class BotRuntimeGameTests {
         static Rig spawn(GameTestHelper helper, String tag, GameProfile owner, int deadlineTicks) {
             Rig rig = new Rig(helper, tag, owner, null);
             rig.respawn(helper.absoluteVec(new Vec3(8.5, FLOOR_TOP, 8.5)));
+            helper.runAtTickTime(deadlineTicks, rig::cleanup);
+            return rig;
+        }
+
+        /** A body with no owner, at a place of the arena's own coordinates instead of on its floor. */
+        static Rig spawnAt(GameTestHelper helper, String tag, int deadlineTicks, Vec3 relative) {
+            Rig rig = new Rig(helper, tag, null, null);
+            rig.respawn(helper.absoluteVec(relative));
             helper.runAtTickTime(deadlineTicks, rig::cleanup);
             return rig;
         }
@@ -705,12 +1191,20 @@ public final class BotRuntimeGameTests {
             companions.add(other);
         }
 
+        /** Something to undo when the test ends, passed or not (a global the test set). */
+        void atEnd(Runnable undo) {
+            endings.add(undo);
+        }
+
         void pass() {
             cleanup();
             helper.succeed();
         }
 
         void cleanup() {
+            for (Runnable undo : endings) undo.run();
+            endings.clear();
+            TableSites.clearRadius(id);
             for (Rig companion : companions) companion.cleanup();
             BotPlayer current = manager.get(id);
             if (current != null) manager.despawn(current);

@@ -11,6 +11,7 @@ import com.legoj15.megablockbot.core.exec.PlanTicket;
 import com.legoj15.megablockbot.core.exec.ReflexHold;
 import com.legoj15.megablockbot.core.goal.Goal;
 import com.legoj15.megablockbot.core.goal.Postconditions;
+import com.legoj15.megablockbot.core.plan.NodeIdentity;
 import com.legoj15.megablockbot.core.plan.NodeSpec;
 import com.legoj15.megablockbot.core.plan.PlanRequest;
 import com.legoj15.megablockbot.core.plan.Profile;
@@ -91,6 +92,14 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     private boolean taskWasActive;
     /** Whether the reflex layer held the body in the tick being run: it runs the navigator itself then. */
     private boolean heldThisTick;
+    /**
+     * The step the body is on, by the node's identity, and the game time it began. A retry or a replan that asks for a
+     * task for the same node goes on counting, so the status says how long the body has been on the step, not on the
+     * latest attempt at it.
+     */
+    @Nullable
+    private String stepIdentity;
+    private long stepStartedTick = -1;
 
     /** The last goal result, as a line; what a status says about an idle bot. */
     @Nullable
@@ -142,9 +151,22 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         return lastResult;
     }
 
-    /** The status paragraph: which goal, which step, what waits. */
+    /** The status paragraph: which goal, which step and how long the body has been on it, what it is doing, what waits. */
     public String statusText() {
-        return BotSpeech.status(executor.view(), lastResult == null ? null : BotSpeech.result(lastResult));
+        ExecutorView view = executor.view();
+        long onStep = -1;
+        String progress = "";
+        if (view.goal() != null && stepStartedTick >= 0 && body != null && currentTask != null
+                && (currentTask.state() == TaskState.RUNNING || currentTask.state() == TaskState.PAUSED)) {
+            onStep = body.level().getGameTime() - stepStartedTick;
+            try {
+                progress = currentTask.progress();
+            } catch (RuntimeException e) {
+                // A status is for looking at: a task that cannot describe itself says nothing, and the log says why.
+                MegaBlockBot.LOGGER.warn("A task could not say what it is doing", e);
+            }
+        }
+        return BotSpeech.status(view, lastResult == null ? null : BotSpeech.result(lastResult), onStep, progress);
     }
 
     /** True while a goal is running or paused. */
@@ -297,9 +319,10 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         executor.onRespawn();
     }
 
+    /** A goal running or paused, and also one queued that has not started (a reflex held the body when it was typed). */
     @Override
     public boolean wantsToStayLoaded() {
-        return executor.active();
+        return executor.active() || !executor.view().queue().isEmpty();
     }
 
     @Override
@@ -356,6 +379,11 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         // The registry answers a kind nobody registered with a task that fails at once, naming the kind.
         Task<BotPlayer> task = TaskRegistry.create(leaf, hints);
         currentTask = task;
+        String identity = NodeIdentity.of(leaf);
+        if (!identity.equals(stepIdentity) && body != null) {
+            stepIdentity = identity;
+            stepStartedTick = body.level().getGameTime();
+        }
         return task;
     }
 
@@ -382,6 +410,8 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     @Override
     public void publish(GoalResult result) {
         lastResult = result;
+        stepIdentity = null;
+        stepStartedTick = -1;
         // A goal that ended early (a cancel, a failure) may have left a table standing: the next tick looks.
         tidyArmed = true;
         String name = body == null ? "?" : body.getGameProfile().getName();

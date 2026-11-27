@@ -32,6 +32,7 @@ import com.legoj15.megablockbot.nav.engine.api.utils.BetterBlockPos;
 import com.legoj15.megablockbot.nav.engine.api.utils.BlockOptionalMeta;
 import com.legoj15.megablockbot.nav.engine.api.utils.BlockOptionalMetaLookup;
 import com.legoj15.megablockbot.nav.engine.api.utils.BlockUtils;
+import com.legoj15.megablockbot.nav.engine.api.utils.IMineTargetPolicy;
 import com.legoj15.megablockbot.nav.engine.api.utils.Rotation;
 import com.legoj15.megablockbot.nav.engine.api.utils.RotationUtils;
 import com.legoj15.megablockbot.nav.engine.api.utils.input.Input;
@@ -49,6 +50,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import net.minecraft.core.BlockPos;
@@ -64,8 +66,9 @@ import net.minecraft.world.level.block.state.BlockState;
 public final class MineProcess extends BaritoneProcessHelper implements IMineProcess {
    private static final int ORE_LOCATIONS_COUNT = 64;
    private BlockOptionalMetaLookup filter;
-   private List<BlockPos> knownOreLocations;
-   private List<BlockPos> blacklist;
+   // MegaBlockBot: volatile, because the search pool replaces the list while the owner reads it (knownLocations).
+   private volatile List<BlockPos> knownOreLocations;
+   private volatile List<BlockPos> blacklist;
    private Map<BlockPos, Long> anticipatedDrops;
    private BlockPos branchPoint;
    private GoalRunAway branchPointRunaway;
@@ -181,6 +184,18 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
       this.anticipatedDrops = copy;
    }
 
+   /** MegaBlockBot: the blocks the process is heading for or choosing between now, nearest first; a copy. */
+   public List<BlockPos> knownLocations() {
+      List<BlockPos> known = this.knownOreLocations;
+      return known == null ? List.of() : List.copyOf(known);
+   }
+
+   /** MegaBlockBot: the blocks the process gave up on in this command (no path to them), in the order it did; a copy. */
+   public List<BlockPos> blacklisted() {
+      List<BlockPos> list = this.blacklist;
+      return list == null ? List.of() : List.copyOf(list);
+   }
+
    @Override
    public void onLostControl() {
       this.mine(0, (BlockOptionalMetaLookup)null);
@@ -194,6 +209,17 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
    private PathingCommand updateGoal() {
       boolean legit = this.baritone.settings().legitMine.get();
       List<BlockPos> locs = this.knownOreLocations;
+      if (locs.isEmpty() && !legit) {
+         // MegaBlockBot: a block the owner's target policy holds back is not in this list, so when the blocks it preferred
+         // are gone the list is empty while the world is not. Look again now. Upstream ended the command here, which for
+         // a policy would have meant the blocks it held back were never tried.
+         this.rescan(new ArrayList<>(), new CalculationContext(this.baritone));
+         locs = this.knownOreLocations;
+         if (this.filter == null || locs.isEmpty()) {
+            return null;
+         }
+      }
+
       if (locs.isEmpty()) {
          if (!legit) {
             return null;
@@ -382,7 +408,28 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
          .filter(pos -> !blacklist.contains(pos))
          .sorted(Comparator.comparingDouble(ctx.getBaritone().getEntityContext().entity().blockPosition()::distSqr))
          .collect(Collectors.toList());
+      locs = applyTargetPolicy(ctx, locs);
       return locs.size() > max ? locs.subList(0, max) : locs;
+   }
+
+   /** MegaBlockBot: the owner's say over which of the known blocks may be headed for. A policy that throws is ignored. */
+   private static List<BlockPos> applyTargetPolicy(CalculationContext ctx, List<BlockPos> locs) {
+      if (!(ctx.getBaritone() instanceof Baritone baritone)) {
+         return locs;
+      }
+
+      IMineTargetPolicy policy = baritone.mineTargetPolicy();
+      if (policy == null) {
+         return locs;
+      }
+
+      try {
+         List<BlockPos> chosen = policy.select(List.copyOf(locs), ctx::get);
+         return chosen == null ? locs : new ArrayList<>(chosen);
+      } catch (Throwable t) {
+         NavRuntime.LOGGER.error("Mine target policy threw", t);
+         return locs;
+      }
    }
 
    public static boolean isNextToAir(CalculationContext ctx, BlockPos pos) {
@@ -422,7 +469,12 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
       } else {
          this.desiredQuantity = quantity;
          this.knownOreLocations = new ArrayList<>();
-         this.blacklist = new ArrayList<>();
+         // MegaBlockBot: read by the search pool while the server thread adds to it. A process that ends (null filter)
+         // keeps what it gave up on: it blacklists the last known block and cancels in the same tick, and its owner
+         // reads the list after that.
+         if (filter != null || this.blacklist == null) {
+            this.blacklist = new CopyOnWriteArrayList<>();
+         }
          this.branchPoint = null;
          this.branchPointRunaway = null;
          this.anticipatedDrops = new HashMap<>();

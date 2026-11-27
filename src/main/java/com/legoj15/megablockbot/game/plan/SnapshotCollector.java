@@ -42,6 +42,11 @@ import net.minecraft.world.level.block.state.BlockState;
  * Reads one body into the immutable {@link Snapshot} the planner and the postconditions work from (design 3.4). Server
  * thread only, and read-only: it never opens a container, moves an item, loads a chunk or changes any state. What the
  * world cannot say (which table the bot placed, what was in a chest it left) comes from the body's {@link BotMemory}.
+ *
+ * <p>How often it runs: the executor takes a snapshot at every node boundary (a pre-check, then the goal), at every
+ * plan request, when a plan is adopted and when a held body is released, and a command takes one to say what it sees;
+ * none while a task is running. Most of what it reads is cheap. The sight of the blocks around the body is not, so
+ * {@link BodySight} keeps its scan per body and takes a new one only when it is old or the body has moved.
  */
 public final class SnapshotCollector {
     /** How far from the body, in blocks, a station is looked for. */
@@ -86,6 +91,7 @@ public final class SnapshotCollector {
         equipment(body, builder);
         stations(level, dimension, at, memory, builder);
         containers(level, dimension, at, memory, builder);
+        BodySight.fill(level, dimension, at, memory, builder);
         addGoalFacts(body, builder);
         return builder.build();
     }

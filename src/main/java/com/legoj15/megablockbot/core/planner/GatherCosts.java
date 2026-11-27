@@ -33,6 +33,14 @@ import java.util.function.ToLongFunction;
  * shears (a drop that needs shears), and chest loot (finding structures). A trade that charges the item it sells
  * gains nothing and is unusable too.
  *
+ * <p>What the body can see (the snapshot's sight, design 4.1): once the snapshot holds any sight, a mining or
+ * harvesting source whose block is in it costs {@link PlannerConfig#sightCharge} on top, growing with the block's
+ * horizontal distance, and one whose block is not costs {@link PlannerConfig#unseenPenalty()} on top, which is more
+ * than any seen block's charge. Every source whose block is out of sight is charged alike, so a snapshot that holds
+ * none of the choices' blocks orders them as it always did. A snapshot with no sight at all adds nothing: charging
+ * only block sources would move them against kills, fishing, trades, crafts and a strategy's proposal, and today's
+ * choices would no longer be today's.
+ *
  * <p>A mining source whose required tool cannot be had at all (see {@link #toolObtainable}) costs {@code UNOBTAINABLE}:
  * the solver then never lists a craftable item as a gather through it, while the planner still tries the source last,
  * so the failure reported for an item with no other way is that source's own.
@@ -185,11 +193,13 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
         if (reasonUnusable(source) != null) return UNOBTAINABLE;
         if (source instanceof Source.MineBlock mine) {
             if (!toolObtainable(mine)) return UNOBTAINABLE;
-            // Per-unit = the breaking attempt's cost spread over the drop, plus the depth and tool-tier charges.
+            // Per-unit = the breaking attempt's cost spread over the drop, plus the depth, sight and tool-tier charges.
             // The brief reads "mineBase / yield; plus deepOre; plus toolStep per tier below the required one".
             return saturatingAdd(breakingCost(mine), config.toolStep() * tiersBelow(mine));
         }
-        if (source instanceof Source.Harvest) return ceilDiv(config.harvest(), source.yield());
+        if (source instanceof Source.Harvest harvest) {
+            return sighted(ceilDiv(config.harvest(), source.yield()), harvest.block());
+        }
         if (source instanceof Source.KillMob) return ceilDiv(config.kill(), source.yield());
         if (source instanceof Source.Fishing) return ceilDiv(config.fish(), source.yield());
         if (source instanceof Source.Trade trade) {
@@ -212,10 +222,23 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
         return costOf(source);
     }
 
-    /** The breaking attempt's cost spread over the drop, plus the depth charge of an ore. */
+    /**
+     * The breaking attempt's cost spread over the drop, plus the depth charge of an ore and what the sight says of the
+     * block. A tool the bot has to make first is charged by the caller.
+     */
     private long breakingCost(Source.MineBlock mine) {
         long cost = ceilDiv(config.mineBase(), mine.yield());
-        return mine.ore() != null ? saturatingAdd(cost, config.deepOre()) : cost;
+        return sighted(mine.ore() != null ? saturatingAdd(cost, config.deepOre()) : cost, mine.block());
+    }
+
+    /**
+     * {@code cost} plus what the snapshot's sight says of the block: nothing when the snapshot holds no sight, the
+     * distance charge when the block is in it, the unseen penalty when it is not. {@code UNOBTAINABLE} stays so.
+     */
+    private long sighted(long cost, String block) {
+        if (snapshot.nearbyBlocks().isEmpty()) return cost;
+        Integer distance = snapshot.nearbyBlocks().get(block);
+        return saturatingAdd(cost, distance == null ? config.unseenPenalty() : config.sightCharge(distance));
     }
 
     /** What one trade charges, priced at the unit cost of each item; {@code UNOBTAINABLE} when one cannot be had. */

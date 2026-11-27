@@ -25,6 +25,10 @@ import java.util.Map;
  *                    are two entries); a goal's check reads the keys it names
  * @param structures  one report per blueprint a build goal names, keyed by {@code blueprint@x,y,z}
  * @param observations extra facts a strategy declared it needs, keyed by the strategy's own key
+ * @param nearbyBlocks the sight (design 3.4): block id to the horizontal distance, in blocks, of the nearest block of
+ *                    that kind in the loaded surroundings, for the blocks the acquisition index names as a mining or
+ *                    harvesting source. A block that is absent was not seen; an empty map means no sight was taken
+ *                    (the cost model then adds nothing, so a snapshot without one plans as it always did)
  */
 public record Snapshot(
         long gameTime,
@@ -40,7 +44,8 @@ public record Snapshot(
         List<ContainerSight> containers,
         Map<ItemKey, List<StackFacts>> stackFacts,
         Map<String, StructureReport> structures,
-        Map<String, Observation> observations) {
+        Map<String, Observation> observations,
+        Map<String, Integer> nearbyBlocks) {
 
     public Snapshot {
         items = Map.copyOf(items);
@@ -51,6 +56,7 @@ public record Snapshot(
         stackFacts = Map.copyOf(stackFacts);
         structures = Map.copyOf(structures);
         observations = Map.copyOf(observations);
+        nearbyBlocks = Map.copyOf(nearbyBlocks);
     }
 
     public int count(ItemKey key) {
@@ -89,6 +95,7 @@ public record Snapshot(
         private final Map<ItemKey, List<StackFacts>> stackFacts = new HashMap<>();
         private final Map<String, StructureReport> structures = new HashMap<>();
         private final Map<String, Observation> observations = new HashMap<>();
+        private final Map<String, Integer> nearbyBlocks = new HashMap<>();
 
         public Builder gameTime(long t) { gameTime = t; return this; }
         public Builder dimension(String d) { dimension = d; return this; }
@@ -112,11 +119,17 @@ public record Snapshot(
         public Builder structure(String key, StructureReport r) { structures.put(key, r); return this; }
         public Builder observation(String key, Observation o) { observations.put(key, o); return this; }
 
+        /** Records a block kind in the sight at a horizontal distance; the nearer one is kept when called twice. */
+        public Builder nearby(String blockId, int distance) {
+            nearbyBlocks.merge(blockId, Math.max(0, distance), Math::min);
+            return this;
+        }
+
         public Snapshot build() {
             Map<ItemKey, List<StackFacts>> facts = new HashMap<>();
             stackFacts.forEach((k, v) -> facts.put(k, List.copyOf(v)));
             return new Snapshot(gameTime, dimension, pos, health, hunger, foodUnits, items, equipped, bestTools,
-                    stations, containers, facts, structures, observations);
+                    stations, containers, facts, structures, observations, nearbyBlocks);
         }
     }
 }

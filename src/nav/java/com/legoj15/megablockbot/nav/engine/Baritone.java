@@ -25,6 +25,7 @@ import com.legoj15.megablockbot.nav.engine.api.event.listener.IEventBus;
 import com.legoj15.megablockbot.nav.engine.api.process.IBaritoneProcess;
 import com.legoj15.megablockbot.nav.engine.api.utils.IBlockBreakFilter;
 import com.legoj15.megablockbot.nav.engine.api.utils.IEntityContext;
+import com.legoj15.megablockbot.nav.engine.api.utils.IMineTargetPolicy;
 import com.legoj15.megablockbot.nav.engine.behavior.Behavior;
 import com.legoj15.megablockbot.nav.engine.behavior.InventoryBehavior;
 import com.legoj15.megablockbot.nav.engine.behavior.LookBehavior;
@@ -79,6 +80,9 @@ public class Baritone implements IBaritone {
    // report why a command stopped. Volatile: path-search threads read the filter and write the failure.
    @Nullable
    private volatile IBlockBreakFilter breakFilter;
+   // MegaBlockBot: the owner's say over which known blocks a mine command may head for (null: any).
+   @Nullable
+   private volatile IMineTargetPolicy mineTargetPolicy;
    @Nullable
    private volatile String lastFailure;
    @Nullable
@@ -224,6 +228,15 @@ public class Baritone implements IBaritone {
          NavRuntime.LOGGER.error("Break filter threw at " + pos, t);
          return false;
       }
+   }
+
+   public void setMineTargetPolicy(@Nullable IMineTargetPolicy policy) {
+      this.mineTargetPolicy = policy;
+   }
+
+   @Nullable
+   public IMineTargetPolicy mineTargetPolicy() {
+      return this.mineTargetPolicy;
    }
 
    public void setLastFailure(@Nullable String reason) {

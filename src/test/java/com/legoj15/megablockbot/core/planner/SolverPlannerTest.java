@@ -78,6 +78,9 @@ final class SolverPlannerTest {
     private static final ItemKey GIZMO = ItemKey.of("gizmo");
     private static final ItemKey MOUNT_KIT = ItemKey.of("mount_kit");
     private static final ItemKey LEAD = ItemKey.of("lead");
+    private static final ItemKey SPRUCE_LOG = ItemKey.of("spruce_log");
+    private static final ItemKey SPRUCE_PLANKS = ItemKey.of("spruce_planks");
+    private static final ItemKey SHELF = ItemKey.of("shelf");
     private static final Pos CONTAINER = new Pos(16, 64, -4);
 
     // ─── The fixture: a dozen vanilla-like recipes and a small acquisition index ─────────────────
@@ -194,7 +197,8 @@ final class SolverPlannerTest {
     private static PlannerConfig dearMining(long toolStep) {
         PlannerConfig defaults = PlannerConfig.defaults();
         return new PlannerConfig(1000, defaults.deepOre(), toolStep, defaults.harvest(), defaults.kill(), defaults.fish(),
-                defaults.trade(), defaults.maxTotalReplans(), defaults.toolItems());
+                defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(), defaults.maxTotalReplans(),
+                defaults.toolItems());
     }
 
     private static Exclusions without(String... sources) {
@@ -1366,7 +1370,8 @@ final class SolverPlannerTest {
     private static PlannerConfig freeMining() {
         PlannerConfig defaults = PlannerConfig.defaults();
         return new PlannerConfig(1, defaults.deepOre(), 0, defaults.harvest(), defaults.kill(), defaults.fish(),
-                defaults.trade(), defaults.maxTotalReplans(), defaults.toolItems());
+                defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(), defaults.maxTotalReplans(),
+                defaults.toolItems());
     }
 
     @Test
@@ -1863,6 +1868,178 @@ final class SolverPlannerTest {
                 "a container the body may not take from is not read");
         assertEquals(base, instance.inputFingerprint(goal, snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of()))),
                 "an empty container adds nothing");
+    }
+
+    // ─── What the body can see (issue #27; design 3.4 Snapshot, 4.1) ─────────────────────────────
+
+    private static final String OAK_LOG_BLOCK = "minecraft:oak_log";
+    private static final String SPRUCE_LOG_BLOCK = "minecraft:spruce_log";
+
+    /** The base recipes plus a second wood: its own planks, and a shelf whose one slot takes a plank of either kind. */
+    private static SimpleRecipeBook twoWoodsBook() {
+        return bookWith(
+                recipe("planks_from_spruce_log", SPRUCE_PLANKS, 4, null, one(SPRUCE_LOG)),
+                recipe("shelf_from_plank", SHELF, 1, null, either(OAK_PLANKS, SPRUCE_PLANKS)));
+    }
+
+    /** The base index plus spruce logs, mined by hand like oak's, unless the caller gives them a source of its own. */
+    private static AcquisitionIndex.Builder twoWoodsIndex(Source spruceSource) {
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(SPRUCE_LOG).addItem(SPRUCE_PLANKS).addItem(SHELF);
+        builder.addSource(spruceSource != null ? spruceSource
+                : new Source.MineBlock("mine:minecraft:spruce_log", SPRUCE_LOG, SPRUCE_LOG_BLOCK,
+                        null, ToolTier.HAND, false, false, false, 1.0, false, null));
+        return builder;
+    }
+
+    private static SolverPlanner twoWoodsPlanner() {
+        return planner(twoWoodsBook(), twoWoodsIndex(null).build());
+    }
+
+    /** A snapshot whose sight holds exactly these blocks at these horizontal distances. */
+    private static Snapshot sighted(Map<String, Integer> nearby) {
+        Snapshot.Builder builder = Snapshot.builder().gameTime(0).dimension("minecraft:overworld").pos(new Pos(0, 64, 0));
+        nearby.forEach(builder::nearby);
+        return builder.build();
+    }
+
+    private static List<String> minedSources(Plan plan) {
+        return sources(plan).stream().filter(source -> source.startsWith("mine:")).toList();
+    }
+
+    private static List<String> craftedRecipes(Plan plan) {
+        return leaves(plan).stream().filter(leaf -> leaf.taskKind().equals("craft"))
+                .map(leaf -> leaf.params().get("recipe")).toList();
+    }
+
+    @Test
+    void theLogKindTheBodyCanSeeIsTheOneMinedAndItsPlankTheOneCrafted() {
+        // A shelf takes a plank of either wood. Nothing in the recipes says which log is at hand: without a sight
+        // the tie falls to the first listed (oak), which is the plan that walked a bot 215 blocks past other trees.
+        SolverPlanner planner = twoWoodsPlanner();
+        Goal goal = new Goal.HaveItem(SHELF, 1);
+
+        Plan blind = planned(planner, request(goal, EMPTY, Exclusions.NONE));
+        assertEquals(List.of("mine:minecraft:oak_log"), minedSources(blind), "the tie falls to oak: " + leaves(blind));
+
+        Plan spruceOnly = planned(planner, request(goal, sighted(Map.of(SPRUCE_LOG_BLOCK, 12)), Exclusions.NONE));
+        assertEquals(List.of("mine:minecraft:spruce_log"), minedSources(spruceOnly), leaves(spruceOnly).toString());
+        assertEquals(List.of("planks_from_spruce_log", "shelf_from_plank"), craftedRecipes(spruceOnly));
+        assertRunsToTheGoal(spruceOnly, twoWoodsBook(), Map.of(), Map.of(), SHELF, 1);
+
+        Plan oakOnly = planned(planner, request(goal, sighted(Map.of(OAK_LOG_BLOCK, 12)), Exclusions.NONE));
+        assertEquals(List.of("mine:minecraft:oak_log"), minedSources(oakOnly), leaves(oakOnly).toString());
+        assertEquals(List.of("planks_from_log", "shelf_from_plank"), craftedRecipes(oakOnly));
+        assertRunsToTheGoal(oakOnly, twoWoodsBook(), Map.of(), Map.of(), SHELF, 1);
+
+        // A sight that holds neither log is the plan there always was, node for node: both kinds are charged alike.
+        Plan neither = planned(planner, request(goal, sighted(Map.of("minecraft:stone", 5)), Exclusions.NONE));
+        assertEquals(blind.roots(), neither.roots());
+    }
+
+    @Test
+    void whenBothLogKindsAreSeenTheNearerOneIsMined() {
+        SolverPlanner planner = twoWoodsPlanner();
+        Goal goal = new Goal.HaveItem(SHELF, 1);
+
+        Plan nearSpruce = planned(planner, request(goal,
+                sighted(Map.of(OAK_LOG_BLOCK, 40, SPRUCE_LOG_BLOCK, 12)), Exclusions.NONE));
+        assertEquals(List.of("mine:minecraft:spruce_log"), minedSources(nearSpruce), leaves(nearSpruce).toString());
+
+        Plan nearOak = planned(planner, request(goal,
+                sighted(Map.of(OAK_LOG_BLOCK, 12, SPRUCE_LOG_BLOCK, 40)), Exclusions.NONE));
+        assertEquals(List.of("mine:minecraft:oak_log"), minedSources(nearOak), leaves(nearOak).toString());
+    }
+
+    @Test
+    void aSeenSourceThatCannotBeUsedIsStillNotChosen() {
+        // The spruce logs in sight need a netherite pickaxe, which nothing in the index or the book gives. They are
+        // the only logs in sight, and still the plan mines the oak that is not. Tool tiers cost nothing in this
+        // config, so only the source being unusable keeps the spruce from being the cheaper one.
+        Source locked = new Source.MineBlock("mine:minecraft:spruce_log", SPRUCE_LOG, SPRUCE_LOG_BLOCK,
+                ToolClass.PICKAXE, ToolTier.NETHERITE, true, false, false, 1.0, false, null);
+        AcquisitionIndex lockedIndex = twoWoodsIndex(locked).build();
+        SolverPlanner planner = new SolverPlanner(twoWoodsBook(), lockedIndex, dearMining(0), List.of());
+        Snapshot spruceSeen = sighted(Map.of(SPRUCE_LOG_BLOCK, 3));
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(SHELF, 1), spruceSeen, Exclusions.NONE));
+        assertEquals(List.of("mine:minecraft:oak_log"), minedSources(plan), leaves(plan).toString());
+        assertRunsToTheGoal(plan, twoWoodsBook(), Map.of(), Map.of(), SHELF, 1);
+
+        GatherCosts costs = new GatherCosts(twoWoodsBook(), lockedIndex, dearMining(0), Exclusions.NONE, spruceSeen);
+        assertEquals(com.legoj15.solver.CostModel.UNOBTAINABLE, costs.costOf(locked), "a seen source stays unusable");
+    }
+
+    @Test
+    void aBlockInSightCostsLessThanTheSameBlockOutOfItHoweverFarAndOnlyBlockSourcesAreCharged() {
+        Source oak = new Source.MineBlock("mine:minecraft:oak_log", OAK_LOG, OAK_LOG_BLOCK,
+                null, ToolTier.HAND, false, false, false, 1.0, false, null);
+        Source spruce = new Source.MineBlock("mine:minecraft:spruce_log", SPRUCE_LOG, SPRUCE_LOG_BLOCK,
+                null, ToolTier.HAND, false, false, false, 1.0, false, null);
+        Source wheat = new Source.Harvest("harvest:minecraft:wheat", ItemKey.of("wheat"), "minecraft:wheat", null,
+                false, 1.0, false);
+        Source spider = new Source.KillMob("kill:minecraft:spider", STRING, "minecraft:spider", true, 1.0, true);
+        AcquisitionIndex indexOf = AcquisitionIndex.builder().addSource(oak).addSource(spruce).addSource(wheat)
+                .addSource(spider).build();
+        PlannerConfig config = PlannerConfig.defaults();
+        // What the collector looks for: the blocks of the mining and harvesting sources, and no mob.
+        assertEquals(Set.of(OAK_LOG_BLOCK, SPRUCE_LOG_BLOCK, "minecraft:wheat"), indexOf.sourceBlocks());
+
+        GatherCosts blind = new GatherCosts(book(), indexOf, config, Exclusions.NONE, EMPTY);
+        // Oak a million blocks away is in sight; spruce and wheat are not.
+        GatherCosts oakOnly = new GatherCosts(book(), indexOf, config, Exclusions.NONE,
+                sighted(Map.of(OAK_LOG_BLOCK, 1_000_000)));
+        assertTrue(oakOnly.costOf(oak) < oakOnly.costOf(spruce), "a block in sight, however far, beats one out of it");
+        assertEquals(oakOnly.costOf(spruce) - blind.costOf(spruce), oakOnly.costOf(wheat) - blind.costOf(wheat),
+                "an unseen block is charged the same penalty whether it is mined or harvested");
+        assertEquals(blind.costOf(spider), oakOnly.costOf(spider), "a mob has no block to see");
+        assertEquals(config.mineBase(), blind.costOf(oak), "no sight, no charge: a log costs what it always did");
+        assertEquals(config.mineBase(), blind.costOf(spruce));
+        assertEquals(config.harvest(), blind.costOf(wheat));
+
+        // Nearer is cheaper than farther, and seen at all is cheaper than not.
+        GatherCosts near = new GatherCosts(book(), indexOf, config, Exclusions.NONE,
+                sighted(Map.of(OAK_LOG_BLOCK, 10, SPRUCE_LOG_BLOCK, 30, "minecraft:wheat", 30)));
+        assertTrue(near.costOf(oak) < near.costOf(spruce));
+        assertTrue(near.costOf(spruce) < oakOnly.costOf(spruce), "spruce seen at 30 is cheaper than spruce not seen");
+        assertTrue(near.costOf(wheat) < oakOnly.costOf(wheat), "a harvest source is charged by sight too");
+    }
+
+    @Test
+    void theFingerprintCoversWhichBlocksOfTheClosureAreSeenAndNeverHowFar() {
+        SolverPlanner instance = twoWoodsPlanner();
+        Goal shelf = new Goal.HaveItem(SHELF, 1);
+        long oakNear = instance.inputFingerprint(shelf, sighted(Map.of(OAK_LOG_BLOCK, 5)));
+        assertEquals(oakNear, instance.inputFingerprint(shelf, sighted(Map.of(OAK_LOG_BLOCK, 70))),
+                "a body that walks away from the log has not changed what the plan reads");
+        assertNotEquals(oakNear, instance.inputFingerprint(shelf, sighted(Map.of(OAK_LOG_BLOCK, 5, SPRUCE_LOG_BLOCK, 5))),
+                "a log kind that came into sight can change the choice");
+        assertNotEquals(oakNear, instance.inputFingerprint(shelf, sighted(Map.of(SPRUCE_LOG_BLOCK, 5))),
+                "a log kind that went out of sight can change the choice");
+
+        // Coal is no part of a shelf's recipe closure: seeing it or not changes nothing the plan reads.
+        assertEquals(oakNear, instance.inputFingerprint(shelf, sighted(Map.of(OAK_LOG_BLOCK, 5, "minecraft:coal_ore", 9))));
+        // ...and it is part of a coal goal's.
+        Goal coal = new Goal.HaveItem(COAL, 1);
+        assertNotEquals(instance.inputFingerprint(coal, sighted(Map.of("minecraft:coal_ore", 9, OAK_LOG_BLOCK, 9))),
+                instance.inputFingerprint(coal, sighted(Map.of(OAK_LOG_BLOCK, 9))), "coal in sight is read by a coal goal");
+    }
+
+    @Test
+    void aSightThatHoldsNothingTheGoalNeedsIsNotAnEmptySightToTheFingerprint() {
+        // A dead bush gives sticks at a cost far below crafting them, so the plan gathers it while the snapshot has no
+        // sight. Once the sight says only that coal is near, the bush is out of sight and the sticks are crafted: two
+        // different plans for two snapshots, so the plan made for one must not be adopted for the other.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addSource(new Source.Harvest("harvest:minecraft:dead_bush", STICK, "minecraft:dead_bush", null,
+                false, 100.0, false));
+        SolverPlanner planner = planner(book(), builder.build());
+        Goal sticks = new Goal.HaveItem(STICK, 4);
+        Snapshot elsewhere = sighted(Map.of("minecraft:coal_ore", 9));
+
+        assertTrue(sources(planned(planner, request(sticks, EMPTY, Exclusions.NONE))).contains("harvest:minecraft:dead_bush"));
+        assertFalse(sources(planned(planner, request(sticks, elsewhere, Exclusions.NONE))).contains("harvest:minecraft:dead_bush"));
+        assertNotEquals(planner.inputFingerprint(sticks, EMPTY), planner.inputFingerprint(sticks, elsewhere));
     }
 
     // ─── The fingerprint and determinism (item 8) ────────────────────────────────────────────────

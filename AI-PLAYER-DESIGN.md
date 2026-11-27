@@ -146,7 +146,10 @@ separate LGPL-3.0 module.** Facts checked 2026-11-24 against PlayerEngine branch
   8 blocks); on, it was faster (65) and still at the surface, but it stops the jump-holding and,
   with `ignoreBreath` on, opens underwater paths nothing keeps from drowning the body, so a body
   keeps it off. Flowing water was a wall ("no path"); a new `allowFlowingWater` setting, on for a
-  body, lets it wade a current.
+  body, lets it wade a current. `ignoreBreath` is off for a body since #27: the search then spends the
+  body's air on every move with its head under water, starts from the air it has now and refuses a
+  move that would spend more, so no path outlasts a breath. The engine also never breaks a block with
+  water directly above it or beside it (its cost is infinite, so it is never a mining target).
 - Upstream Automatone is stale (Fabric only; `main` last committed 2021-05, newest activity on
   its version branches 2022), and upstream Baritone
   steers the local client player, so neither is a better base than PlayerEngine's copy.
@@ -327,7 +330,11 @@ strategy declares (the current offers of the villager a librarian reroll is watc
 whether the body may take from it (one it placed, or one its owner named: §3.5, supply containers) and, for such a
 container out of sight, shows what the body last noted of it, marked as remembered. Collected on the server
 thread, read-only. Collecting it never changes state (AIBot's collector made capability
-decisions as a side effect).
+decisions as a side effect). It also holds the body's **sight**: for each block the acquisition index names
+as a mining or harvesting source, the horizontal distance of the nearest one in the chunks already loaded
+around the body (absent means not seen; a chunk is never loaded or generated to look). The scan is kept per body
+and renewed only when it is older than a few seconds or the body has moved a chunk, so a snapshot taken to check
+a postcondition does not pay for it.
 
 **Goal.** A sealed set of typed goals: `HaveItem(key, count, componentCheck?)`,
 `HaveToolTier(toolClass, tier)`, `Equip(slotSet)`, `Stockpile(key, count, container)`,
@@ -461,7 +468,9 @@ re-check pending nodes' postconditions, which is cheap and not a replan.
 
 Planning runs off-thread on a snapshot (§8). The **input fingerprint** is a hash of the inputs the
 planner actually read: counts of the item keys in the shortfall and its recipe closure, tool
-tiers, and known stations. Item pickups outside that set do not change it. The result is adopted
+tiers, known stations, and which of the blocks that the closure's mining and harvesting sources name are in
+the sight (seen or not, never how far, so a body that walks does not look like a changed situation). Item
+pickups outside that set do not change it. The result is adopted
 on the server thread if the input fingerprint still matches; otherwise it is re-run, at most twice
 in a row, and the third result is adopted regardless. Drift that slips through is caught by the
 per-node postcondition check before each node starts. A planner that throws is treated like a
@@ -573,6 +582,17 @@ above, these hold; the code is `core/exec`.**
   mining task has no tick clock of its own (the executor's budgets decide how long it may run). It bounds its search by
   a number of attempts and a distance explored (`MineTask.Search`), and past that fails `NO_SOURCE` saying how far it
   looked. For a block with a height range it digs to the best height first.
+- A task that moves but gets nowhere watches itself, because the executor's watchdog cannot: its signature is the body's
+  block position and inventory, so a body that keeps climbing out of a flooded cave and falling back in (the first live
+  run, issue 27: ten minutes at one mineshaft pillar) changes it every few seconds and is never stuck. A mining step
+  therefore sets blocks aside. The navigator sets one aside when the body has headed for it for 400 ticks without getting
+  a block closer or breaking anything, or when the engine finds no path to it; the task keeps the set for its life and in
+  its checkpoint (a retry does not go back), and the engine is only shown what is left. The task also watches the count held
+  and the best distance reached to a known block: 600 ticks with neither improving sets every known block aside (a
+  stalled round) and it looks elsewhere. After three stalled rounds, or when the search is spent, it fails `UNREACHABLE`
+  when it set blocks aside (blocks were known and none could be got at) and `NO_SOURCE` when it never knew of any, the
+  text saying what was tried. A block with water in or touching its cell is taken only when no dry block is known and the
+  body's air is full. The executor's budgets and watchdog are unchanged.
 - `PROTECTED` from a mining task is read from the world, not from the navigator: when the navigator finds nothing to
   mine, the loaded area around the body is searched for blocks of the kind, and when there are some and the break rules
   forbid every one the failure is `PROTECTED` at the nearest. The break rules have one home, `game.task.BreakRules`,
@@ -587,6 +607,14 @@ above, these hold; the code is `core/exec`.**
   container and item in front of the rest of the plan, and the task takes the items with the same clicks. A container
   that holds fewer than the leaf needs gives nothing (`MISSING_INPUT`, and what it held is noted so the replan counts
   the truth); an inventory with no room for it is `NO_PROGRESS`, as in the craft task.
+- A craft that needs a table puts one down where a player could (a replaceable spot and a neighbour face the eyes can see
+  and reach; no sturdy face is needed) and, when no such spot is within reach, walks to the nearest place that has one
+  (`game.task.TableSites`, 12 blocks). It draws only from the main inventory and the hotbar, and takes its result whole or
+  not at all. A table it may no longer break is left standing, remembered, and the craft still succeeds.
+- No failure kind in the table above makes the executor give up on a plan that cannot work from where the body is: all
+  but `INTERNAL` and `PREEMPT_STALLED` end in a replan, and a replan only changes the plan when the planner can see why
+  the node failed (a source to exclude, a block to avoid). A craft with nowhere to put its table fails `INTERNAL` with no
+  exception as a stand-in; a kind of its own (or a planner input for it) belongs in `core` (#27).
 
 ### 3.5 Block safety
 
@@ -699,6 +727,13 @@ is unchanged, so SprawlCrafting's behaviour without a cost model is. Two rules k
 
 A station is an item that must be in stock while its step runs and is not consumed. The bot keeps
 its crafting table as an inventory item: it places it, uses it and picks it up again (§4.2).
+
+What the body can see is a third input to the cost model (the sight, §3.4). A mining or harvesting source whose
+block is in the snapshot's sight costs its usual price plus a small charge that grows with the block's horizontal
+distance; one whose block is not costs it plus a penalty larger than any seen charge (both are `PlannerConfig`
+numbers). It only reorders, as every cost does: it is what lets a slot that takes any plank use the wood that
+stands nearby instead of the one listed first, and a source that was unusable stays so. A snapshot with no sight
+at all adds nothing, so a plan made without one is the plan it always was.
 
 ### 4.2 Producer adapters
 

@@ -18,7 +18,11 @@ import net.minecraft.world.item.ItemStack;
  * never leaves anything on the cursor or in a grid, on any exit.
  */
 final class MenuHand {
-    /** The slots of {@link Inventory#items}: hotbar and main storage, not armor or the off hand. */
+    /**
+     * The slots of {@link Inventory#items}: hotbar and main storage, not armor or the off hand. These are the slots a
+     * craft draws from and puts its result into: what is worn or held in the off hand is in use. Every count a craft
+     * makes goes through {@link #carriedCount}, so what it counts and what it can find are the same stacks.
+     */
     static final int CARRIED_SLOTS = 36;
 
     private final BotPlayer body;
@@ -28,6 +32,32 @@ final class MenuHand {
     MenuHand(BotPlayer body, AbstractContainerMenu menu) {
         this.body = body;
         this.menu = menu;
+    }
+
+    /** How many of {@code item} the body carries in {@link #CARRIED_SLOTS}; worn and off-hand stacks do not count. */
+    static int carriedCount(BotPlayer body, Item item) {
+        int total = 0;
+        for (int i = 0; i < CARRIED_SLOTS; i++) {
+            ItemStack stack = body.getInventory().getItem(i);
+            if (stack.is(item)) total += stack.getCount();
+        }
+        return total;
+    }
+
+    /**
+     * How many of {@code stack} carried storage can take: what the stacks of the same item have room for, and a whole
+     * stack for each empty slot. What a shift click into the inventory would move, which is how a result leaves its slot.
+     */
+    static int roomFor(BotPlayer body, ItemStack stack) {
+        Inventory inventory = body.getInventory();
+        int most = Math.min(inventory.getMaxStackSize(), stack.getMaxStackSize());
+        int room = 0;
+        for (int i = 0; i < CARRIED_SLOTS; i++) {
+            ItemStack held = inventory.getItem(i);
+            if (held.isEmpty()) room += most;
+            else if (ItemStack.isSameItemSameComponents(held, stack)) room += Math.max(0, most - held.getCount());
+        }
+        return room;
     }
 
     /** The menu slot that shows the body's inventory slot, or -1 when this menu does not show it. */

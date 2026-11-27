@@ -5,6 +5,7 @@ import com.legoj15.megablockbot.nav.NavRuntime;
 import com.legoj15.megablockbot.nav.engine.Baritone;
 import com.legoj15.megablockbot.nav.engine.api.IBaritone;
 import com.legoj15.megablockbot.nav.engine.api.Settings;
+import com.legoj15.megablockbot.nav.engine.api.pathing.calc.IPath;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.Goal;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.GoalBlock;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.GoalNear;
@@ -12,7 +13,10 @@ import com.legoj15.megablockbot.nav.engine.api.pathing.goals.GoalXZ;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.GoalYLevel;
 import com.legoj15.megablockbot.nav.engine.api.selection.ISelectionManager;
 import com.legoj15.megablockbot.nav.engine.api.utils.IInteractionController;
+import com.legoj15.megablockbot.nav.engine.api.utils.IMineTargetPolicy;
 import com.legoj15.megablockbot.nav.engine.behavior.PathingBehavior;
+import com.legoj15.megablockbot.nav.engine.pathing.path.PathExecutor;
+import com.legoj15.megablockbot.nav.engine.process.MineProcess;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -22,11 +26,14 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.Clearable;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.Item;
@@ -36,6 +43,8 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
 
 /**
  * What tasks and reflexes call to move a body (design 2.2): one per body, plain commands, a state to poll. It owns
@@ -79,6 +88,22 @@ public final class BotNavigator {
 
     /** Ticks a go-to may go without getting closer to its goal before it is failed as stuck. */
     static final int STALL_TICKS = 1200;
+    /**
+     * Ticks a mine command may head for one block without getting a block closer to it, or breaking anything, before
+     * that block is set aside. Twenty seconds: about 85 blocks of walking, more than a detour around an obstacle costs,
+     * and far longer than a break of anything the planner sends a body to.
+     */
+    public static final int TARGET_STALL_TICKS = 400;
+    /**
+     * Ticks a mine command waits for the body's air to fill again when the only blocks it knows are ones it would take
+     * standing in or under water. A body out of the water has it back in under a second; one that is not out of it will
+     * not get it back by waiting.
+     */
+    static final int AIR_WAIT_TICKS = 200;
+    /** Ticks between a scan that found nothing and the second look (see {@link #lookAgain}). */
+    static final int LOOK_AGAIN_TICKS = 10;
+    /** Getting this much closer to a block, in blocks, counts as progress; less is the body swaying about. */
+    private static final double CLOSER_BY = 1.0;
     /** Path cost per point of fall damage: about one second of walking per half heart, so a long fall is a last resort. */
     private static final double FALL_DAMAGE_PENALTY = 20.0;
 
@@ -103,6 +128,25 @@ public final class BotNavigator {
     private Goal goal;
     private int mineTarget;
     private Set<Item> mineItems = Set.of();
+    private List<Block> mineBlocks = List.of();
+    /** Blocks the running mine command will not head for: the caller's set, read from search threads too. */
+    private volatile Set<BlockPos> setAside = Set.of();
+    private int targetStallTicks = TARGET_STALL_TICKS;
+    private final Map<BlockPos, TargetWatch> watches = new HashMap<>();
+    @Nullable
+    private BlockPos focus;
+    private int seenBroken;
+    private int airWaitTicks;
+    /** The engine gave up on exactly one block in this command and the command was started again once for it. */
+    private boolean retriedGiveUp;
+    /** How many times the engine, finding nothing, was asked again in this command, and the ticks waited for the next. */
+    private int looksAgain;
+    private int lookAgainTicks;
+    /** Set by the target policy: blocks that are known but only taken under water are held back until the air is full. */
+    private volatile boolean airWithheld;
+    /** Set by the target policy once it lets a block under water through, so that the air falling on the way does not stop it. */
+    private volatile boolean wetCommitted;
+    private final IMineTargetPolicy targetPolicy = this::selectTargets;
     private double bestHeuristic;
     private int sinceProgress;
     private boolean inputDirty;
@@ -157,13 +201,64 @@ public final class BotNavigator {
      * fails ({@link FailKind#NOTHING_TO_MINE}) when the engine runs out of blocks it knows and can reach first.
      */
     public void mine(Collection<Block> blocks, Collection<Item> wanted, int count) {
+        mine(blocks, wanted, count, ConcurrentHashMap.newKeySet(), TARGET_STALL_TICKS);
+    }
+
+    /**
+     * As {@link #mine(Collection, Collection, int)}, with the blocks to leave alone kept by the caller, so that a
+     * later command (the caller starts one after exploring, say) does not go back to what this one gave up on.
+     *
+     * <p>A block the command has headed for, without getting a block closer to it or breaking anything, for
+     * {@code stallTicks} ticks is added to {@code setAside}, and so is one the engine found no path to; the engine
+     * goes on to the next block it knows. When every block it knows is set aside the command fails
+     * ({@link FailKind#NOTHING_TO_MINE}), as it does when it knows none. Blocks the body would have to stand in or
+     * under water to break are taken only when no other is known, and not while the body's air is below full.
+     *
+     * @param setAside blocks to leave alone, filled by the navigator and the caller; must be safe to read from the
+     *                 engine's search threads (a concurrent set)
+     */
+    public void mine(Collection<Block> blocks, Collection<Item> wanted, int count, Set<BlockPos> setAside, int stallTicks) {
         if (blocks.isEmpty() || wanted.isEmpty()) throw new IllegalArgumentException("mine needs blocks and wanted items");
         Baritone e = begin(Kind.MINE);
         mineItems = new LinkedHashSet<>(wanted);
+        mineBlocks = List.copyOf(blocks);
         mineTarget = countHeld() + Math.max(1, count);
+        this.setAside = Objects.requireNonNull(setAside, "setAside");
+        targetStallTicks = Math.max(1, stallTicks);
+        watches.clear();
+        seenBroken = brokenCount();
+        airWaitTicks = 0;
+        retriedGiveUp = false;
+        looksAgain = 0;
+        lookAgainTicks = 0;
+        airWithheld = false;
+        wetCommitted = false;
+        e.setMineTargetPolicy(targetPolicy);
         // The engine gets no count of its own (0 means mine until stopped): it would count a sample of the blocks'
         // drops, which is not what this command promises, and would stop early or never. tick() ends the command.
         e.getMineProcess().mine(0, blocks.toArray(Block[]::new));
+    }
+
+    /** The blocks the running mine command knows of and may head for, nearest first; empty when none runs. */
+    public List<BlockPos> knownTargets() {
+        if (kind != Kind.MINE || state != State.WORKING || engine == null) return List.of();
+        return engine.getMineProcess().knownLocations();
+    }
+
+    /** The block a running mine command is heading for, or null when it has none in mind yet. */
+    @Nullable
+    public BlockPos focusTarget() {
+        return kind == Kind.MINE && state == State.WORKING ? focus : null;
+    }
+
+    /** Distance from the body to the nearest block a running mine command may head for; NaN when it knows none. */
+    public double nearestTargetDistance() {
+        double nearest = Double.NaN;
+        for (BlockPos target : knownTargets()) {
+            double away = distanceTo(target);
+            if (Double.isNaN(nearest) || away < nearest) nearest = away;
+        }
+        return nearest;
     }
 
     /** Walks outward from {@code origin} over chunks not seen yet, at any height, until stopped. */
@@ -183,9 +278,14 @@ public final class BotNavigator {
 
     /** Cancels whatever runs and releases the body's input. The state goes back to IDLE. */
     public void stop() {
-        if (engine != null) cancelEngine(engine);
+        if (engine != null) {
+            if (kind == Kind.MINE) keepWhatTheEngineGaveUpOn(engine.getMineProcess());
+            cancelEngine(engine);
+            engine.setMineTargetPolicy(null);
+        }
         kind = null;
         goal = null;
+        focus = null;
         state = State.IDLE;
         failure = null;
         failKind = null;
@@ -289,16 +389,7 @@ public final class BotNavigator {
                     watchProgress();
                 }
             }
-            case MINE -> {
-                if (countHeld() >= mineTarget) {
-                    // The engine runs with no count of its own (see mine): the count is reached here, and the engine
-                    // is told to let go of the blocks it still had in mind.
-                    cancelEngine(engine);
-                    finish();
-                } else if (!engine.getMineProcess().isActive()) {
-                    fail(FailKind.NOTHING_TO_MINE, reason("nothing to mine in range"));
-                }
-            }
+            case MINE -> tickMine();
             case FOLLOW -> {
                 if (!engine.getFollowProcess().isActive()) fail(FailKind.TARGET_GONE, reason("target gone"));
             }
@@ -345,10 +436,13 @@ public final class BotNavigator {
     /** Cancels what runs, makes sure the engine is this body's own, and marks the new command as working. */
     private Baritone begin(Kind newKind) {
         Baritone e = engine();
+        if (kind == Kind.MINE) keepWhatTheEngineGaveUpOn(e.getMineProcess());
         cancelEngine(e);
         e.clearLastFailure();
+        e.setMineTargetPolicy(null);
         kind = newKind;
         goal = null;
+        focus = null;
         failure = null;
         failKind = null;
         state = State.WORKING;
@@ -407,6 +501,11 @@ public final class BotNavigator {
         // flowing-water test ends "no path", a stream is a wall.
         s.allowSwimming.set(false);
         s.allowFlowingWater.set(true);
+        // Air is the engine's own measure of how long a path may stay under water. Upstream's default ignores it, so
+        // nothing stops a path that dives from running past what the body can hold (the first live run, issue 27, ended
+        // with the body drowned in a flooded cave). Off here, a move that would spend more air than the body has is not a
+        // move, and the air it has now is where the search starts from.
+        s.ignoreBreath.set(false);
         s.randomLooking.set(0.0);
         s.randomLooking113.set(0.0);
         // Upstream keeps an explorer at height 64; exploring goes wherever the terrain lets it unless a command says
@@ -450,6 +549,200 @@ public final class BotNavigator {
         }
         avoidBreaking = List.copyOf(blocks);
         return avoidBreaking;
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Mining: blocks the body cannot get at, blocks under water
+    // ---------------------------------------------------------------------------------------------------------
+
+    private void tickMine() {
+        MineProcess process = engine.getMineProcess();
+        if (countHeld() >= mineTarget) {
+            // The engine runs with no count of its own (see mine): the count is reached here, and the engine
+            // is told to let go of the blocks it still had in mind.
+            cancelEngine(engine);
+            finish();
+            return;
+        }
+        if (!process.isActive()) {
+            if (airWithheld && waitForAir(process)) return;
+            if (lookAgain(process)) return;
+            keepWhatTheEngineGaveUpOn(process);
+            int aside = setAside.size();
+            fail(FailKind.NOTHING_TO_MINE, reason("nothing to mine in range")
+                + (aside == 0 ? "" : " (" + aside + " block" + (aside == 1 ? "" : "s") + " set aside)"));
+            return;
+        }
+        watchTargets(process);
+    }
+
+    /**
+     * What the engine gave up on (no path to it) is set aside for good, not only until the next command forgets it. Asked
+     * when a command ends or is replaced, not while it runs: the engine already leaves such a block alone for the rest of
+     * the command, and a block the owner set aside would also be hidden from its rescans.
+     */
+    private void keepWhatTheEngineGaveUpOn(MineProcess process) {
+        for (BlockPos given : process.blacklisted()) {
+            if (setAside.add(plain(given))) {
+                NavRuntime.LOGGER.debug("{}: no path to the block at {}; set aside",
+                    body.getGameProfile().getName(), given.toShortString());
+            }
+        }
+    }
+
+    /**
+     * The body is heading for the known block nearest to where its path ends (to itself when it has no path). That block
+     * is set aside once the body has gone {@link #targetStallTicks} ticks without getting a block closer to it or
+     * breaking anything.
+     */
+    private void watchTargets(MineProcess process) {
+        List<BlockPos> known = process.knownLocations();
+        watches.keySet().retainAll(known);
+        if (known.isEmpty()) {
+            focus = null;
+            return;
+        }
+        BlockPos aim = pathEnd();
+        BlockPos nearest = known.get(0);
+        for (BlockPos target : known) {
+            if (target.distSqr(aim) < nearest.distSqr(aim)) nearest = target;
+        }
+        focus = nearest;
+
+        // A block being broken is progress too: a log takes a body with bare hands three seconds, and the body does not
+        // get any closer to a block it is standing at while it works on it.
+        int broken = brokenCount();
+        boolean working = broken != seenBroken || breaking();
+        seenBroken = broken;
+        double away = distanceTo(nearest);
+        TargetWatch watch = watches.computeIfAbsent(nearest, at -> new TargetWatch(away));
+        if (working || away < watch.closest - CLOSER_BY) {
+            watch.closest = Math.min(watch.closest, away);
+            watch.ticksWithoutGain = 0;
+        } else if (++watch.ticksWithoutGain >= targetStallTicks) {
+            NavRuntime.LOGGER.info("{}: set aside the block at {}: no closer than {} blocks to it in {} ticks",
+                body.getGameProfile().getName(), nearest.toShortString(), (int) Math.ceil(watch.closest), targetStallTicks);
+            setAside.add(plain(nearest));
+            watches.remove(nearest);
+            focus = null;
+        }
+    }
+
+    /**
+     * A block position as the plain {@code BlockPos} the set holds: the engine has its own subclass, which hashes
+     * differently and would never be found again.
+     */
+    private static BlockPos plain(BlockPos pos) {
+        return pos.getClass() == BlockPos.class ? pos : new BlockPos(pos.getX(), pos.getY(), pos.getZ());
+    }
+
+    /** Where the engine's current path ends, or where the body stands when it has none. */
+    private BlockPos pathEnd() {
+        PathExecutor current = engine.getPathingBehavior().getCurrent();
+        IPath path = current == null ? null : current.getPath();
+        return path == null || path.positions().isEmpty() ? body.blockPosition() : path.getDest();
+    }
+
+    private double distanceTo(BlockPos target) {
+        return Math.sqrt(body.position().distanceToSqr(Vec3.atCenterOf(target)));
+    }
+
+    private int brokenCount() {
+        return body.getInteractionManager() instanceof BodyInteractionManager manager ? manager.blocksBroken() : 0;
+    }
+
+    /**
+     * The engine ended the command with nothing, or having given up on a single block; each is tried once more before the
+     * command fails, because neither is always the answer it looks like. A scan that finds nothing may have missed a chunk
+     * that was out of the engine's sight for a moment (the arenas of the GameTests come and go next to one another, and
+     * the scan stops at the first ring of chunks it cannot read); it is repeated after {@link #LOOK_AGAIN_TICKS}. A single
+     * give-up is often the engine blaming the wrong block: a path search already running when the targets changed fails,
+     * and whatever block is nearest then takes the blame; it is repeated at once. A block the engine gives up on twice has
+     * earned it. True while the command goes on.
+     */
+    private boolean lookAgain(MineProcess process) {
+        int gaveUp = process.blacklisted().size();
+        if (gaveUp > 1) return false;
+        if (gaveUp == 1) {
+            if (retriedGiveUp) return false;
+            retriedGiveUp = true;
+            process.mine(0, mineBlocks.toArray(Block[]::new));
+            return true;
+        }
+        if (looksAgain >= 1) return false;
+        if (++lookAgainTicks >= LOOK_AGAIN_TICKS) {
+            looksAgain++;
+            lookAgainTicks = 0;
+            process.mine(0, mineBlocks.toArray(Block[]::new));
+        }
+        return true;
+    }
+
+    /**
+     * The engine ended its command because every block it knows is one the policy holds back for want of air. The body
+     * waits for its air and then starts the engine's mine process afresh, for up to {@link #AIR_WAIT_TICKS} ticks.
+     * True while it waits.
+     */
+    private boolean waitForAir(MineProcess process) {
+        if (++airWaitTicks > AIR_WAIT_TICKS) return false;
+        if (body.getAirSupply() >= body.getMaxAirSupply()) {
+            airWithheld = false;
+            process.mine(0, mineBlocks.toArray(Block[]::new));
+        }
+        return true;
+    }
+
+    /**
+     * The mine process's choice among the blocks it knows (asked every tick and on every rescan, on any thread): none
+     * that are set aside; dry ones before any the body would take standing in or under water; and those only when the
+     * body's air is full, or when it has already started for one (the air falls on the way there).
+     */
+    private List<BlockPos> selectTargets(List<BlockPos> candidates, Function<BlockPos, BlockState> blocks) {
+        Set<BlockPos> aside = setAside;
+        List<BlockPos> open = new ArrayList<>(candidates.size());
+        List<BlockPos> dry = new ArrayList<>(candidates.size());
+        for (BlockPos candidate : candidates) {
+            if (aside.contains(plain(candidate))) continue;
+            open.add(candidate);
+            if (!wet(candidate, blocks)) dry.add(candidate);
+        }
+        if (!dry.isEmpty()) {
+            wetCommitted = false;
+            airWithheld = false;
+            return dry;
+        }
+        if (open.isEmpty()) return open;
+        if (wetCommitted || body.getAirSupply() >= body.getMaxAirSupply()) {
+            wetCommitted = true;
+            airWithheld = false;
+            return open;
+        }
+        airWithheld = true;
+        return List.of();
+    }
+
+    /**
+     * Water in the column the body works in to get at the block: its own cell and the two cells above and the two below it
+     * (the engine's mine goal puts the body's feet at the block or one or two below it, so these are the cells its feet and
+     * head can be in). The engine itself already refuses to break a block with liquid directly above it or at its sides
+     * (its cost is infinite, so such a block is never a target at all), so a block that gets this far is wet only from
+     * below or from two cells up.
+     */
+    private static boolean wet(BlockPos pos, Function<BlockPos, BlockState> blocks) {
+        for (int dy = -2; dy <= 2; dy++) {
+            if (blocks.apply(pos.above(dy)).getFluidState().is(FluidTags.WATER)) return true;
+        }
+        return false;
+    }
+
+    /** What a mine command knows about its approach to one block. */
+    private static final class TargetWatch {
+        double closest;
+        int ticksWithoutGain;
+
+        TargetWatch(double closest) {
+            this.closest = closest;
+        }
     }
 
     private void watchProgress() {

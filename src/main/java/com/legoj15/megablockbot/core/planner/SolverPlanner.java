@@ -1220,7 +1220,10 @@ public final class SolverPlanner implements Planner {
      * stations, the tools the sources it can be gathered from require, and what a trade charges) and, for a goal
      * the planner cannot see into (a build or a custom goal), of the whole inventory; and what {@code Stockpile}
      * reads (the container's known contents), {@code Equip} reads (what is worn) and a goal with a component check reads
- * (the facts of the stacks of its item that the body holds). Position, health, hunger, game
+     * (the facts of the stacks of its item that the body holds). The sight is in it only as far as it can change a choice:
+     * whether each block that a mining or harvesting source in the closure names is in the sight, never how far away it
+     * is (a body that walks must not look like one whose situation changed), and whether the sight is empty, which
+     * switches its charge off ({@link GatherCosts}). Position, health, hunger, game
      * time and the counts of items the plan never reads are not part of it, so an unrelated pickup keeps the plan
      * current. Stable across JVMs: FNV-1a over a canonical text, no {@code hashCode} (whose 32 bits collide sooner
      * than needed here).
@@ -1240,6 +1243,7 @@ public final class SolverPlanner implements Planner {
             int count = snapshot.count(item);
             if (count > 0) text.append(item.id()).append(':').append(count).append(',');
         }
+        text.append(sightText(snapshot, everything ? null : read));
         if (goal instanceof Goal.HaveItem have && have.check() != null) {
             // A checked goal is decided on the facts of the stacks held (which enchantments the book carries), which
             // the item counts above do not say.
@@ -1292,6 +1296,36 @@ public final class SolverPlanner implements Planner {
         sorted.sort(Comparator.comparingInt((ContainerSight box) -> box.pos().x())
                 .thenComparingInt(box -> box.pos().y()).thenComparingInt(box -> box.pos().z()));
         return sorted;
+    }
+
+    /**
+     * The part of the fingerprint the sight contributes. For a goal the planner can see into, one mark per block that a
+     * mining or harvesting source of an item in {@code closure} names: seen or not, never the distance. For a goal it
+     * cannot (null closure), the set of blocks in the sight. {@code none} when the sight is empty, because an empty
+     * sight adds no charge at all and a sight that holds none of these blocks charges them all. Nothing when the plan
+     * has no such block to read.
+     */
+    private String sightText(Snapshot snapshot, TreeSet<ItemKey> closure) {
+        TreeSet<String> blocks = new TreeSet<>();
+        if (closure == null) {
+            blocks.addAll(snapshot.nearbyBlocks().keySet());
+        } else {
+            for (ItemKey item : closure) {
+                for (Source source : index.sources(item)) {
+                    if (source instanceof Source.MineBlock mine) blocks.add(mine.block());
+                    else if (source instanceof Source.Harvest harvest) blocks.add(harvest.block());
+                }
+            }
+        }
+        if (closure != null && blocks.isEmpty()) return "";
+        StringBuilder text = new StringBuilder(";sight=");
+        if (snapshot.nearbyBlocks().isEmpty()) return text.append("none").toString();
+        for (String block : blocks) {
+            text.append(block);
+            if (closure != null) text.append(snapshot.nearbyBlocks().containsKey(block) ? '+' : '-');
+            text.append(',');
+        }
+        return text.toString();
     }
 
     /**

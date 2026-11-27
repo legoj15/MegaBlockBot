@@ -28,7 +28,10 @@ amendments are the contract), 4.2 and 6. Bot node only (1.21.1). Server thread t
 Where the bot's words go (`BotRuntime.say`): always the log; the owner as a system message `<Name> text` when online;
 the command being carried out gets the same line unless it came from that owner (they would read it twice). With the owner
 offline: the log and the command's feedback only. `/aiplayer status` is `BotSpeech.status`: the goal, its state, the step as
-`Step i of n: <kind> (<goal>)`, replans, queue; an idle bot repeats its last result.
+`Step i of n: <kind> (<goal>)`, then `On it for 2m 13s: <what the task says>` (how long the body has been on the
+step: `BotRuntime` notes the game time when the executor first asks for a task for that node, a retry of it keeps
+counting; the phrase is `Task.progress()`, empty by default, for a mine task "heading for a block at x y z",
+"exploring for oak_log" and how many blocks it set aside), replans, queue; an idle bot repeats its last result.
 
 ## `BotRuntime` (one per body, registered with `BotBrains.setFactory` in `BotFeature.init`)
 
@@ -38,7 +41,8 @@ offline: the log and the command's feedback only. `/aiplayer status` is `BotSpee
 - `progressSignature`: hash of block position and every inventory stack. `profile`: `STRICT_SURVIVAL`.
   `dropsRecoverable`: the death's dimension is loaded and the death is under 5 minutes (6000 ticks) of game time old.
 - `onDeath` / `onRespawn` map to the executor's (`Failure.Died` from the `DeathRecord`); `wantsToStayLoaded` is
-  `executor.active()`.
+  `executor.active()` or a goal in the queue: a goal typed while the reflex layer holds the body is queued and has not
+  started, and the body must still be there when the hold lifts (`aQueuedGoalKeepsTheBodyLoaded`).
 - `NavCommands` (`/aiplayer nav`, a dev command) replaces the body's brain with its own `DevBrain`: a body driven by it has
   no runtime (`BotRuntime.of(body)` is null and the goal commands say so).
 
@@ -92,25 +96,67 @@ Leaf params: `recipe` (the game recipe id), `times`, `station` (empty or `minecr
 - `layout` (`CraftLayouts`): runs `crafts*item,item,...` separated by `;`, one item per slot in slot order, the runs'
   crafts adding up to `times`. Followed exactly when present; a malformed layout, an item the ingredient does not accept,
   or a count that is not `times` fails with `Internal` rather than re-deciding. Without a layout each slot takes the first
-  alternative (the ingredient's own item order) the body carries.
+  alternative (the ingredient's own item order) the body carries. `SolverPlanner` writes the param (`CraftLayout.encode`,
+  `core/planner`, from the solver's `SlotLayout`: one item per non-blank cell in row-major order, the same order as
+  `cellsOf`), and the two formats agree; `aCraftFollowsTheLayoutThePlannerWrote` plans a pickaxe with the real planner,
+  reads the layout back, runs it through the runtime and then through the task with a stock that cannot supply it. On the
+  recipes looked at (pickaxe, stone pickaxe, chest boat) the planner's layout is also what "first alternative held" would
+  have chosen, so a test cannot tell the two apart by what is consumed; the second half of that test is what can.
 - A craft is: pick up a stack with a click, right-click one item into each cell that wants it, put the cursor back, check
-  the result slot offers the recipe's result, shift-click the result out, empty the grid. All through
-  `AbstractContainerMenu.clicked` (`MenuHand`), one craft every 3 ticks. The crafts still owed are worked out from the leaf's
-  goal (an absolute count), so a task started again after a restart makes only what is missing.
-- No station: the inventory's 2x2 grid (`player.inventoryMenu`, grid slots 1 to 4). Table: use one within reach
-  (`canInteractWithBlock`); otherwise put the table item on a free spot beside the body (`interactBlock`, i.e. reach and
-  `mayInteract` then `ServerPlayerGameMode.useItemOn`; spots at the body's feet level, nearest first, each checked with
-  `BlockSafety.mayBreak` so the body can pick the table up again), open it with a use, craft, close, and break it the way
-  a client does (with the hotbar slot that breaks it fastest, else one that cannot wear out, so the pickaxe just made keeps its
-  durability; `START_DESTROY_BLOCK`, per-tick progress, `STOP_DESTROY_BLOCK` at 1.0) and wait up to 100 ticks for the
-  item. The item hops about and now and then rests outside the body's pickup box (a block on each side), so from 20 ticks
-  after the break the body walks toward a table item within 4 blocks by its movement input (not navigation; reset when
-  the item is in or the task lets go). A table the body did not place is left standing; a table is the body's when this task placed it or `BotMemory`
-  says an earlier one did. The task records what it placed in `BotMemory` (and `BlockSafety.noteBotPlaced`).
+  the result slot offers the recipe's result and that carried storage has room for all of it, shift-click the result out,
+  check it all arrived, empty the grid. All through `AbstractContainerMenu.clicked` (`MenuHand`), one craft every 3 ticks.
+  The crafts still owed are worked out from the leaf's goal (an absolute count), so a task started again after a restart
+  makes only what is missing.
+- Which slots a craft uses: the main inventory and the hotbar (`MenuHand.CARRIED_SLOTS`, the 36 of `Inventory.items`), for
+  ingredients, for the table item and for the result; an item worn or held in the off hand is in use. Every count the task
+  makes is `MenuHand.carriedCount`, so what it counts is what it can find (it used to count the off hand with
+  `Inventory.countItem` and then fail to find the item). The snapshot the planner reads still counts worn and off-hand
+  stacks as stock (`SnapshotCollector`, not touched here), so a plan that leans on one ends in `MissingInput`.
+- The result is taken whole or not at all. A shift click on the result slot moves what fits, consumes the ingredients and
+  drops the rest at the body's feet (1.21.1's `quickMoveStack`: nothing is destroyed, but the old task counted the craft as
+  made, `aResultThatDoesNotFitIsNotTakenAtAll`). `MenuHand.roomFor` says what carried storage can take; short of that the
+  task fails `NoProgress` with the ingredients given back from the grid.
+- No station: the inventory's 2x2 grid (`player.inventoryMenu`, grid slots 1 to 4).
+- Table: use one within reach (`canInteractWithBlock`); otherwise put the table item down where a player could
+  (`TableSites`). A spot is usable when it is replaceable, no entity that blocks building is in it, and a neighbour that is not
+  itself replaceable has a face the eyes can see and reach (a ray from the sneaking eye, `Level.clip`, must land on that very
+  face within `blockInteractionRange`). That is all the game asks (`BlockItem.useOn`, `BlockPlaceContext`): a sturdy face is
+  not needed, so a table goes on leaves. Two things are asked beyond the game: the block below the spot has a collision
+  shape (so the table's item comes to rest beside the body when the table is broken, not down a drop) and
+  `BlockSafety.mayBreak` allows breaking it again. The click is made sneaking (`BodyInput.sneak`, one tick to take effect;
+  released a tick before the table is used), as a player builds against a chest or a door, because the click on an
+  interactive block would use it instead. `interactBlock` then does what the packet handler does (reach, `mayInteract`,
+  `ServerPlayerGameMode.useItemOn`) and the world's answer decides: the first site whose spot becomes a table is the one.
+- No usable spot within reach: the body walks, with `BotNavigator.goTo`, to the nearest place it can stand (feet and head
+  free, a full-height floor) that has a usable spot beside it, searched shell by shell outward within
+  `TableSites.DEFAULT_RADIUS` (12) blocks in every direction, and looks again from where it arrives. Up to
+  `CraftTask.WALKS_ALLOWED` (4) walks; a walk that fails (`NO_PATH`, `STUCK`) makes the next nearest place the next try.
+  `TableSites.setRadius(bodyUuid, n)` narrows the search for one body (a test builds "nowhere" in a 16-block arena that way).
+- The table is opened with a use, the craft made, the menu closed, and the table broken the way a client does (with the hotbar slot
+  that breaks it fastest, else one that cannot wear out, so the pickaxe just made keeps its durability;
+  `START_DESTROY_BLOCK`, per-tick progress, `STOP_DESTROY_BLOCK` at 1.0), then up to 100 ticks for the item. The item hops
+  about and now and then rests outside the body's pickup box (a block on each side), so from 20 ticks after the break the
+  body walks toward a table item within 4 blocks by its movement input (not navigation; reset when the item is in or the
+  task lets go). A table the body did not place is left standing; a table is the body's when this task placed it or
+  `BotMemory` says an earlier one did. The task records what it placed in `BotMemory` (and `BlockSafety.noteBotPlaced`). A
+  remembered table that is gone when the task looks for it or opens it is forgotten (`BotMemory.forgetPlaced`).
+- A break the rules refuse (`BlockSafety.mayBreak` now says no: a claim arrived while the craft ran) does not fail the craft:
+  the craft's result is what the goal asked for, so the task completes, the table stays standing and stays in `BotMemory` as
+  the body's, and the log says why (`MegaBlockBot` info line "leaves the crafting table at ... standing"). The tidy step and the
+  next craft that finds it try again. Covered by `aRefusedTableBreakStillCompletesTheCraft`.
 - Failures: `MissingInput` (an ingredient or the table item is not carried), `TargetGone` (unknown recipe id; a table that
-  would not open), `Protected` (every candidate spot is one the body may not break again), `Unreachable` (no free
-  spot, or the game would not start breaking), `NoProgress` (no room for the result), `TimedOut` (the break or the pickup).
-  A failure with a table placed leaves the table standing, remembered; the next craft that needs one finds it.
+  would not open), `Protected` (every candidate spot is one the body may not break again), `Unreachable` (the walks to a
+  place with a spot all failed, the game refused every click that would put the table down, or it would not start breaking), `NoProgress` (no room for the whole result),
+  `TimedOut` (the break or the pickup), and, with no place at all within the radius, `Internal` with no exception, whose detail
+  says how far the task looked. A failure with a table placed leaves the table standing, remembered; the next craft that needs
+  one finds it.
+- Why that last one is `Internal`. The executor's answer to `Unreachable`, `TargetGone`, `NoProgress`, `TimedOut` is one retry
+  with a fresh task and then a replan; to `MissingInput`, `MissingTool`, `NoSource`, `Protected`, `Hazard` a replan. Nothing in
+  a craft leaf, in `Exclusions` or in the snapshot tells the planner where a table fits, so every one of those replans is the
+  same plan again, and the goal ends after three of them (the live run: three replans, each failing the same way) with the
+  same failure. Only `Internal` and `PreemptStalled` give up at once, and `Internal` is the one whose meaning is nearest
+  ("this goal cannot go on"); `BotSpeech` says "gave up" for an `Internal` with no exception instead of "hit an internal
+  error". It is a stand-in. The proper fix is a failure kind (or a planner input) for "no plan can work from here", in `core`.
 
 ### A table left standing
 
@@ -120,7 +166,8 @@ the replanned goal four planks, or fails it when there are none to spare. `BotRu
 load and whenever a goal ends (`tidyArmed`): the nearest crafting table within reach that `BotMemory` says this body
 placed. Found, it runs `CraftTask.takeUp(pos)` (the craft's own break and pickup, crafting nothing) before the executor is
 ticked again, so the next plan sees the table in the inventory. A failure there is logged, not a goal's failure; the table
-stays, remembered. Covered by `BotRuntimeGameTests.aTableLeftStandingByALogoutIsTakenUp`.
+stays, remembered. A table the rules do not let the body break stays standing and remembered too (the tidy task completes,
+and looks again at the next goal's end). Covered by `BotRuntimeGameTests.aTableLeftStandingByALogoutIsTakenUp`.
 
 ## Supply containers and `withdraw`
 
@@ -173,7 +220,6 @@ the cursor back. Main hand: select the hotbar slot that holds it, or swap it in 
 - A body that dies with a table standing (or is cancelled mid-craft) takes it up after the goal ends only when it is
   still within reach; a table out of reach stays in `BotMemory` and is picked up by the next craft that finds it. A
   `retrieve`-style task for the navigation work to walk back to it does not exist.
-- The in-tree `SolverPlanner` does not write `layout` yet. The format `CraftLayouts` reads is the one in the unmerged
-  planner work (`CraftLayout` in the p12 worktree); when it lands, check the two agree.
+- Nothing yet makes the planner or the executor aware of where a table fits (see "Why that last one is `Internal`" above).
 - `LanguageLayer.explain` is not called: results are worded by `BotSpeech`.
 - No reflex source is registered; `ReflexSources.set` is where the reflex layer plugs in.
