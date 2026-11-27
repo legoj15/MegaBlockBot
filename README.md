@@ -1,5 +1,38 @@
 A Minecraft bot that can be controlled by chat, using an LLM to set tasks and respond.
 
+It is an extra player that lives on the server. Nobody has to keep a game window open for it, and the people playing
+do not need to install anything. It plays by the same rules as everyone else: it walks, digs, crafts and fights the way
+a player does, and never gets items or moves around by cheating.
+
+## What it can do today
+
+This is an early version, for Minecraft 1.21.1 with NeoForge.
+
+- Make things from nothing. Told to make a stone pickaxe, it finds trees, makes planks, sticks, a crafting table and a
+  wooden pickaxe, digs for stone, and makes the pickaxe. From a fresh start that takes about a minute.
+- Go somewhere, or come to you.
+- Look after itself: it fights or runs from monsters, eats when hungry, gets out of water before it drowns, and can
+  build a small shelter for the night.
+- Carry on after trouble. If it dies it goes back for what it dropped. If the server restarts it picks up where it was.
+- Leave your things alone. It does not break blocks that players placed, and it only opens a chest you have told it to
+  use.
+
+Not yet: cooking and smelting, trading with villagers, fishing, building from plans, and machines added by other mods.
+
+## Trying it
+
+1. `/aiplayer spawn Bot1` puts a bot called Bot1 into the world. It belongs to whoever spawned it, and only its owner
+   (or a server operator) can tell it what to do.
+2. Talk to it in chat by starting with its name: `Bot1, make 1 stone pickaxe`.
+3. `Bot1, status` tells you what it is doing. `Bot1, cancel` stops it. `Bot1, help` lists everything it understands.
+4. `Bot1, use chest at 10 64 -3` lets it take what it needs from that chest.
+
+## Building it
+
+You need Java installed. In this folder run `./gradlew buildAll` (on Windows, `gradlew.bat buildAll`). The finished mod
+is the `.jar` file in `versions/1.21.1/build/libs`. Put it in the `mods` folder of a NeoForge server for Minecraft
+1.21.1.
+
 ## Talking to the bot in your own words
 
 The bot works with no AI model at all. Out of the box it understands a short list of commands (type `help` to it in
