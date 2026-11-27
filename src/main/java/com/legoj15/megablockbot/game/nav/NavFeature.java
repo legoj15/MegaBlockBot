@@ -1,6 +1,7 @@
 package com.legoj15.megablockbot.game.nav;
 
 import com.legoj15.megablockbot.game.gametest.BotNavGameTests;
+import com.legoj15.megablockbot.game.gametest.FishGameTests;
 import com.legoj15.megablockbot.game.gametest.MoveAndMineGameTests;
 import com.legoj15.megablockbot.game.gametest.NavEngineGameTests;
 import com.legoj15.megablockbot.game.task.TaskFeature;
@@ -34,6 +35,7 @@ public final class NavFeature {
         }
 
         // GameTests: a no-op unless a GameTest run enabled them.
-        Platform.loader().registerGameTests(NavEngineGameTests.class, BotNavGameTests.class, MoveAndMineGameTests.class);
+        Platform.loader().registerGameTests(NavEngineGameTests.class, BotNavGameTests.class, MoveAndMineGameTests.class,
+                FishGameTests.class);
     }
 }

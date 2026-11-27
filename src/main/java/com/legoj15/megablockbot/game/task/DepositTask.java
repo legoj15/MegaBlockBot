@@ -19,6 +19,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.CompoundContainer;
 import net.minecraft.world.Container;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.MenuProvider;
@@ -34,7 +35,9 @@ import net.minecraft.world.phys.Vec3;
 /**
  * {@code deposit} (goal {@link Goal.Stockpile}): put items into a container as a player does. The body walks to it,
  * opens it by using the block (so the container's own rules decide whether it opens), moves the items in with clicks on
- * the menu's slots, and closes the menu.
+ * the menu's slots, and closes the menu. A menu that was already open when the task got to the container is closed
+ * first: the task works only in the menu its own use-click opened, and only while that menu is the container's own
+ * (its kind checked, and the block entity at the position where the game serves it from one).
  *
  * <p>The goal names the item, the container and its dimension; the {@code count} parameter is how many to move (the
  * goal's count is what the container should end up holding, which may include what it held already).
@@ -189,15 +192,39 @@ final class DepositTask extends BodyTask {
         }
         Verdict verdict = ContainerAccess.askAsGoalsWord(body, level, pos);
         if (!verdict.allowed()) return end(body, TickResult.failed(verdict.toFailure(pos)));
+        if (body.containerMenu != body.inventoryMenu) {
+            // A menu that was open before the task got here (a container used before this step) is not this
+            // container's, whatever it is. Without closing it first, a container whose use opens nothing (blocked,
+            // locked) would leave it in the body's hands, and the items would go into it as though it were the goal's.
+            body.closeContainer();
+        }
         BodyInteractionManager use = (BodyInteractionManager) body.getInteractionManager();
         use.interactBlock(body, level, body.getMainHandItem(), InteractionHand.MAIN_HAND, hitOn(body, pos));
-        if (body.containerMenu == body.inventoryMenu) {
+        AbstractContainerMenu menu = body.containerMenu;
+        if (menu == body.inventoryMenu || !menuOfTheContainer(body, level, pos, menu)) {
             return end(body, TickResult.failed(unreachable(containerPos.encode(), "container would not open",
-                "using the container at " + containerPos.encode() + " opened no menu (blocked, locked, or out of reach)")));
+                "using the container at " + containerPos.encode() + " opened no menu of the container's own"
+                    + " (blocked, locked, or out of reach)")));
         }
-        openMenu = body.containerMenu;
+        openMenu = menu;
         phase = Phase.TRANSFERRING;
         return TickResult.RUNNING;
+    }
+
+    /**
+     * Whether {@code menu} is the menu of the container at {@code pos}: the task works only in the menu its own
+     * use-click there opened. The game serves a container's menu slots from its block entity, so where the block
+     * entity is a container the menu must serve its container slots from it (a double chest serves them from the
+     * compound of its halves, which is why that counts as the block's own); a container the game gives no such handle
+     * for has at least to have opened a menu that is not the body's own inventory menu.
+     */
+    private static boolean menuOfTheContainer(BotPlayer body, ServerLevel level, BlockPos pos, AbstractContainerMenu menu) {
+        if (!(level.getBlockEntity(pos) instanceof Container at)) return true;
+        for (Slot slot : menu.slots) {
+            if (slot.container == body.getInventory() || !(slot.container instanceof Container served)) continue;
+            if (served == at || served instanceof CompoundContainer) return true;
+        }
+        return false;
     }
 
     /**
@@ -243,40 +270,42 @@ final class DepositTask extends BodyTask {
     /**
      * Moves up to {@code want} of the item from the body's slots into the menu's container slots, with the clicks a
      * player makes: shift-click for a whole stack, and for part of one lift the stack, set the items down one at a time
-     * with the right button, and put the rest back. Stops when the container takes no more.
+     * with the right button, and put the rest back. What a click moved is the fall in the body's carried count of the
+     * item (the count a withdraw trusts for a take), not what the click was meant to move, so a container that takes
+     * only part of a stack is credited with that part alone. Stops when the container takes no more.
      */
     private void moveItems(BotPlayer body, AbstractContainerMenu menu, int want) {
         int remaining = want;
         for (Slot source : menu.slots) {
             if (remaining <= 0) break;
             if (source.container != body.getInventory() || !source.getItem().is(item)) continue;
-            int before = source.getItem().getCount();
-            int moved;
-            if (before <= remaining) {
+            int before = body.getInventory().countItem(item);
+            if (source.getItem().getCount() <= remaining) {
                 menu.clicked(source.index, 0, ClickType.QUICK_MOVE, body);
-                moved = before - (source.getItem().is(item) ? source.getItem().getCount() : 0);
             } else {
-                moved = movePart(body, menu, source, remaining);
+                movePart(body, menu, source, remaining);
             }
+            int moved = before - body.getInventory().countItem(item);
             if (moved <= 0) break; // the container takes none of it
             remaining -= moved;
         }
     }
 
-    private int movePart(BotPlayer body, AbstractContainerMenu menu, Slot source, int want) {
+    /** Part of a stack: lift it, set the items down one at a time with the right button, and put the rest back where
+     *  it came from (which the lift emptied). What moved is the caller's to count, by what the body no longer holds. */
+    private void movePart(BotPlayer body, AbstractContainerMenu menu, Slot source, int want) {
         menu.clicked(source.index, 0, ClickType.PICKUP, body); // lift the stack
-        int moved = 0;
-        while (moved < want) {
+        int set = 0;
+        while (set < want) {
             Slot target = roomFor(body, menu, menu.getCarried());
             if (target == null) break;
             int carried = menu.getCarried().getCount();
             menu.clicked(target.index, 1, ClickType.PICKUP, body); // set one down
             if (menu.getCarried().getCount() >= carried) break; // nothing was set down
-            moved++;
+            set++;
         }
         // What is left on the cursor goes back where it came from, which the lift emptied.
         menu.clicked(source.index, 0, ClickType.PICKUP, body);
-        return moved;
     }
 
     /** A slot of the container (not the body's own) that takes one more of the carried item: a partial stack first. */

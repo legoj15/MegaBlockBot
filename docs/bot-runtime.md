@@ -76,7 +76,7 @@ returns its own `Failed`** (the executor does not abort a task that failed itsel
 `waiting()` is true while it waits on the game (a break, a pickup) so the stuck watchdog leaves it alone; `checkpoint()`
 returns hints for where to look after a restart, never facts.
 
-Registered here: `craft`, `smelt` and `equip`. `navigate`, `reach`, `mine`, `recover_drops`, `deposit` and `withdraw` are
+Registered here: `craft`, `smelt` and `equip`. `navigate`, `reach`, `mine`, `fish`, `recover_drops`, `deposit` and `withdraw` are
 registered by the navigation work (`TaskFeature`), not here.
 
 What the navigation tasks need from this runtime:
@@ -270,6 +270,112 @@ room ends the step `NoRoom` naming the item (`mineWithAFullInventoryFailsNoRoom`
 like `NoPlace`: no block is broken for a drop that would be lost, and a replan would plan the same step into the same full
 inventory.
 
+A failed exploration is `NoSource` only when it explored and found none: the navigator's own failure kind says which is
+which. An engine error ends the step `Internal` with the exception, and a body that is no longer the navigator's (replaced,
+removed, moved to another dimension) ends it `Unreachable`, the failure the reach task answers the navigator with — neither
+says anything about the source, so neither has the executor exclude one
+(`MoveAndMineGameTests.aBodyDespawnedWhileExploringDoesNotFailNoSource`).
+
+## `recover_drops`
+
+The node the executor puts in front of the new tree after a death (`RecoverDropsTask`): walk to each place the death's items
+fell and pick up what still lies there. Drops move — items roll, fall and float — so at each recorded position the task looks
+for item entities within a named radius (4 blocks) horizontally and down to a named depth (8 blocks) below it, and walks to
+each it finds at the item's own position, as a player walks over an item; a position with nothing within that radius is done
+at once. An item the body cannot get at is skipped, and so is one the pickup wait (40 ticks) ran out on; a drop that has been
+picked up or despawned is never waited for. The task never fails the goal: the node is best-effort, always completing.
+
+## `build`
+
+Leaf params: `blueprint` (its name), `dimension`, `anchor` (`x,y,z`, the min corner of the blueprint's box). The leaf's
+goal is the `Goal.Build` itself, so the executor judges it on the snapshot's structure report of it.
+
+- **Where blueprints come from** (`game.build.Blueprints`, registered by `BuildFeature.init()` from `GameBootstrap`): a
+  name is looked up first as `<config dir>/megablockbot/blueprints/<name>.nbt` (compressed structure-template NBT, read
+  with the game's own `StructureTemplate.load` over the registries, and its blocks then from the lists of the template's
+  own save form: the palettes are private and the public block filter answers for one named block only),
+  then, when the name parses as a resource location, as one of the server's structure templates. A name is a file name
+  only (no path separator, `..` or colon); at most 4096 blocks and 48 along a side, or the blueprint is refused with a
+  message saying so. This brief builds plain blocks: a blueprint holding a block no item places, a block entity, or the
+  second block of a two-block thing (the upper half of a door, the head of a bed) is refused naming the block. Loaded
+  blueprints are cached per server and dropped on a datapack reload, on stop, and when the file's modification time
+  changes. `/aiplayer blueprint save <name> <from> <to>` (permission level 2, same name and size rules) saves the blocks
+  of that box of the caller's world without entities, with the game's own `fillFromWorld` and `save`;
+  `/aiplayer blueprint list` lists the folder.
+- **The report** (`SnapshotCollector.addGoalFacts`): a snapshot taken for a goal (or a goal in its queue) that is a
+  `Goal.Build` carries a `StructureReport` under `blueprint@anchor` — `required` the blueprint's positions, `matched`
+  how many hold the blueprint's block already (the block, not every state property, so a log placed along another axis
+  counts), and `missing` the items that place the still-wrong blocks. `known` is false when any position's chunk is not
+  loaded or the goal's dimension is not the body's; an unknown blueprint name gives no report at all.
+- **The plan** (`SolverPlanner.buildPlan`): no report is unplannable (the blueprint's name is not known); a report that
+  is not known plans one `navigate` leaf to the anchor (radius 8: near enough that the footprint's chunks load), as an
+  unseen container is looked into first; a known report plans an item plan per missing item and count the body does not
+  hold (relied on, not drawn, in a fixed order — the containers the body may take from are asked for them like any
+  other item the plan relies on) and then the one `build` leaf. Nothing missing plans nothing.
+- **The task** (`BuildTask`, kind `build`, registered in `TaskFeature`, budget 36000 ticks — see `BotRuntime`): arms the
+  per-body break filter as the mine task does and starts the navigator's `build`, which hands the engine's
+  `BuilderProcess` a static schematic of the blueprint. The engine's settings for the command: `acceptableThrowawayItems`
+  emptied (so the pathing never bridges with dirt — the build places only blocks the blueprint names and only from the
+  inventory), `allowInventory` on (the hotbar is filled from the main inventory), no layers, no repeats, no orientation
+  flips, `buildIgnoreExisting` off, and the break filter narrowed to the blueprint's box for as long as the command runs
+  (the filter reads the box live, so a command that ends opens the world back up).
+- **When the builder lacks a block**, upstream pauses and says what is missing (`BuilderProcess`:
+  "Missing materials ... Unable to do it. Pausing."), which would wait for ever: the navigator fails the command the
+  moment it sees the pause, naming the block the body is short of (`MISSING_BLOCKS`, the count read from the world and
+  the inventory). The task makes that `MissingInput` naming the item and the count short — the executor replans, and the
+  planner gets what is missing from the next report. A build that cannot go on another way fails `BUILD_STUCK`.
+- **A block the rules protect** does not pause the builder (it keeps trying the same spot), so the task watches itself:
+  no placement, break, or step toward the anchor for 400 ticks ends the leaf. The end is `Protected` naming the position
+  when a wrong, non-air position inside the blueprint may not be broken by this body's rules; `Unreachable` for the
+  navigator's other failures; `NoRoom` never applies (nothing is picked up). It pauses, resumes and aborts like the mine
+  task — the builder is stopped and a resumed task starts the build again, and the builder skips what stands.
+- `progress()` says how many of the blueprint's blocks stand.
+
+## `fish`
+
+Casts a rod into water until the body holds the leaf's count of the item (`game.task.FishTask`; the source is
+`Source.Fishing`, priced by the `fish` cost). Leaf params: `item`, `count` (how many to bring in; the goal's absolute
+count wins, as for a mine leaf) and `table`, the loot table the source was read from.
+
+- **The plan gets a rod first.** A `fish` leaf needs `minecraft:fishing_rod` in the inventory, kept, not consumed (as a
+  crafting station is: relied on, never drawn — it lands in `relied`, so a rod lying in a container the body may take
+  from is withdrawn instead of crafted). `SolverPlanner.prerequisite` plans it the way it plans a mining source's tool:
+  through the ordinary item plan (three sticks and two string at a table), as a group node before the first `fish`
+  leaf, once per plan however many fish leaves it has (once one is in the working stock the next fishing source plans
+  nothing). A plan whose rod cannot be had makes the source unusable, and the item's other sources are tried as they are
+  for a mining source whose tool cannot be had; a rod whose own ingredients would have to be fished for is a cycle, and
+  the source fails that way too.
+- **Water.** A standable block with a water source 3 to 6 blocks away horizontally, at or below the body's feet and
+  with open air above it; the body stands on the bank, never in the water. Looked for in the chunks already loaded
+  within `WATER_SCAN_RADIUS` (32) of the body; none in sight, the body explores as `MineTask` does, bounded by
+  `FishTask.Search` (a `NoSource` past it, carrying the leaf's item and source id, so the executor excludes fishing).
+- **Casting.** The rod is taken into the main hand (`MenuHand`, a hotbar select or a swap), the body looks at a point on
+  the water's surface for two ticks (a look written this tick is only in the rotation from the next, and the game aims
+  the hook between the rotation and its predecessor), and the rod is used — the same `gameMode.useItem` call the body's
+  other item uses go through. The game spawns the hook; the player's `fishing` field points at it.
+- **The bite** is not public on `FishingHook` (1.21.1: the `biting` flag and the `nibble` countdown are private, and
+  `retrieve` awards the loot it is asked about, so it cannot be probed). What a player sees is the float dip, and the
+  game makes the dip: while a fish bites, the hook's bobbing state adds a downward impulse of up to 0.1 blocks per tick
+  each tick, which a settled float's bobbing never reaches. So the task watches the hook it cast, and once the hook has
+  been in water long enough for its splash to settle (`SETTLE_TICKS`), a vertical speed below `BITE_DY` is the bite:
+  the rod is used again at once, which reels in, and the catch flies to the body. A cast whose hook is gone, or comes
+  to rest out of the water, within `LAND_WAIT_TICKS` ticks is reeled in and made again at another water cell; three bad
+  casts at one stand move the body to another. A hook that caught an entity is taken up and cast again.
+- **The catch** is picked up like any item and everything caught is kept; the task is `waiting()` while a hook is in the
+  water and while a catch flies to the body, so the stuck watchdog leaves it alone. Fishing is random: a bite comes
+  after 5 to 30 seconds and the wanted item is one of many in the table, so the `fish` kind has its own task budget
+  (36000 ticks in `BotRuntime`; a salmon is a quarter of the fish, so some eighty casts cover almost every run). A full
+  inventory ends the step `NoRoom` naming the item, as the mine task's does, before the first cast and after each catch.
+- **Interruptions and exits.** On pause, abort, failure and completion the hook is reeled in (the rod used once more
+  when a hook is out) and the input is reset. A resumed task looks again from the top. `MissingInput` naming the rod
+  when none is carried (the rod is not a tool of any class the failure table knows) or when the one carried broke.
+  `NoSource` naming the leaf's item and source when no water can be found. The checkpoint holds the dimension, how far
+  the search has reached and the stand it last fished from — hints, checked against the world.
+- `FishGameTests` (registered with the navigation work's, in `NavFeature`): a catch from a pool with open sky above it
+  (open water is what gives the game's normal waiting times) and Lure III on the set-up rod (five seconds off the wait
+  per level); the missing-rod failure; `NoSource` in a sealed room; a pause while the hook is out, with no hook left
+  during it, and the catch afterwards.
+
 ## Supply containers, `look_inside` and `withdraw`
 
 The owner names the containers a body may take from (design 3.5): `use chest at <x> <y> <z>` (the position in the
@@ -371,6 +477,16 @@ the menu and closes it, and moves nothing.
   too). It lifts the container rule, never a claim, a bed or a job site: a barrel the body did not place is stocked once the
   owner has named it with `use chest at`. When the items are in it notes what the container holds, so what it put in is
   remembered and the goal can be judged.
+- `deposit` closes any menu that is open before it uses the container, and works only in the menu its own use-click opened:
+  a menu somebody left open (a container used before the step, the body's own inventory-menu state) is not the leaf's
+  container's, and a use that opens no menu must not leave the task moving items in one. The menu's kind is checked, and
+  where the game serves a container's menu slots from its block entity, that the menu is served from the block at the
+  position (a double chest from the compound of its halves). What a click moved is counted by the fall in the body's
+  carried count of the item (as a withdraw counts a take), not by what the click was meant to move, so a container that
+  takes only part of a stack is credited with that part alone; a container with no room takes what it can and the task
+  completes, and what did not fit stays on the body with nothing on the cursor or the floor
+  (`MoveAndMineGameTests.depositDoesNotUseAMenuThatWasOpenBeforeTheContainer`,
+  `depositIntoAFullChestMovesOnlyWhatFits`).
 - `SupplyChestGameTests`: a named chest supplies a craft, after the body has looked inside it; nothing is known of a chest
   before; what it holds is taken and the rest gathered; a double chest is one inventory, also when a lone chest joined by a
   second half is named again; a chest emptied after the plan is not counted again; a chest that will not open is left out of

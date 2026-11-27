@@ -14,7 +14,9 @@ import com.legoj15.megablockbot.core.task.Failure;
 import com.legoj15.megablockbot.core.task.Task;
 import com.legoj15.megablockbot.core.task.TaskState;
 import com.legoj15.megablockbot.core.task.TickResult;
+import com.legoj15.megablockbot.game.body.BodyException;
 import com.legoj15.megablockbot.game.body.BodyInput;
+import com.legoj15.megablockbot.game.body.BodyManager;
 import com.legoj15.megablockbot.game.body.BotBrain;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.body.DeathRecord;
@@ -34,12 +36,15 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.tags.FluidTags;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
@@ -47,6 +52,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BarrelBlockEntity;
 import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -356,9 +362,57 @@ public final class MoveAndMineGameTests {
                 return;
             }
             // Not the sealed arena's quick failure to explore: the budget the checkpoint carried is what ended the search.
-            helper.assertTrue(none.detail().contains("explored 24 blocks in 1 attempts"), "the search did not start from the checkpoint: " + none.detail());
+            helper.assertTrue(none.key().equals(ItemKey.of("ancient_debris")), "NoSource names " + none.key());
+            helper.assertTrue(none.source().equals("mine:minecraft:ancient_debris"), "NoSource carries source '" + none.source() + "'");
             helper.assertTrue(job.run.ticks <= 40, "took " + job.run.ticks + " ticks: it searched again");
             helper.assertTrue(job.task.checkpoint().containsKey("origin"), "no checkpoint to hand on: " + job.task.checkpoint());
+            job.run.pass();
+        });
+    }
+
+    /**
+     * A body that is no longer the navigator's while the task explores for a block that does not exist -- despawned
+     * through the body manager and brought back through it, as other tests do it, a new instance under the same name
+     * whose brain goes on ticking the same task -- says nothing about the leaf's source, so the task does not end
+     * NoSource (which would have the executor exclude that source for the rest of the goal): it ends Unreachable, the
+     * failure the reach task answers the navigator with.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 700)
+    public static void aBodyDespawnedWhileExploringDoesNotFailNoSource(GameTestHelper helper) {
+        // Open at the sides (a floor, no walls): the first exploring stretch has somewhere to go and keeps running,
+        // so the body is taken out while the task is exploring and not between commands of its own.
+        room(helper, 0, Blocks.BARRIER);
+        // A step long enough that the first exploring stretch is still running when the body goes.
+        MineTask.Search longStep = new MineTask.Search(64, 600, 256, 12);
+        Vec3 start = new Vec3(7.5, FLOOR_Y + 1, 7.5);
+        Job job = Job.start(helper, "mdesp", start, 700,
+            new MineTask(mineLeaf("ancient_debris", 1, "ancient_debris", Map.of()), Map.of(), longStep));
+        boolean[] gone = {false};
+        job.run.each(600, () -> {
+            if (!gone[0]) {
+                failIfFailed(helper, job);
+                // While nothing is found the commands alternate mine, explore, mine...: the second one the navigator
+                // works on is the first exploring stretch, and it is the one the body is taken out under.
+                BotNavigator nav = BotNavigator.of(job.body());
+                if (nav.serial() != 2 || nav.state() != BotNavigator.State.WORKING) return;
+                gone[0] = true;
+                // Set-up, once, while the task explores: the body is taken out through the manager and brought back
+                // through it, so the command the task gave runs on an instance the navigator no longer owns.
+                BodyManager manager = BodyManager.of(helper.getLevel().getServer());
+                String name = job.body().getGameProfile().getName();
+                manager.despawn(job.body());
+                try {
+                    manager.spawn(name, null, helper.getLevel(), start, 0.0F, () -> new TaskBrain(job.task));
+                } catch (BodyException e) {
+                    throw new IllegalStateException("could not bring the body " + name + " back: " + e.getMessage(), e);
+                }
+                return;
+            }
+            if (job.task.state() == TaskState.RUNNING) return;
+            helper.assertTrue(job.task.state() == TaskState.FAILED, "the task is " + job.task.state());
+            Failure failure = job.task.failure();
+            helper.assertTrue(!(failure instanceof Failure.NoSource), "the body was lost and the task excluded its source for it");
+            helper.assertTrue(failure instanceof Failure.Unreachable, "failed as " + failure);
             job.run.pass();
         });
     }
@@ -446,7 +500,8 @@ public final class MoveAndMineGameTests {
                 helper.fail("failed as " + job.task.failure());
                 return;
             }
-            helper.assertTrue(unreachable.navReason().contains("dimension"), "the reason does not say why: " + unreachable.navReason());
+            helper.assertTrue(unreachable.target().equals(pos(target).encode()),
+                "Unreachable names " + unreachable.target() + ", not the target " + pos(target).encode());
             helper.assertTrue(helper.relativeVec(job.body().position()).distanceTo(start) < 0.5, "the body moved to " + job.body().position());
             job.run.pass();
         });
@@ -958,6 +1013,49 @@ public final class MoveAndMineGameTests {
         });
     }
 
+    /**
+     * A death's drop has moved by the time the body is back: an item placed two blocks from the recorded position and
+     * one block below it (set-up, once before the task starts; the record sits a block above the floor, as one taken
+     * at eye height, and the item lies on the floor where it settled). The task looks for the drops of a position
+     * around it and below, walks to where the item lies, and the body ends holding it.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 1200)
+    public static void recoverDropsFindsAnItemThatMovedFromTheRecordedPosition(GameTestHelper helper) {
+        room(helper, 3, Blocks.BARRIER);
+        ItemEntity drop = helper.spawnItem(Items.DIAMOND, 9.5F, FLOOR_Y + 1.5F, 7.5F);
+        BlockPos recorded = helper.absolutePos(new BlockPos(7, FLOOR_Y + 2, 7));
+        Job job = Job.start(helper, "mdrop4", new Vec3(2.5, FLOOR_Y + 1, 2.5), 1200, recoverLeaf(helper, recorded));
+        job.run.each(1050, () -> {
+            failIfFailed(helper, job);
+            if (job.task.state() != TaskState.COMPLETED) return;
+            helper.assertTrue(job.body().getInventory().countItem(Items.DIAMOND) == 1, "completed without the item");
+            helper.assertTrue(drop.isRemoved(), "the item entity is still in the world");
+            job.run.pass();
+        });
+    }
+
+    /**
+     * One recorded position with nothing within the radius around it: the position is done at once -- the task does
+     * not wait a pickup wait out for it -- and the task completes within a few ticks of the body reaching the record.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600)
+    public static void recoverDropsWithNothingNearThePositionIsDoneAtOnce(GameTestHelper helper) {
+        room(helper, 3, Blocks.BARRIER);
+        BlockPos recorded = helper.absolutePos(new BlockPos(12, FLOOR_Y + 1, 12));
+        Job job = Job.start(helper, "mdrop5", new Vec3(2.5, FLOOR_Y + 1, 2.5), 600, recoverLeaf(helper, recorded));
+        int[] arrived = {-1};
+        job.run.each(500, () -> {
+            failIfFailed(helper, job);
+            // The task walks to the recorded position first: that is the centre it looks around from.
+            if (arrived[0] < 0 && job.body().blockPosition().distSqr(recorded) <= 4) arrived[0] = job.run.ticks;
+            if (job.task.state() != TaskState.COMPLETED) return;
+            helper.assertTrue(arrived[0] >= 0, "completed at tick " + job.run.ticks + " without ever reaching the recorded position");
+            helper.assertTrue(job.run.ticks - arrived[0] <= 10,
+                "done with the empty position only " + (job.run.ticks - arrived[0]) + " ticks after reaching it");
+            job.run.pass();
+        });
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // deposit
     // ---------------------------------------------------------------------------------------------------------
@@ -1096,6 +1194,74 @@ public final class MoveAndMineGameTests {
         });
     }
 
+    /**
+     * A chest with room for only part of what the leaf moves (set-up, once before the task starts: every slot full of
+     * dirt but one, which holds 60 cobblestone and so has room for four more): the task completes having moved
+     * exactly what fitted -- four, counted by what left the body, not by what the clicks were meant to move -- the
+     * body still holds the rest, and nothing is on the cursor or the floor.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 1200)
+    public static void depositIntoAFullChestMovesOnlyWhatFits(GameTestHelper helper) {
+        room(helper, 3);
+        BlockPos chestPos = new BlockPos(10, FLOOR_Y + 1, 10);
+        helper.setBlock(chestPos, Blocks.CHEST);
+        ChestBlockEntity chest = helper.getBlockEntity(chestPos);
+        for (int slot = 0; slot < 26; slot++) chest.setItem(slot, new ItemStack(Items.DIRT, 64));
+        chest.setItem(26, new ItemStack(Items.COBBLESTONE, 60));
+        Job job = Job.start(helper, "mdep7", new Vec3(3.5, FLOOR_Y + 1, 3.5), 1200, depositLeaf(helper, chestPos, "cobblestone", 8));
+        job.body().getInventory().setItem(3, new ItemStack(Items.COBBLESTONE, 8));
+        job.run.each(1050, () -> {
+            failIfFailed(helper, job);
+            if (job.task.state() != TaskState.COMPLETED) return;
+            helper.assertTrue(chest.countItem(Items.COBBLESTONE) == 64,
+                "the chest holds " + chest.countItem(Items.COBBLESTONE) + " cobblestone, room was for 4 more");
+            helper.assertTrue(job.body().getInventory().countItem(Items.COBBLESTONE) == 4,
+                "the body holds " + job.body().getInventory().countItem(Items.COBBLESTONE) + " cobblestone, not the 4 that did not fit");
+            assertNoMenuOpen(helper, job.body());
+            helper.assertTrue(onTheGround(job.body(), Items.COBBLESTONE) == 0, "cobblestone was dropped: "
+                + onTheGround(job.body(), Items.COBBLESTONE));
+            job.run.pass();
+        });
+    }
+
+    /**
+     * A menu that was open before the task opened the container is not the container's. Set-up: a second chest within
+     * reach of where the body starts, opened by the body's own use-click in the test's first ticks, and a stone block
+     * above the leaf's chest, whose use opens no menu. What the body holds must not go into the other chest: the task
+     * closes the foreign menu before it uses the container, finds the leaf's chest shut and fails Unreachable, with
+     * the items still held and nothing on any cursor.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 1200)
+    public static void depositDoesNotUseAMenuThatWasOpenBeforeTheContainer(GameTestHelper helper) {
+        room(helper, 3);
+        BlockPos other = new BlockPos(4, FLOOR_Y + 1, 4);
+        BlockPos chestPos = new BlockPos(10, FLOOR_Y + 1, 10);
+        helper.setBlock(other, Blocks.CHEST);
+        helper.setBlock(chestPos, Blocks.CHEST);
+        helper.setBlock(10, FLOOR_Y + 2, 10, Blocks.STONE);
+        Job job = Job.start(helper, "mdep8", new Vec3(3.5, FLOOR_Y + 1, 3.5), 1200, depositLeaf(helper, chestPos, "cobblestone", 5));
+        job.body().getInventory().setItem(0, new ItemStack(Items.COBBLESTONE, 5));
+        boolean[] opened = {false};
+        job.run.each(1050, () -> {
+            if (!opened[0]) {
+                // Set-up, in the test's first ticks: the body's own use-click opens the other chest, as a container
+                // used before this step would have left it open.
+                useChest(job.body(), helper.absolutePos(other));
+                helper.assertTrue(job.body().containerMenu != job.body().inventoryMenu, "the other chest did not open");
+                opened[0] = true;
+                return;
+            }
+            helper.assertTrue(job.task.state() != TaskState.COMPLETED, "the task deposited into a chest that will not open");
+            if (job.task.state() != TaskState.FAILED) return;
+            helper.assertTrue(job.task.failure() instanceof Failure.Unreachable, "failed as " + job.task.failure());
+            ChestBlockEntity otherChest = helper.getBlockEntity(other);
+            helper.assertTrue(otherChest.isEmpty(), "the other chest holds what was meant for the leaf's container");
+            helper.assertTrue(job.body().getInventory().countItem(Items.COBBLESTONE) == 5, "the body's cobblestone changed");
+            assertNoMenuOpen(helper, job.body());
+            job.run.pass();
+        });
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Building leaves
     // ---------------------------------------------------------------------------------------------------------
@@ -1157,6 +1323,26 @@ public final class MoveAndMineGameTests {
         helper.assertTrue(body.containerMenu == body.inventoryMenu, "a menu is still open: " + body.containerMenu);
         helper.assertTrue(body.containerMenu.getCarried().isEmpty(), "the cursor holds " + body.containerMenu.getCarried());
         helper.assertTrue(body.inventoryMenu.getCarried().isEmpty(), "the inventory menu's cursor holds " + body.inventoryMenu.getCarried());
+    }
+
+    /** How many of an item lie on the ground near the body, as item entities: nothing a deposit moves should. */
+    private static int onTheGround(BotPlayer body, Item item) {
+        int total = 0;
+        for (ItemEntity stack : body.serverLevel().getEntitiesOfClass(ItemEntity.class, body.getBoundingBox().inflate(8))) {
+            if (stack.getItem().is(item)) total += stack.getItem().getCount();
+        }
+        return total;
+    }
+
+    /** The body's own use-click on the block at {@code at} (absolute), on the face that looks toward its eyes. */
+    private static void useChest(BotPlayer body, BlockPos at) {
+        Vec3 center = Vec3.atCenterOf(at);
+        Vec3 toEyes = body.getEyePosition().subtract(center);
+        Direction face = Direction.getNearest(toEyes.x, toEyes.y, toEyes.z);
+        Vec3 hitAt = center.add(face.getStepX() * 0.5, face.getStepY() * 0.5, face.getStepZ() * 0.5);
+        BodyInteractionManager use = (BodyInteractionManager) body.getInteractionManager();
+        use.interactBlock(body, body.serverLevel(), body.getMainHandItem(), InteractionHand.MAIN_HAND,
+            new BlockHitResult(hitAt, face, at, false));
     }
 
     /** This test's arena, as the box {@link #ARENAS} knows it by. */

@@ -1,6 +1,8 @@
 # Gradle
 .gradle/
 build/
+# The bot's blueprint package is source, not a build output (issue 17); `build/` above would hide it from git.
+!src/main/java/com/legoj15/megablockbot/game/build/
 
 # Run directories (moddev dev runs)
 run/

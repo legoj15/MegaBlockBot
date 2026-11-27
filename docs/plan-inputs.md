@@ -94,8 +94,14 @@ container, moves an item or loads a chunk.
   a body sees and, with `fresh`, what a new scan costs (chunks read, sections walked and skipped, milliseconds; `full`
   walks every section that holds a wanted block, to compare). The cost numbers and the
   measurement are in the section "The sight" below.
-- `structures` and `observations` are empty. They need the active goal's wants (blueprints, observation keys), which
-  `collect` is not given yet; `SnapshotCollector.addGoalFacts` is where they go.
+- `structures`: one `StructureReport` per build goal the snapshot is taken for — the goal being planned or judged, and
+  the goals waiting in its queue (issue 17). The report is read from the world (never from a note; a player can see
+  blocks that stand) under the key the build postcondition reads, `blueprint@anchor`: `required` the blueprint's
+  positions, `matched` how many hold the blueprint's block already (the block, not every state property, so a log
+  placed along another axis counts), `missing` what is still to place as the items that place each wrong block, and
+  `known` false when any position's chunk is not loaded or the goal's dimension is not the body's. A blueprint whose
+  name is not known gives no report at all, and the planner says the goal cannot be planned. `observations` are still
+  empty; they need a strategy that declares an observation key.
 
 ## The sight (`BodySight`, issue #27)
 

@@ -53,7 +53,10 @@ import net.minecraft.world.phys.Vec3;
  *   <li>mines through the navigator. When the navigator reports nothing to mine in range it looks further: first at the
  *       best height when the block has a height range (digging down is allowed), then outward from where the task
  *       started, in steps, mining again after each. The search is bounded by {@link Search}: past it the failure is
- *       {@code NoSource} saying how far it looked;</li>
+ *       {@code NoSource} saying how far it looked. An exploring step that ends because the engine threw ends the task
+ *       {@code Internal} (with the exception), and one that ends because the body is no longer the navigator's
+ *       (replaced, removed, another dimension) ends it {@code Unreachable}, as the reach task answers the navigator:
+ *       neither says anything about the source, so neither excludes one;</li>
  *   <li>fails {@code Protected} when what the navigator could not mine is blocks of the kind the break rules forbid for
  *       this body (checked in the loaded area around the body, only when the navigator found nothing), and {@code Unreachable}
  *       for any other failure of the navigator.</li>
@@ -425,7 +428,23 @@ public final class MineTask extends BodyTask {
         stepTicks++;
         double moved = horizontal(body.position(), stepFrom);
         if (nav.state() == BotNavigator.State.FAILED) {
-            // No path toward anything unexplored: there is nowhere further to look.
+            // Why the exploring ended decides what the failure says about the source. Only "explored and found none"
+            // (the engine could not path toward any chunk it has not seen: nowhere further to look) says the leaf's
+            // source has nothing to give, which is what NoSource tells the executor. An engine error is a bug
+            // (Internal, with the exception); anything else -- the body replaced, removed or moved to another
+            // dimension while it explored -- says nothing about the source, and the task answers it the way the reach
+            // task answers the navigator (Unreachable), never with a failure that excludes a source.
+            BotNavigator.FailKind kind = nav.failKind();
+            if (kind == BotNavigator.FailKind.ENGINE_ERROR) {
+                release(body);
+                return TickResult.failed(new Failure.Internal(nav.failureCause(),
+                    "the navigation engine failed while exploring for " + blockLabel + ": " + nav.failure()));
+            }
+            if (kind != BotNavigator.FailKind.EXPLORE_FAILED) {
+                release(body);
+                return TickResult.failed(unreachable(blockLabel, nav.failure(),
+                    "could not explore for " + blockLabel + ": " + nav.failure()));
+            }
             exploredBlocks += moved;
             return giveUp(body);
         }

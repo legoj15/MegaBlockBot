@@ -30,6 +30,7 @@ import com.legoj15.megablockbot.game.nav.BotNavigator;
 import com.legoj15.megablockbot.game.plan.BotMemory;
 import com.legoj15.megablockbot.game.plan.SnapshotCollector;
 import com.legoj15.megablockbot.game.task.CraftTask;
+import com.legoj15.megablockbot.game.task.FishTask;
 import com.legoj15.megablockbot.game.task.TaskRegistry;
 import java.util.ArrayList;
 import java.util.List;
@@ -69,6 +70,13 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
 
     /** How long a death's drops are worth walking back to: five minutes of game time, about when they despawn. */
     static final long DROPS_RECOVERABLE_TICKS = 5L * 60L * 20L;
+    /**
+     * The tick budget of a {@code fish} task: fishing is random, so the budget is what ends a run of bad luck. A bite
+     * comes after 5 to 30 seconds (up to twice that with a covered sky) and the wanted item is one of many in the
+     * table — a salmon is a quarter of the fish, so some eighty casts cover almost every run. At 20 to 40 seconds a
+     * cast, eighty of them is about half an hour: 36000 ticks, three times the default a task gets.
+     */
+    static final int FISH_TASK_BUDGET_TICKS = 36000;
 
     /**
      * The smelt kind's own task budget. The default one is 12000 ticks, but one stack of an item already takes 12800
@@ -77,6 +85,16 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
      * bounds a smelt that has stopped for good.
      */
     static final int SMELT_BUDGET_TICKS = 72_000;
+
+    /**
+     * The {@code build} kind's own tick budget. The default 12000 is a task that walks and mines; a build places or
+     * breaks one block at a time, each with its own walk, reach and click, and a blueprint may hold up to
+     * {@link com.legoj15.megablockbot.game.build.Blueprints#MAX_BLOCKS} blocks. 200 ticks a block of the largest
+     * blueprint allowed (4096 x 200 = 819200) is far too coarse a way to say that, so the number is said outright:
+     * 36000 ticks, half an hour of play, enough for a floor of planks and the hut on it, and still short of the age of
+     * a server.
+     */
+    static final int BUILD_BUDGET_TICKS = 36000;
 
     private final GoalExecutor<BotPlayer> executor;
 
@@ -134,13 +152,13 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         this.executor = new GoalExecutor<>(this, postconditions, config());
     }
 
-    /** The defaults, with the one budget a kind of task needs its own: the smelt kind's ({@link #SMELT_BUDGET_TICKS}). */
+    /** The defaults, with the budgets the kinds of task that need their own have: see the constants above. */
     private static ExecutorConfig config() {
         ExecutorConfig defaults = ExecutorConfig.defaults();
         return new ExecutorConfig(defaults.maxReplansWithoutProgress(), defaults.maxTotalReplans(),
             defaults.totalReplanCeiling(), defaults.maxRepairReplans(), defaults.maxDeathsPerGoal(),
             defaults.deathExclusionRadius(), defaults.hazardExclusionRadius(), defaults.defaultTaskBudgetTicks(),
-            Map.of(RecipeDef.SMELT, SMELT_BUDGET_TICKS), defaults.stuckTicks(), defaults.preemptMaxPausedTicks(),
+            Map.of(RecipeDef.SMELT, SMELT_BUDGET_TICKS, "build", BUILD_BUDGET_TICKS, FishTask.KIND, FISH_TASK_BUDGET_TICKS), defaults.stuckTicks(), defaults.preemptMaxPausedTicks(),
             defaults.preemptMaxCount(), defaults.preemptWindowTicks(), defaults.planRerunLimit(),
             defaults.planTimeoutTicks());
     }
@@ -412,7 +430,11 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
 
     @Override
     public Snapshot snapshot(BotPlayer current, Goal goal) {
-        return SnapshotCollector.collect(current);
+        // The goal the snapshot is for, and the goals waiting behind it: a build goal in the queue gets its structure
+        // report from the same snapshot (issue 17), so the plan made when it starts is never made blind.
+        List<Goal> wants = new ArrayList<>(executor.view().queue());
+        if (goal != null) wants.add(goal);
+        return SnapshotCollector.collect(current, BotMemory.of(current.getUUID()), wants);
     }
 
     /** Where the body stands and what it carries: anything the stuck watchdog should count as progress changes it. */

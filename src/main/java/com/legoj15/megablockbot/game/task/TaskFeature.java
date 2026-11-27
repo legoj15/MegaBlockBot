@@ -10,11 +10,13 @@ import com.legoj15.megablockbot.core.planner.LookInside;
  * <ul>
  *   <li>{@value #NAVIGATE} and {@value #REACH}: walk to a place ({@link ReachTask}).</li>
  *   <li>{@value #MINE}: break blocks until the body holds a count of an item ({@link MineTask}).</li>
+ *   <li>{@value #FISH}: cast a rod into water until the body holds a count of an item ({@link FishTask}).</li>
  *   <li>{@value #RECOVER_DROPS}: pick up what a death dropped ({@link RecoverDropsTask}).</li>
  *   <li>{@value #DEPOSIT}: put items into a container ({@link DepositTask}).</li>
  *   <li>{@value #WITHDRAW}: take items out of a container its owner named (or the body placed), as a player does
  *       ({@link WithdrawTask}).</li>
  *   <li>{@value #LOOK_INSIDE}: open a container its owner named and note what is in it ({@link LookTask}).</li>
+ *   <li>{@value #BUILD}: place a blueprint's blocks at its anchor ({@link BuildTask}, issue 17).</li>
  * </ul>
  *
  * <p>Called from {@code NavFeature.init()} for now, since the tasks are built on the navigator; the bot runtime
@@ -26,6 +28,8 @@ public final class TaskFeature {
     /** The kind of the node the executor inserts when a postcondition cannot be read from where the body is. */
     public static final String REACH = "reach";
     public static final String MINE = "mine";
+    /** The kind a {@code Source.Fishing} gather leaf binds to ({@code SolverPlanner}, "fish"). */
+    public static final String FISH = FishTask.KIND;
     /** The kind of the node the executor inserts after a death; the name is the executor's ({@code DeathHandling}). */
     public static final String RECOVER_DROPS = "recover_drops";
     public static final String DEPOSIT = "deposit";
@@ -33,6 +37,8 @@ public final class TaskFeature {
     public static final String WITHDRAW = "withdraw";
     /** The kind of the one leaf of the body's look at a container it was told to take from ({@code LookInside}). */
     public static final String LOOK_INSIDE = LookInside.TASK;
+    /** The kind of the one leaf of a build goal that gathers nothing ({@code SolverPlanner}, "build"). */
+    public static final String BUILD = "build";
 
     private TaskFeature() {}
 
@@ -40,9 +46,11 @@ public final class TaskFeature {
         TaskRegistry.register(NAVIGATE, (leaf, hints) -> new ReachTask(leaf));
         TaskRegistry.register(REACH, (leaf, hints) -> new ReachTask(leaf));
         TaskRegistry.register(MINE, MineTask::new);
+        TaskRegistry.register(FISH, FishTask::new);
         TaskRegistry.register(RECOVER_DROPS, (leaf, hints) -> new RecoverDropsTask(leaf));
         TaskRegistry.register(DEPOSIT, (leaf, hints) -> new DepositTask(leaf));
         TaskRegistry.register(WITHDRAW, (leaf, hints) -> new WithdrawTask(leaf));
         TaskRegistry.register(LOOK_INSIDE, (leaf, hints) -> new LookTask(leaf));
+        TaskRegistry.register(BUILD, (leaf, hints) -> new BuildTask(leaf));
     }
 }

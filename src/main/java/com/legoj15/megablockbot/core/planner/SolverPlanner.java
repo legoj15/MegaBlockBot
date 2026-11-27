@@ -19,6 +19,7 @@ import com.legoj15.megablockbot.core.plan.Profile;
 import com.legoj15.megablockbot.core.snapshot.ContainerSight;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.megablockbot.core.snapshot.StackFacts;
+import com.legoj15.megablockbot.core.snapshot.StructureReport;
 import com.legoj15.megablockbot.core.task.Failure;
 import com.legoj15.solver.CostModel;
 import com.legoj15.solver.PlannedStep;
@@ -75,7 +76,8 @@ import java.util.TreeSet;
  *   <li>{@code harvest}: {@code item}, {@code count}, {@code block}.</li>
  *   <li>{@code kill}: {@code item}, {@code count}, {@code entity}, {@code playerKillOnly} ({@code true} or
  *       {@code false}).</li>
- *   <li>{@code fish}: {@code item}, {@code count}, {@code table}.</li>
+ *   <li>{@code fish}: {@code item}, {@code count}, {@code table}. The plan provides a fishing rod first, as it
+ *       provides a mining source's tool: planned like any item, kept, never consumed.</li>
  *   <li>{@code trade}: {@code item}, {@code count} (the trades: one item each), {@code profession},
  *       {@code level}, {@code cost} (what one trade charges, {@code item=count,item=count} in id order) and
  *       {@code chance} (the share of offers that are this one). The plan for the payment, cost times count,
@@ -142,10 +144,18 @@ public final class SolverPlanner implements Planner {
     static final int MAX_PAYMENT_ROUNDS = 4;
     /** The recipe closure a fingerprint walks stops growing here, so a hostile recipe set cannot make it slow. */
     static final int MAX_CLOSURE_ITEMS = 2048;
+    /**
+     * How near the anchor a build goal's reach leaf brings the body before the plan is made again: near enough that
+     * the footprint's chunks are loaded and the report can be read (the snapshot's own station scan uses the same
+     * radius), far enough that the body is not asked to stand inside what it is to look at.
+     */
+    static final int BUILD_REACH_RADIUS = 8;
 
     /** The solver's id for the demand recipe; no such recipe is in any book, and no step of it is ever emitted. */
     private static final String DEMAND_ID = "megablockbot:planner/demand";
     private static final ItemKey DEMAND_RESULT = new ItemKey("megablockbot:demand");
+    /** The one rod every fishing source casts with: planned before the first {@code fish} leaf and never spent. */
+    static final ItemKey FISHING_ROD = ItemKey.of("minecraft:fishing_rod");
 
     private final RecipeBook recipes;
     private final AcquisitionIndex index;
@@ -377,7 +387,7 @@ public final class SolverPlanner implements Planner {
                     case Goal.Equip g -> equipPlan(g);
                     case Goal.Stockpile g -> stockpilePlan(g);
                     case Goal.Reach g -> Step.ok(List.of(navigateLeaf(g)));
-                    case Goal.Build g -> strategiesFor(g);
+                    case Goal.Build g -> buildPlan(g);
                     case Goal.Custom g -> strategiesFor(g);
                 };
             } finally {
@@ -763,6 +773,11 @@ public final class SolverPlanner implements Planner {
                     if (price < CostModel.UNOBTAINABLE) total = satAdd(total, price);
                 }
             }
+            if (needsTool && source instanceof Source.Fishing) {
+                // The rod once, as the tool is charged once (its recipe is the price of sticks and string).
+                long price = solver.unitCost(FISHING_ROD);
+                if (price < CostModel.UNOBTAINABLE) total = satAdd(total, price);
+            }
             return total;
         }
 
@@ -842,19 +857,51 @@ public final class SolverPlanner implements Planner {
         /**
          * The tool prerequisite of a source, as a group node placed before the gather, or nothing when the source
          * needs no tool or the body carries one (brief P12). A mining source that requires a tool of no known class
-         * cannot be planned.
+         * cannot be planned. A fishing source's tool is its rod, planned the same way.
          */
         private Step prerequisite(Source source) {
-            if (!(source instanceof Source.MineBlock mine) || !mine.toolRequired()) return Step.ok(List.of());
-            if (mine.toolClass() == null) {
-                return Step.fail(new Failure.MissingTool(null, mine.minTier(),
-                        mine.id() + " needs a tool of no known class"));
+            if (source instanceof Source.MineBlock mine && mine.toolRequired()) {
+                if (mine.toolClass() == null) {
+                    return Step.fail(new Failure.MissingTool(null, mine.minTier(),
+                            mine.id() + " needs a tool of no known class"));
+                }
+                if (carriedTier(mine.toolClass()).atLeast(mine.minTier())) {
+                    relyOnTool(mine.toolClass(), mine.minTier());
+                    return Step.ok(List.of());
+                }
+                return toolPrerequisite(mine);
             }
-            if (carriedTier(mine.toolClass()).atLeast(mine.minTier())) {
-                relyOnTool(mine.toolClass(), mine.minTier());
+            if (source instanceof Source.Fishing fishing) return rodPrerequisite(fishing);
+            return Step.ok(List.of());
+        }
+
+        /** True while the rod is being planned, so a fish source the rod's own ingredients need cannot be asked for it again. */
+        private boolean planningRod;
+
+        /**
+         * The rod a fishing source casts with, planned like any item is planned and kept, not consumed (as a crafting
+         * station is: relied on, never drawn). One rod serves however many fish leaves a plan has: once one is in the
+         * working stock, the next fishing source plans nothing. A plan whose rod cannot be had makes the source
+         * unusable, and the item's other sources are tried as they are for a mining source whose tool cannot be had.
+         */
+        private Step rodPrerequisite(Source.Fishing fishing) {
+            if (held(FISHING_ROD) >= 1) {
+                relied.merge(FISHING_ROD, 1L, (a, b) -> Math.max(a, b));
                 return Step.ok(List.of());
             }
-            return toolPrerequisite(mine);
+            if (planningRod) {
+                return Step.fail(new Failure.NoSource(FISHING_ROD, fishing.id(), "planning the fishing rod needs "
+                        + fishing.item().id() + " from " + fishing.id() + ", which needs the rod: a cycle"));
+            }
+            planningRod = true;
+            try {
+                Step step = itemPlan(FISHING_ROD, 1);
+                if (step.failure() != null) return step;
+                return Step.ok(step.nodes().isEmpty() ? List.of()
+                        : List.of(NodeSpec.group(new Goal.HaveItem(FISHING_ROD, 1), step.nodes())));
+            } finally {
+                planningRod = false;
+            }
         }
 
         /**
@@ -1073,6 +1120,49 @@ public final class SolverPlanner implements Planner {
             params.put("pos", goal.pos().encode());
             params.put("radius", Integer.toString(goal.radius()));
             return NodeSpec.leaf(goal, "navigate", params, "");
+        }
+
+        /**
+         * The plan for a build goal (issue 17), made from the report in the snapshot because the blueprint itself is not
+         * visible to {@code core/}:
+         * <ul>
+         *   <li>No report at all: the blueprint's name is not known, so nothing can say what the goal needs -- the plan
+         *       is unplannable saying so.</li>
+         *   <li>A report that is not known (part of the footprint is not loaded, or the anchor is in another dimension):
+         *       one reach leaf to the anchor, as an unseen container is looked into before anything else is planned; the
+         *       next plan has the report.</li>
+         *   <li>A known report: an item plan for each missing item and count the body does not hold (through the path
+         *       every item is planned by, relied on rather than drawn, in a fixed order), then one {@code build} leaf
+         *       that carries the goal's own name, dimension and anchor.</li>
+         * </ul>
+         * Nothing missing is nothing to plan: the goal is met, and a build leaf of zero would be a task that throws.
+         */
+        Step buildPlan(Goal.Build goal) {
+            String key = goal.blueprint() + "@" + goal.anchor().encode();
+            StructureReport report = snapshot.structures().get(key);
+            if (report == null) {
+                return Step.fail(internal("the blueprint '" + goal.blueprint() + "' is not known, so " + key
+                        + " cannot be planned: no blueprint of that name is loaded"));
+            }
+            if (!report.known()) {
+                return Step.ok(List.of(NodeSpec.leaf(
+                        new Goal.Reach(goal.dimension(), goal.anchor(), BUILD_REACH_RADIUS), "navigate",
+                        Map.of("dimension", goal.dimension(), "pos", goal.anchor().encode(),
+                                "radius", Integer.toString(BUILD_REACH_RADIUS)), "")));
+            }
+            if (report.missing().isEmpty()) return Step.ok(List.of());
+            List<NodeSpec> nodes = new ArrayList<>();
+            for (Map.Entry<ItemKey, Integer> missing : new TreeMap<>(report.missing()).entrySet()) {
+                if (held(missing.getKey()) >= missing.getValue()) continue;
+                // Relied on, not drawn: the blocks leave the inventory only as they are placed, and the leaves may not
+                // spend each other's stock (each missing entry is its own item).
+                Step step = itemPlan(missing.getKey(), missing.getValue());
+                if (step.failure() != null) return step;
+                nodes.addAll(step.nodes());
+            }
+            nodes.add(NodeSpec.leaf(goal, "build", Map.of("blueprint", goal.blueprint(),
+                    "dimension", goal.dimension(), "anchor", goal.anchor().encode()), ""));
+            return Step.ok(nodes);
         }
 
         // ─── Gather leaves ───────────────────────────────────────────────────────────────────────
@@ -1388,6 +1478,15 @@ public final class SolverPlanner implements Planner {
             else if (!sight.contentsKnown()) text.append("unknown");
             else text.append(sight.count(stockpile.key()));
         }
+        if (goal instanceof Goal.Build build) {
+            // The plan is made from the report (what stands and what is missing), which the item counts above do not
+            // say: a wall that fell, or a creeper that made one more hole in the hut, changes the plan.
+            StructureReport report = snapshot.structures().get(build.blueprint() + "@" + build.anchor().encode());
+            text.append(";build=");
+            if (report == null) text.append("none");
+            else text.append(report.known()).append(':').append(report.matched()).append('/').append(report.required())
+                    .append(':').append(new TreeMap<>(report.missing()));
+        }
         text.append(";take=");
         // The target is the goal's own only in the dimension the goal names, as supplyBoxes has it.
         Pos stockpileTarget = goal instanceof Goal.Stockpile stockpile && stockpile.dimension().equals(snapshot.dimension())
@@ -1521,6 +1620,9 @@ public final class SolverPlanner implements Planner {
                     ItemKey tool = config.toolItem(mine.toolClass(), mine.minTier());
                     if (tool != null) queue.add(tool);
                     addToolsServing(tools, mine.toolClass(), mine.minTier());
+                } else if (source instanceof Source.Fishing) {
+                    // The rod every fish source needs is read like a tool: a plan that would have to make one changed.
+                    queue.add(FISHING_ROD);
                 } else if (source instanceof Source.Trade trade) {
                     queue.addAll(trade.cost().keySet());
                 }

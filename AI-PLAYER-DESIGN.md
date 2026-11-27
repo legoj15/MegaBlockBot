@@ -880,9 +880,12 @@ and registered with a precondition, an expected yield, and a cost:
 
 - Librarian reroll (enchanted books). Designed here: AIBot has no reroll, lectern or village
   code, only a single trade with a villager already beside it.
-- Fishing (manual), and auto-fisher build (blueprint)
+- Fishing (manual — implemented, issue #16: the `fish` task casts, watches the bobber dip and reels in like a player), and auto-fisher build (blueprint)
 - Branch mine at Y, cave exploration, travel until biome/structure found
-- Blueprint build from structure NBT (farms, shelters, auto-fisher)
+- Blueprint build from structure NBT (farms, shelters, auto-fisher). What exists (#17): a blueprint is a file in
+  `<config dir>/megablockbot/blueprints/` or one of the server's structure templates, saved by
+  `/aiplayer blueprint save`, and a blueprint may hold only plain blocks — a block whose item places it, no block
+  entity, and no second half of a two-block thing.
 
 When several strategies apply, the cost model ranks them; the LLM is asked only when costs
 are close or the user stated a preference ("fish for it").

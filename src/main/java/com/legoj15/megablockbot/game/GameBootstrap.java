@@ -3,6 +3,7 @@ package com.legoj15.megablockbot.game;
 import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.game.body.BodyFeature;
 import com.legoj15.megablockbot.game.bot.BotFeature;
+import com.legoj15.megablockbot.game.build.BuildFeature;
 import com.legoj15.megablockbot.game.command.AiPlayerCommand;
 import com.legoj15.megablockbot.game.gametest.SolverGameTests;
 import com.legoj15.megablockbot.game.nav.NavFeature;
@@ -32,6 +33,7 @@ public final class GameBootstrap {
         SafetyFeature.init();
         PlanFeature.init();
         ReflexFeature.init();
+        BuildFeature.init();
         BotFeature.init();
 
         // GameTests: a no-op unless a GameTest run enabled them.

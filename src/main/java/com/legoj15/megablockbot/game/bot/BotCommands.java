@@ -3,16 +3,21 @@ package com.legoj15.megablockbot.game.bot;
 import com.legoj15.megablockbot.core.lang.Intent;
 import com.legoj15.megablockbot.game.body.BodyManager;
 import com.legoj15.megablockbot.game.body.BotPlayer;
+import com.legoj15.megablockbot.game.build.Blueprint;
+import com.legoj15.megablockbot.game.build.Blueprints;
 import com.legoj15.megablockbot.game.command.AiPlayerCommand;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.RequiredArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
+import net.minecraft.commands.arguments.coordinates.BlockPosArgument;
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 
 /**
@@ -33,7 +38,47 @@ final class BotCommands {
             root.then(Commands.literal("status").then(nameArgument().executes(ctx -> run(ctx, new Intent.Status()))));
             root.then(Commands.literal("pause").then(nameArgument().executes(ctx -> run(ctx, new Intent.Pause()))));
             root.then(Commands.literal("resume").then(nameArgument().executes(ctx -> run(ctx, new Intent.Resume()))));
+            root.then(Commands.literal("blueprint").requires(source -> source.hasPermission(2))
+                    .then(Commands.literal("save").then(Commands.argument("name", StringArgumentType.word())
+                            .then(Commands.argument("from", BlockPosArgument.blockPos())
+                                    .then(Commands.argument("to", BlockPosArgument.blockPos()).executes(BotCommands::saveBlueprint)))))
+                    .then(Commands.literal("list").executes(BotCommands::listBlueprints)));
         });
+    }
+
+    /**
+     * {@code /aiplayer blueprint save <name> <from> <to>} (permission level 2): the blocks of that box of the caller's
+     * world as a blueprint, without entities, with the same name and size rules a loaded blueprint is held to. The
+     * caller's world is the level the command runs in, so an owner standing in it names the blocks around them.
+     */
+    private static int saveBlueprint(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        CommandSourceStack source = ctx.getSource();
+        String name = StringArgumentType.getString(ctx, "name");
+        BlockPos from = BlockPosArgument.getLoadedBlockPos(ctx, "from");
+        BlockPos to = BlockPosArgument.getLoadedBlockPos(ctx, "to");
+        String refused = Blueprints.save(source.getLevel(), name, from, to);
+        if (refused != null) return fail(source, refused);
+        int blocks = countBlocks(source, name);
+        source.sendSuccess(() -> Component.literal("Saved blueprint '" + name + "' (" + blocks + " block(s))"), false);
+        return 1;
+    }
+
+    /** {@code /aiplayer blueprint list}: the names in the blueprint folder. */
+    private static int listBlueprints(CommandContext<CommandSourceStack> ctx) {
+        List<String> names = Blueprints.names();
+        String text = names.isEmpty() ? "No blueprints in " + Blueprints.folder()
+                : "Blueprints: " + String.join(", ", names);
+        ctx.getSource().sendSuccess(() -> Component.literal(text), false);
+        return 1;
+    }
+
+    /**
+     * How many blocks the saved blueprint holds, for the saved line. The blueprint itself counts what it kept; this only
+     * reports.
+     */
+    private static int countBlocks(CommandSourceStack source, String name) {
+        Blueprint saved = Blueprints.load(source.getServer(), name);
+        return saved == null ? 0 : saved.size();
     }
 
     private static RequiredArgumentBuilder<CommandSourceStack, String> nameArgument() {

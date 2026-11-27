@@ -26,6 +26,7 @@ import com.legoj15.megablockbot.core.plan.Profile;
 import com.legoj15.megablockbot.core.snapshot.ContainerSight;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.megablockbot.core.snapshot.StackFacts;
+import com.legoj15.megablockbot.core.snapshot.StructureReport;
 import com.legoj15.megablockbot.core.task.Failure;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -83,6 +84,8 @@ final class SolverPlannerTest {
     private static final ItemKey SPRUCE_LOG = ItemKey.of("spruce_log");
     private static final ItemKey SPRUCE_PLANKS = ItemKey.of("spruce_planks");
     private static final ItemKey SHELF = ItemKey.of("shelf");
+    private static final ItemKey FISHING_ROD = ItemKey.of("fishing_rod");
+    private static final ItemKey SALMON = ItemKey.of("salmon");
     private static final Pos CONTAINER = new Pos(16, 64, -4);
 
     // ─── The fixture: a dozen vanilla-like recipes and a small acquisition index ─────────────────
@@ -359,7 +362,14 @@ final class SolverPlannerTest {
                 }
                 gain(stock, tools, ItemKey.of(params.get("item")), Long.parseLong(params.get("count")));
             }
-            case "kill", "fish" -> gain(stock, tools, ItemKey.of(params.get("item")), Long.parseLong(params.get("count")));
+            case "kill" -> gain(stock, tools, ItemKey.of(params.get("item")), Long.parseLong(params.get("count")));
+            case "fish" -> {
+                // A fish leaf is fished with a rod: a plan that never provides one fails here, as the task would.
+                if (stock.getOrDefault(FISHING_ROD, 0) < 1) {
+                    return "leaf " + node.source() + " fishes for " + params.get("item") + " with no fishing rod in stock";
+                }
+                gain(stock, tools, ItemKey.of(params.get("item")), Long.parseLong(params.get("count")));
+            }
             case "trade" -> {
                 long trades = Long.parseLong(params.get("count"));
                 // A planned trade says what it charges; a strategy's own trade leaf may not.
@@ -765,8 +775,8 @@ final class SolverPlannerTest {
         assertTrue(sources.contains("kill:minecraft:spider"), "the cheaper kill source is chosen: " + sources);
         assertFalse(sources.contains("fish:minecraft:gameplay/fishing"), "fishing is dearer: " + sources);
 
-        Plan switched = planned(planner(), request(new Goal.HaveItem(STRING, 1), EMPTY,
-                without("kill:minecraft:spider")));
+        Plan switched = planned(planner(), request(new Goal.HaveItem(STRING, 1),
+                snapshot(Map.of(FISHING_ROD, 1), Map.of()), without("kill:minecraft:spider")));
         List<String> switchedSources = sources(switched);
         assertTrue(switchedSources.contains("fish:minecraft:gameplay/fishing"),
                 "excluding the kill source switches to fishing: " + switchedSources);
@@ -784,9 +794,10 @@ final class SolverPlannerTest {
         builder.addSource(new Source.Fishing("fish:minecraft:gameplay/amber", AMBER, "minecraft:gameplay/amber", 0.5));
         SolverPlanner planner = planner(book(), builder.build());
 
-        Plan plan = planned(planner, request(new Goal.HaveItem(AMBER, 2), EMPTY, Exclusions.NONE));
+        Plan plan = planned(planner, request(new Goal.HaveItem(AMBER, 2),
+                snapshot(Map.of(FISHING_ROD, 1), Map.of()), Exclusions.NONE));
         assertEquals(List.of("fish:minecraft:gameplay/amber"), sources(plan), "the fallback source is used");
-        assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), AMBER, 2);
+        assertRunsToTheGoal(plan, book(), Map.of(FISHING_ROD, 1), Map.of(), AMBER, 2);
 
         // With the fallback gone the failure is the cheapest source's: the diamond pickaxe has no source.
         Failure failure = unplannable(planner, request(new Goal.HaveItem(AMBER, 2), EMPTY,
@@ -1028,15 +1039,85 @@ final class SolverPlannerTest {
     void aBuildOrCustomGoalNoStrategyPlansIsAnInternalFailureNotAMadeUpSource() {
         Goal.Custom custom = new Goal.Custom("fish_until", Map.of("item", "minecraft:string"));
         assertEquals(Failure.Kind.INTERNAL, unplannable(planner(), request(custom, EMPTY, Exclusions.NONE)).kind());
-        assertEquals(Failure.Kind.INTERNAL,
-                unplannable(planner(), request(new Goal.Build("hut", "minecraft:overworld", Pos.parse("1,64,1")),
-                        EMPTY, Exclusions.NONE)).kind());
+        // A build goal with no report in the snapshot (the blueprint's name is not known) is unplannable the same way:
+        // nothing can say what it needs, and no source is made up for it.
+        Goal.Build build = new Goal.Build("hut", "minecraft:overworld", Pos.parse("1,64,1"));
+        assertEquals(Failure.Kind.INTERNAL, unplannable(planner(), request(build, EMPTY, Exclusions.NONE)).kind());
 
         FakeStrategy fisher = new FakeStrategy("manual-fishing", goal -> goal instanceof Goal.Custom
                 && ((Goal.Custom) goal).kind().equals("fish_until"), 500, tradeLeaf(STRING, 1));
         Plan plan = planned(planner(fisher), request(custom, EMPTY, Exclusions.NONE));
         assertEquals(1, leaves(plan).size(), leaves(plan).toString());
         assertEquals("trade", leaves(plan).get(0).taskKind());
+    }
+
+    // ─── Building a blueprint (issue 17) ────────────────────────────────────────────────────────
+
+    private static final Pos ANCHOR = new Pos(10, 64, -5);
+
+    /** A snapshot with a build goal's report under the key its postcondition reads; null for none at all. */
+    private static Snapshot buildSnapshot(Map<ItemKey, Integer> items, Map<ToolClass, ToolTier> tools,
+                                          StructureReport report) {
+        Snapshot.Builder builder = Snapshot.builder().gameTime(0)
+                .dimension("minecraft:overworld").pos(new Pos(0, 64, 0));
+        items.forEach(builder::item);
+        tools.forEach(builder::tool);
+        if (report != null) builder.structure("hut@" + ANCHOR.encode(), report);
+        return builder.build();
+    }
+
+    @Test
+    void aBuildGoalIsPlannedFromWhatTheReportMissesAndEndsWithOneBuildLeaf() {
+        Goal.Build goal = new Goal.Build("hut", "minecraft:overworld", ANCHOR);
+        // One log and a pickaxe in hand: the planks are crafted (one more log gathered), the cobblestone mined.
+        Snapshot snapshot = buildSnapshot(Map.of(OAK_LOG, 1), Map.of(ToolClass.PICKAXE, ToolTier.WOOD),
+                new StructureReport(true, 3, 20, Map.of(OAK_PLANKS, 5, COBBLESTONE, 2)));
+        Plan plan = planned(planner(), request(goal, snapshot, Exclusions.NONE));
+
+        List<NodeSpec> planLeaves = leaves(plan);
+        NodeSpec build = planLeaves.get(planLeaves.size() - 1);
+        assertEquals("build", build.taskKind(), planLeaves.toString());
+        assertEquals(goal, build.goal(), "the leaf carries the goal, whose postcondition judges it");
+        assertEquals("hut", build.params().get("blueprint"));
+        assertEquals("minecraft:overworld", build.params().get("dimension"));
+        assertEquals(ANCHOR.encode(), build.params().get("anchor"));
+
+        assertEquals(1, gathered(plan, OAK_LOG, "mine"), "five planks are two logs, one is carried: " + planLeaves);
+        assertTrue(craftedRecipes(plan).contains("planks_from_log"), "the planks are crafted: " + planLeaves);
+        assertEquals(2, gathered(plan, COBBLESTONE, "mine"), "two cobblestone: " + planLeaves);
+        // Nothing is gathered that the report does not miss: the only gathered and crafted items are the log the
+        // planks come from and the cobblestone.
+        for (NodeSpec leaf : planLeaves) {
+            String item = leaf.params().get("item");
+            if (item == null) continue;
+            assertTrue(item.equals("minecraft:oak_log") || item.equals("minecraft:cobblestone"),
+                    "the report does not miss " + item + ": " + planLeaves);
+        }
+        Executed executed = run(plan, Map.of(OAK_LOG, 1), Map.of(ToolClass.PICKAXE, ToolTier.WOOD));
+        assertNull(executed.failure(), "the plan must run to the build leaf: " + executed.failure() + " after " + executed.ran());
+    }
+
+    @Test
+    void aBuildGoalWhoseReportIsNotKnownIsOneReachLeafToTheAnchor() {
+        Goal.Build goal = new Goal.Build("hut", "minecraft:overworld", ANCHOR);
+        Snapshot blind = buildSnapshot(Map.of(), Map.of(), new StructureReport(false, 0, 17, Map.of()));
+        Plan plan = planned(planner(), request(goal, blind, Exclusions.NONE));
+        List<NodeSpec> planLeaves = leaves(plan);
+        assertEquals(1, planLeaves.size(), planLeaves.toString());
+        NodeSpec leaf = planLeaves.get(0);
+        assertEquals("navigate", leaf.taskKind());
+        assertEquals(new Goal.Reach("minecraft:overworld", ANCHOR, SolverPlanner.BUILD_REACH_RADIUS), leaf.goal(),
+                "the body is sent near enough to read the footprint");
+    }
+
+    @Test
+    void aBuildGoalWithNoReportIsUnplannableAndOneWithNothingMissingIsEmpty() {
+        Goal.Build goal = new Goal.Build("hut", "minecraft:overworld", ANCHOR);
+        assertEquals(Failure.Kind.INTERNAL, unplannable(planner(),
+                request(goal, buildSnapshot(Map.of(), Map.of(), null), Exclusions.NONE)).kind());
+        Plan done = planned(planner(), request(goal,
+                buildSnapshot(Map.of(), Map.of(), new StructureReport(true, 17, 17, Map.of())), Exclusions.NONE));
+        assertTrue(done.roots().isEmpty(), "nothing missing is nothing to plan: " + leaves(done));
     }
 
     // ─── Strategies against gather costs (items 4 and 14) ────────────────────────────────────────
@@ -1257,7 +1338,8 @@ final class SolverPlannerTest {
             builder.addSource(new Source.Fishing("fish:minecraft:gameplay/saddle", SADDLE, "minecraft:gameplay/saddle", 0.05));
             SolverPlanner planner = planner(pickaxeBook, builder.build());
 
-            Plan plan = planned(planner, request(new Goal.HaveItem(SADDLE, 1), EMPTY, Exclusions.NONE));
+            Plan plan = planned(planner, request(new Goal.HaveItem(SADDLE, 1),
+                    snapshot(Map.of(FISHING_ROD, 1), Map.of()), Exclusions.NONE));
             assertEquals(List.of("fish:minecraft:gameplay/saddle"), sources(plan),
                     "the trade cannot be paid for, so the next source is used (recipe for the pickaxe: "
                             + recipeForThePickaxe + ")");
@@ -1280,7 +1362,8 @@ final class SolverPlannerTest {
         builder.addSource(saddleTrade(Map.of(EMERALD, 10), 1.0));
         builder.addSource(new Source.Fishing("fish:minecraft:gameplay/saddle", SADDLE, "minecraft:gameplay/saddle", 0.2));
         SolverPlanner planner = planner(book(), builder.build());
-        Plan plan = planned(planner, request(new Goal.HaveItem(SADDLE, 1), EMPTY, Exclusions.NONE));
+        Plan plan = planned(planner, request(new Goal.HaveItem(SADDLE, 1),
+                snapshot(Map.of(FISHING_ROD, 1), Map.of()), Exclusions.NONE));
         assertEquals(List.of("fish:minecraft:gameplay/saddle"), sources(plan));
     }
 
@@ -1292,7 +1375,7 @@ final class SolverPlannerTest {
             builder.addSource(saddleTrade(Map.of(), chance));
             builder.addSource(new Source.Fishing("fish:minecraft:gameplay/saddle", SADDLE, "minecraft:gameplay/saddle", 0.2));
             Plan plan = planned(planner(book(), builder.build()),
-                    request(new Goal.HaveItem(SADDLE, 1), EMPTY, Exclusions.NONE));
+                    request(new Goal.HaveItem(SADDLE, 1), snapshot(Map.of(FISHING_ROD, 1), Map.of()), Exclusions.NONE));
             assertEquals(List.of(chance == 1.0 ? "trade:minecraft:leatherworker#saddle" : "fish:minecraft:gameplay/saddle"),
                     sources(plan), "chance " + chance);
         }
@@ -1400,9 +1483,10 @@ final class SolverPlannerTest {
         AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
         builder.addSource(new Source.Fishing("fish:minecraft:gameplay/saddle", SADDLE, "minecraft:gameplay/saddle", 0.1));
         builder.addSource(saddleTrade(Map.of(SADDLE, 1), 1.0));
-        Plan plan = planned(planner(book(), builder.build()), request(new Goal.HaveItem(SADDLE, 2), EMPTY, Exclusions.NONE));
+        Plan plan = planned(planner(book(), builder.build()), request(new Goal.HaveItem(SADDLE, 2),
+                snapshot(Map.of(FISHING_ROD, 1), Map.of()), Exclusions.NONE));
         assertEquals(List.of("fish:minecraft:gameplay/saddle"), sources(plan));
-        assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), SADDLE, 2);
+        assertRunsToTheGoal(plan, book(), Map.of(FISHING_ROD, 1), Map.of(), SADDLE, 2);
 
         AcquisitionIndex.Builder tradeOnly = indexBuilder(ToolTier.IRON);
         tradeOnly.addSource(saddleTrade(Map.of(SADDLE, 1), 1.0));
@@ -1466,6 +1550,77 @@ final class SolverPlannerTest {
         Plan again = planned(planner, request(new Goal.HaveItem(STONE_SHOVEL, 1),
                 snapshot(stock, Map.of(ToolClass.AXE, ToolTier.DIAMOND)), Exclusions.NONE));
         assertEquals(List.of("mine:minecraft:shovel_ore"), sources(again));
+    }
+
+    // ─── Fishing leaves are planned with their rod first (issue #16) ──────────────────────────────
+
+    /** The vanilla shape of the rod: three sticks and two string, at a crafting table. */
+    private static RecipeDef rodRecipe() {
+        return recipe("fishing_rod_from_sticks_and_string", FISHING_ROD, 1, CRAFTING_TABLE, of(STICK, 3), of(STRING, 2));
+    }
+
+    /** The base index plus salmon, whose only source is fishing. */
+    private static AcquisitionIndex salmonIndex() {
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(SALMON);
+        builder.addSource(new Source.Fishing("fish:minecraft:gameplay/fishing", SALMON,
+                "minecraft:gameplay/fishing", 0.25));
+        return builder.build();
+    }
+
+    /** The plan's gather sources, leaving out the empty source of craft leaves. */
+    private static List<String> gatherSources(Plan plan) {
+        return sources(plan).stream().filter(source -> !source.isEmpty()).toList();
+    }
+
+    @Test
+    void anItemOnlyFishingGivesIsFishedWithARodThePlanCraftsFirst() {
+        SolverPlanner planner = planner(bookWith(rodRecipe()), salmonIndex());
+        Map<ItemKey, Integer> stock = Map.of(STICK, 3, STRING, 2, CRAFTING_TABLE, 1);
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(SALMON, 1), snapshot(stock, Map.of()), Exclusions.NONE));
+        assertEquals(List.of("fish:minecraft:gameplay/fishing"), gatherSources(plan), leaves(plan).toString());
+        assertEquals(List.of("fishing_rod_from_sticks_and_string"), craftedRecipes(plan), "the rod is crafted: " + leaves(plan));
+        NodeSpec fish = leaves(plan).get(leaves(plan).size() - 1);
+        assertEquals("fish", fish.taskKind(), "the fish leaf runs last: " + leaves(plan));
+
+        Executed executed = run(plan, bookWith(rodRecipe()), stock, Map.of());
+        assertNull(executed.failure(), executed.failure() + " after " + executed.ran());
+        assertEquals(1, executed.stock().getOrDefault(SALMON, 0));
+        assertEquals(1, executed.stock().getOrDefault(FISHING_ROD, 0), "the rod is kept, never spent");
+    }
+
+    @Test
+    void aRodAlreadyHeldIsNotCraftedAgain() {
+        SolverPlanner planner = planner(bookWith(rodRecipe()), salmonIndex());
+        Map<ItemKey, Integer> stock = Map.of(FISHING_ROD, 1);
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(SALMON, 1), snapshot(stock, Map.of()), Exclusions.NONE));
+        assertEquals(List.of("fish:minecraft:gameplay/fishing"), gatherSources(plan), leaves(plan).toString());
+        assertTrue(craftedRecipes(plan).isEmpty(), "no rod is crafted: " + leaves(plan));
+
+        Executed executed = run(plan, bookWith(rodRecipe()), stock, Map.of());
+        assertNull(executed.failure(), executed.failure() + " after " + executed.ran());
+        assertEquals(1, executed.stock().getOrDefault(SALMON, 0));
+        assertEquals(1, executed.stock().getOrDefault(FISHING_ROD, 0));
+    }
+
+    @Test
+    void fishingWithNoWayToGetStringIsUnplannableNamingTheString() {
+        // The book can make the rod and salmon is only from fishing, but nothing gives string: the rod cannot be had,
+        // so the source cannot be used and there is no other. The sticks are in stock, so string is the want.
+        AcquisitionIndex.Builder builder = AcquisitionIndex.builder();
+        builder.addItem(SALMON).addItem(STICK);
+        builder.addSource(new Source.Fishing("fish:minecraft:gameplay/fishing", SALMON,
+                "minecraft:gameplay/fishing", 0.25));
+        builder.addSource(new Source.MineBlock("mine:minecraft:oak_log", OAK_LOG, "minecraft:oak_log",
+                null, ToolTier.HAND, false, false, false, 1.0, false, null));
+        SolverPlanner planner = planner(bookWith(rodRecipe()), builder.build());
+
+        Failure failure = unplannable(planner, request(new Goal.HaveItem(SALMON, 1),
+                snapshot(Map.of(STICK, 3), Map.of()), Exclusions.NONE));
+        assertEquals(Failure.Kind.NO_SOURCE, failure.kind(), failure.toString());
+        assertEquals(STRING, ((Failure.NoSource) failure).key(), "the failure names the item that cannot be had");
     }
 
     // ─── The item loop converges and does not eat its own goal (item 11) ─────────────────────────
@@ -2551,25 +2706,27 @@ final class SolverPlannerTest {
         // Two requests for the same goal on the same snapshot, differing only in what an earlier failure ruled out:
         // the executor compares the plan's fingerprint against the goal it replans, so a plan made without the
         // exclusion must not look current for the goal that has one. The exclusion here is the kill source of string,
-        // so the two plans differ in their leaves as well as their inputs.
+        // so the two plans differ in their leaves as well as their inputs. The body holds a rod: the other source of
+        // string is fishing, and a rod that itself needs string could not be planned from nothing.
+        Snapshot held = snapshot(Map.of(FISHING_ROD, 1), Map.of());
         SolverPlanner instance = planner();
         Goal goal = new Goal.HaveItem(STRING, 1);
         Exclusions noKill = without("kill:minecraft:spider");
 
-        Plan plain = planned(instance, request(goal, EMPTY, Exclusions.NONE));
-        Plan rerolled = planned(instance, request(goal, EMPTY, noKill));
+        Plan plain = planned(instance, request(goal, held, Exclusions.NONE));
+        Plan rerolled = planned(instance, request(goal, held, noKill));
         assertNotEquals(plain.inputFingerprint(), rerolled.inputFingerprint(),
                 "two requests that differ only in exclusions must not fingerprint alike");
         assertEquals(List.of("fish:minecraft:gameplay/fishing"), sources(rerolled), "setup: the exclusion changed the plan");
-        assertEquals(rerolled.inputFingerprint(), instance.inputFingerprint(goal, EMPTY, noKill),
+        assertEquals(rerolled.inputFingerprint(), instance.inputFingerprint(goal, held, noKill),
                 "the plan carries the fingerprint of its own request");
-        assertEquals(plain.inputFingerprint(), instance.inputFingerprint(goal, EMPTY, Exclusions.NONE));
+        assertEquals(plain.inputFingerprint(), instance.inputFingerprint(goal, held, Exclusions.NONE));
 
-        assertRunsToTheGoal(plain, book(), Map.of(), Map.of(), STRING, 1);
-        assertRunsToTheGoal(rerolled, book(), Map.of(), Map.of(), STRING, 1);
+        assertRunsToTheGoal(plain, book(), Map.of(FISHING_ROD, 1), Map.of(), STRING, 1);
+        assertRunsToTheGoal(rerolled, book(), Map.of(FISHING_ROD, 1), Map.of(), STRING, 1);
 
         // An exclusion of a source the goal never reads changes nothing but the hash: it is still a different input.
         assertNotEquals(plain.inputFingerprint(),
-                instance.inputFingerprint(goal, EMPTY, without("mine:minecraft:diamond_ore")));
+                instance.inputFingerprint(goal, held, without("mine:minecraft:diamond_ore")));
     }
 }

@@ -1,6 +1,7 @@
 package com.legoj15.megablockbot.game.nav;
 
 import com.legoj15.megablockbot.game.body.BotPlayer;
+import com.legoj15.megablockbot.game.build.Blueprint;
 import com.legoj15.megablockbot.nav.NavRuntime;
 import com.legoj15.megablockbot.nav.engine.Baritone;
 import com.legoj15.megablockbot.nav.engine.api.IBaritone;
@@ -12,15 +13,19 @@ import com.legoj15.megablockbot.nav.engine.api.pathing.goals.GoalNear;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.GoalXZ;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.GoalYLevel;
 import com.legoj15.megablockbot.nav.engine.api.selection.ISelectionManager;
+import com.legoj15.megablockbot.nav.engine.api.schematic.AbstractSchematic;
+import com.legoj15.megablockbot.nav.engine.api.schematic.IStaticSchematic;
 import com.legoj15.megablockbot.nav.engine.api.utils.IInteractionController;
 import com.legoj15.megablockbot.nav.engine.api.utils.IMineTargetPolicy;
 import com.legoj15.megablockbot.nav.engine.behavior.PathingBehavior;
 import com.legoj15.megablockbot.nav.engine.pathing.path.PathExecutor;
+import com.legoj15.megablockbot.nav.engine.process.BuilderProcess;
 import com.legoj15.megablockbot.nav.engine.process.MineProcess;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -30,6 +35,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Vec3i;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -85,6 +91,10 @@ public final class BotNavigator {
         TARGET_GONE,
         /** The body was replaced, removed or moved to another dimension while the command ran. */
         BODY_LOST,
+        /** A build ran out of a block: the builder paused with positions still to fill and none of their item held. */
+        MISSING_BLOCKS,
+        /** A build cannot go on for another reason (a block in the way it cannot break or reach). */
+        BUILD_STUCK,
         /** The engine threw. */
         ENGINE_ERROR
     }
@@ -112,11 +122,19 @@ public final class BotNavigator {
     private static final double CLOSER_BY = 1.0;
     /** Path cost per point of fall damage: about one second of walking per half heart, so a long fall is a last resort. */
     private static final double FALL_DAMAGE_PENALTY = 20.0;
+    /**
+     * What the engine may bridge and pillar with (design 2.2's survival defaults): the stone and dirt a body in a cave
+     * has to spare. A build command empties this for its own command, so nothing it does places a block the blueprint
+     * does not name (see {@link #build}).
+     */
+    private static final List<Item> THROWAWAY = List.of(
+        Items.DIRT, Items.COARSE_DIRT, Items.COBBLESTONE, Items.COBBLED_DEEPSLATE, Items.NETHERRACK,
+        Items.ANDESITE, Items.DIORITE, Items.GRANITE, Items.TUFF, Items.BLACKSTONE, Items.BASALT);
 
     private static final Map<UUID, BotNavigator> NAVIGATORS = new HashMap<>();
     private static List<Block> avoidBreaking;
 
-    private enum Kind { GOTO, MINE, FOLLOW, EXPLORE }
+    private enum Kind { GOTO, MINE, FOLLOW, EXPLORE, BUILD }
 
     private BotPlayer body;
     @Nullable
@@ -126,6 +144,9 @@ public final class BotNavigator {
     private String failure;
     @Nullable
     private FailKind failKind;
+    /** The exception behind an engine-error failure: what a caller needs to fail its own task with the cause. */
+    @Nullable
+    private Throwable failureCause;
     private BreakFilter breakFilter = BreakFilter.ALLOW_ALL;
 
     @Nullable
@@ -154,6 +175,13 @@ public final class BotNavigator {
     private volatile List<BlockPos> withheldForAir = List.of();
     /** Set by the target policy once it lets a block under water through, so that the air falling on the way does not stop it. */
     private volatile boolean wetCommitted;
+    /** The blueprint the running build command places, and where its anchor is. */
+    @Nullable
+    private Blueprint blueprint;
+    @Nullable
+    private BlockPos buildAnchor;
+    /** The box a running build may break in (the blueprint's own box); null when no build runs. Read from search threads. */
+    private volatile Box buildBox;
     /** What the running command waits for, when the engine's own process has ended and the navigator bridges the gap. */
     private Wait waiting = Wait.NONE;
     private final IMineTargetPolicy targetPolicy = this::selectTargets;
@@ -264,6 +292,81 @@ public final class BotNavigator {
     }
 
     /**
+     * Builds {@code toBuild} at {@code anchor} with the engine's own builder: it walks, places from the inventory and
+     * breaks what is in the way (issue 17). The engine's settings are set so that it
+     * <ul>
+     *   <li>places only from the inventory, and never with a block the blueprint does not name: the acceptable
+     *       throwaway list is emptied for this command, so the search will not plan a bridge of dirt on the way and the
+     *       builder's own placements are only the schematic's states, matched against what the body carries;</li>
+     *   <li>breaks only inside the blueprint's box, and only what the break filter allows: the box is added to the
+     *       filter for as long as this command runs, so a wall the body may not break is neither mined through nor
+     *       left standing inside the hut either;</li>
+     *   <li>builds the whole thing at once: no layers, no repeats, no orientation flips, the anchor the min
+     *       corner.</li>
+     * </ul>
+     * Done when the builder finishes; failed when it cannot go on. The builder's own answer to running out of a block
+     * is to pause and say what is missing ({@code BuilderProcess}: "Missing materials ... Unable to do it. Pausing."),
+     * which would wait for ever here: this turns the pause into a failure the moment it is seen, naming the block the
+     * body ran out of ({@link FailKind#MISSING_BLOCKS}), or {@link FailKind#BUILD_STUCK} when the hold-up is not
+     * materials. A build that starts again skips what stands: the builder compares the world with the schematic
+     * itself.
+     */
+    public void build(Blueprint toBuild, BlockPos anchor) {
+        Baritone e = begin(Kind.BUILD);
+        blueprint = toBuild;
+        buildAnchor = anchor;
+        buildBox = new Box(anchor, anchor.offset(toBuild.widthX() - 1, toBuild.heightY() - 1, toBuild.lengthZ() - 1));
+        Settings s = e.settings();
+        // Only what the body carries, and only where the blueprint says: see the javadoc.
+        s.acceptableThrowawayItems.set(new ArrayList<>());
+        s.allowInventory.set(true);
+        s.buildInLayers.set(false);
+        s.startAtLayer.set(0);
+        s.skipFailedLayers.set(false);
+        s.buildRepeat.set(new Vec3i(0, 0, 0));
+        s.buildRepeatCount.set(-1);
+        // The anchor is the min corner as it was given: none of the orientation flips upstream offers.
+        s.schematicOrientationX.set(false);
+        s.schematicOrientationY.set(false);
+        s.schematicOrientationZ.set(false);
+        s.mapArtMode.set(false);
+        s.buildIgnoreExisting.set(false);
+        applyBreakFilter(e);
+        e.getBuilderProcess().build(toBuild.name(), schematicOf(toBuild),
+                new Vec3i(anchor.getX(), anchor.getY(), anchor.getZ()));
+    }
+
+    /** The blueprint as the builder reads it: a static schematic whose gaps (air and structure void) hold null. */
+    private static IStaticSchematic schematicOf(Blueprint blueprint) {
+        BlockState[][][] states = new BlockState[blueprint.widthX()][blueprint.lengthZ()][blueprint.heightY()];
+        for (Blueprint.Entry entry : blueprint.blocks()) {
+            states[entry.pos().getX()][entry.pos().getZ()][entry.pos().getY()] = entry.state();
+        }
+        return new BlueprintSchematic(states);
+    }
+
+    /** A static array over the blueprint's box; a null state is a cell the blueprint does not name, left as it is. */
+    private static final class BlueprintSchematic extends AbstractSchematic implements IStaticSchematic {
+        private final BlockState[][][] states;
+
+        BlueprintSchematic(BlockState[][][] states) {
+            super(states.length, states.length == 0 ? 0 : states[0].length == 0 ? 0 : states[0][0].length,
+                    states.length == 0 ? 0 : states[0].length);
+            this.states = states;
+        }
+
+        @Override
+        public BlockState desiredState(int x, int y, int z, BlockState current, List<BlockState> approxPlaceable) {
+            return states[x][z][y];
+        }
+
+        @Override
+        public BlockState getDirect(int x, int y, int z) {
+            return states[x][z][y];
+        }
+    }
+
+    /**
      * The blocks the running mine command knows of and may head for, nearest first; empty when none runs. Plain
      * positions, so that a caller can keep them in its own set and find them again (see {@link #plain}).
      */
@@ -339,9 +442,13 @@ public final class BotNavigator {
         kind = null;
         goal = null;
         focus = null;
+        blueprint = null;
+        buildAnchor = null;
+        buildBox = null;
         state = State.IDLE;
         failure = null;
         failKind = null;
+        failureCause = null;
         releaseInput();
     }
 
@@ -373,6 +480,15 @@ public final class BotNavigator {
     @Nullable
     public FailKind failKind() {
         return state == State.FAILED ? failKind : null;
+    }
+
+    /**
+     * The exception the engine threw behind an {@link FailKind#ENGINE_ERROR} failure, or null in any other case: a
+     * caller that reports the failure as its own can carry the cause instead of only the text.
+     */
+    @Nullable
+    public Throwable failureCause() {
+        return state == State.FAILED && failKind == FailKind.ENGINE_ERROR ? failureCause : null;
     }
 
     /** True while the body is working at a block (progress that its position and inventory do not show yet). */
@@ -444,6 +560,7 @@ public final class BotNavigator {
             // A brain must not throw (BotBrain): nothing around the body tick catches it, so an engine bug would take
             // the server down. It fails this command instead, with the exception as the reason.
             NavRuntime.LOGGER.error("Navigation engine failed for {}", body.getGameProfile().getName(), e);
+            failureCause = e;
             fail(FailKind.ENGINE_ERROR, "engine error: " + e);
             return;
         }
@@ -469,7 +586,76 @@ public final class BotNavigator {
                     else finish();
                 }
             }
+            case BUILD -> tickBuild();
         }
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Building
+    // ---------------------------------------------------------------------------------------------------------
+
+    /**
+     * The builder's state, once per tick: done when its process has ended (it clears itself when nothing is wrong any
+     * more, {@code BuilderProcess.onLostControl}); failed when it paused, which is upstream's answer to being unable to
+     * go on -- with materials missing, or with something in the way it cannot break or reach. Nobody here calls
+     * {@code pause()}, so a paused builder is always that.
+     */
+    private void tickBuild() {
+        BuilderProcess process = engine.getBuilderProcess();
+        if (!process.isActive()) {
+            finish();
+            return;
+        }
+        if (process.isPaused()) {
+            Item missing = missingBuildBlock();
+            if (missing != null) {
+                int shortBy = shortOf(missing);
+                fail(FailKind.MISSING_BLOCKS, reason("the builder is out of " + describeItem(missing) + " (" + shortBy
+                        + " more needed)"));
+            } else {
+                fail(FailKind.BUILD_STUCK, reason("the builder cannot go on"));
+            }
+        }
+    }
+
+    /**
+     * The first item the build is short of, or null when it is not short of any: for every position that does not hold
+     * its block yet, what places that block is needed, and the body has to hold as many of them as there are
+     * positions. Read from the world, as the builder itself does.
+     */
+    @Nullable
+    private Item missingBuildBlock() {
+        if (blueprint == null || buildAnchor == null) return null;
+        ServerLevel level = body.serverLevel();
+        Map<Item, Integer> needed = new LinkedHashMap<>();
+        for (Blueprint.Entry entry : blueprint.blocks()) {
+            BlockPos at = buildAnchor.offset(entry.pos());
+            if (level.getBlockState(at).getBlock() == entry.state().getBlock()) continue;
+            needed.merge(entry.state().getBlock().asItem(), 1, Integer::sum);
+        }
+        for (Map.Entry<Item, Integer> need : needed.entrySet()) {
+            if (body.getInventory().countItem(need.getKey()) < need.getValue()) return need.getKey();
+        }
+        return null;
+    }
+
+    /** How many more of the item the build still needs than the body holds. */
+    private int shortOf(Item item) {
+        if (blueprint == null || buildAnchor == null) return 1;
+        ServerLevel level = body.serverLevel();
+        int needed = 0;
+        for (Blueprint.Entry entry : blueprint.blocks()) {
+            BlockPos at = buildAnchor.offset(entry.pos());
+            if (level.getBlockState(at).getBlock() != entry.state().getBlock()
+                    && entry.state().getBlock().asItem() == item) {
+                needed++;
+            }
+        }
+        return Math.max(1, needed - body.getInventory().countItem(item));
+    }
+
+    private static String describeItem(Item item) {
+        return BuiltInRegistries.ITEM.getKey(item).toString();
     }
 
     /** Max fall without water: 3 is free, and each block more costs a point of health; keep at least half of what is left above 3 hearts. */
@@ -514,9 +700,16 @@ public final class BotNavigator {
         kind = newKind;
         goal = null;
         focus = null;
+        blueprint = null;
+        buildAnchor = null;
+        buildBox = null;
+        // A build empties the throwaway list for its own command (see {@link #build}); whatever comes next gets the
+        // survival list back, so a mine after a build can still bridge.
+        e.settings().acceptableThrowawayItems.set(new ArrayList<>(THROWAWAY));
         waiting = Wait.NONE;
         failure = null;
         failKind = null;
+        failureCause = null;
         state = State.WORKING;
         return e;
     }
@@ -585,16 +778,21 @@ public final class BotNavigator {
         s.exploreMaintainY.set(-1);
         s.fallDamagePenalty.set(FALL_DAMAGE_PENALTY);
         s.maxFallHeightNoWater.set(fallLimit(body.getHealth()));
-        s.acceptableThrowawayItems.set(new ArrayList<>(List.of(
-            Items.DIRT, Items.COARSE_DIRT, Items.COBBLESTONE, Items.COBBLED_DEEPSLATE, Items.NETHERRACK,
-            Items.ANDESITE, Items.DIORITE, Items.GRANITE, Items.TUFF, Items.BLACKSTONE, Items.BASALT)));
+        s.acceptableThrowawayItems.set(new ArrayList<>(THROWAWAY));
         s.blocksToAvoidBreaking.set(new ArrayList<>(avoidBreaking()));
         applyBreakFilter(e);
     }
 
     private void applyBreakFilter(Baritone e) {
         BreakFilter filter = breakFilter;
-        e.setBreakFilter((level, pos, state) -> level instanceof ServerLevel server && filter.mayBreak(server, pos, state));
+        // The box is read on every question (search threads too), so a build command that starts or ends changes what
+        // an already-installed filter answers without anyone re-installing it.
+        e.setBreakFilter((level, pos, state) -> {
+            if (!(level instanceof ServerLevel server)) return false;
+            if (!filter.mayBreak(server, pos, state)) return false;
+            Box box = buildBox;
+            return box == null || box.inside(pos);
+        });
     }
 
     /**
@@ -885,6 +1083,15 @@ public final class BotNavigator {
             if (blocks.apply(pos.above(dy)).getFluidState().is(FluidTags.WATER)) return true;
         }
         return false;
+    }
+
+    /** An inclusive box of blocks, read from search threads while a build runs. */
+    private record Box(BlockPos min, BlockPos max) {
+        boolean inside(BlockPos at) {
+            return at.getX() >= min.getX() && at.getX() <= max.getX()
+                    && at.getY() >= min.getY() && at.getY() <= max.getY()
+                    && at.getZ() >= min.getZ() && at.getZ() <= max.getZ();
+        }
     }
 
     /** What a mine command knows about its approach to one block. */

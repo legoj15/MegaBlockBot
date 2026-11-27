@@ -5,11 +5,14 @@ import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.ToolClass;
 import com.legoj15.megablockbot.core.ToolTier;
+import com.legoj15.megablockbot.core.goal.Goal;
 import com.legoj15.megablockbot.core.snapshot.ContainerSight;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.megablockbot.core.snapshot.StackFacts;
 import com.legoj15.megablockbot.core.snapshot.StationSight;
 import com.legoj15.megablockbot.game.body.BotPlayer;
+import com.legoj15.megablockbot.game.build.Blueprint;
+import com.legoj15.megablockbot.game.build.Blueprints;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -72,6 +75,15 @@ public final class SnapshotCollector {
     }
 
     public static Snapshot collect(BotPlayer body, BotMemory memory) {
+        return collect(body, memory, List.of());
+    }
+
+    /**
+     * Collects for {@code wants}: the goals a snapshot is being taken for (the goal being planned or judged, and the
+     * goals waiting in its queue). A {@link Goal.Build} among them gets its structure report; anything a strategy
+     * declares it still needs is not collected here.
+     */
+    public static Snapshot collect(BotPlayer body, BotMemory memory, List<Goal> wants) {
         MinecraftServer server = body.getServer();
         if (server != null && !server.isSameThread()) {
             throw new IllegalStateException("a snapshot is collected on the server thread, not " + Thread.currentThread().getName());
@@ -92,17 +104,26 @@ public final class SnapshotCollector {
         stations(level, dimension, at, memory, builder);
         containers(level, dimension, at, memory, builder);
         BodySight.fill(level, dimension, at, memory, builder);
-        addGoalFacts(body, builder);
+        addGoalFacts(level, dimension, wants, builder);
         return builder.build();
     }
 
     /**
-     * The place where structure reports and strategy observations will be added. Both depend on what the active goal
-     * names (a blueprint and its anchor, an observation key), which {@link #collect} is not given yet: when the executor
-     * lands it passes the goal's wants in, and this method fills {@code structures} and {@code observations}. Until
-     * then both stay empty.
+     * The structure report of every build goal among {@code wants}, under the key its postcondition reads
+     * ({@code blueprint@anchor}): how many of the blueprint's positions are required, how many hold the blueprint's
+     * block already, and what is missing as the items that place the still-wrong blocks (issue 17). The report is read
+     * from the world -- never from a note, since a player can see blocks that stand -- and an unknown blueprint name
+     * gives no report at all, so the planner says the goal cannot be planned rather than planning a guess.
      */
-    private static void addGoalFacts(BotPlayer body, Snapshot.Builder builder) {
+    private static void addGoalFacts(ServerLevel level, String dimension, List<Goal> wants, Snapshot.Builder builder) {
+        for (Goal goal : wants) {
+            if (!(goal instanceof Goal.Build build)) continue;
+            Blueprint blueprint = Blueprints.load(level.getServer(), build.blueprint());
+            if (blueprint == null) continue;
+            builder.structure(build.blueprint() + "@" + build.anchor().encode(),
+                blueprint.report(level, build.dimension(), dimension, new BlockPos(build.anchor().x(),
+                    build.anchor().y(), build.anchor().z())));
+        }
     }
 
     // ---- inventory ---------------------------------------------------------------------------------------------
