@@ -21,9 +21,10 @@ import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;
 
 /**
  * The blocks the world generator puts into the world: what a bot can go and look for. Every block has a loot table,
- * so every block is "a source" of what it drops, but a campfire, a bookshelf or a crafting table stands only inside
- * a structure or where someone placed it, and a plan that sets out to find one walks until its search is spent
- * (found by a live run: furnace fuel was planned as charcoal from a campfire).
+ * so every block is "a source" of what it drops, but a campfire, a bookshelf, a crafting table or a line of
+ * redstone wire stands only inside a structure or where someone placed it, and a plan that sets out to find one
+ * walks until its search is spent (found by live runs: furnace fuel was planned as charcoal from a campfire, and a
+ * quarry's redstone as dust from redstone wire).
  *
  * <p>Read from the data the generator itself runs on, so a mod's ores and plants are covered without naming them:
  * every configured feature and every dimension's terrain settings is written out through its own codec, and each
@@ -36,15 +37,24 @@ final class NaturalBlocks {
     private NaturalBlocks() {}
 
     /**
-     * Blocks a feature places from its own code, with no block id in its configuration to read, each with the
-     * feature. Only blocks that a recipe also makes need a line here (the planner asks about generation only for
-     * those, see {@code GatherCosts}), which keeps this to what the 1.21.1 sources show.
+     * Blocks the world makes from code, with nothing in a feature's configuration to read, each with where it comes
+     * from in the 1.21.1 sources. The planner does not go looking for a block that is neither read nor listed here,
+     * so a line missing from this list costs a real source: add one when a goal says its item has none.
      */
-    private static final Map<String, String> PLACED_BY_CODE = Map.of(
-        "minecraft:glowstone", "GlowstoneFeature (glowstone_blob)",
-        "minecraft:snow", "SnowAndFreezeFeature (freeze_top_layer), and snowfall",
-        "minecraft:dripstone_block", "DripstoneClusterFeature and LargeDripstoneFeature",
-        "minecraft:bone_block", "FossilFeature (its structure templates)");
+    private static final Map<String, String> PLACED_BY_CODE = Map.ofEntries(
+        Map.entry("minecraft:obsidian", "water running onto a lava source (LiquidBlock); EndSpikeFeature"),
+        Map.entry("minecraft:ice", "SnowAndFreezeFeature (freeze_top_layer)"),
+        Map.entry("minecraft:snow", "SnowAndFreezeFeature (freeze_top_layer), and snowfall"),
+        Map.entry("minecraft:glowstone", "GlowstoneFeature (glowstone_blob)"),
+        Map.entry("minecraft:vine", "VinesFeature, and the vine decorators of jungle and swamp trees"),
+        Map.entry("minecraft:dripstone_block", "DripstoneClusterFeature and LargeDripstoneFeature"),
+        Map.entry("minecraft:pointed_dripstone", "PointedDripstoneFeature and DripstoneClusterFeature"),
+        Map.entry("minecraft:bone_block", "FossilFeature (its structure templates)"),
+        Map.entry("minecraft:sculk", "SculkPatchFeature"),
+        Map.entry("minecraft:kelp_plant", "KelpFeature (the stalk under the kelp it names)"),
+        Map.entry("minecraft:tall_seagrass", "SeagrassFeature"),
+        Map.entry("minecraft:chorus_flower", "ChorusPlantFeature"),
+        Map.entry("minecraft:basalt", "BasaltPillarFeature and BasaltColumnsFeature"));
 
     /** The ids of every block the generator places, sorted. Never empty on a working server. */
     static Set<String> read(MinecraftServer server, BuildNotes notes) {

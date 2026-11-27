@@ -2480,27 +2480,27 @@ final class SolverPlannerTest {
     }
 
     @Test
-    void aMadeBlockTheWorldDoesNotGenerateIsNotASourceWhateverItDrops() {
+    void aBlockTheWorldDoesNotGenerateIsNotASourceWhateverItDropsOrIsMadeOf() {
         // A campfire gives charcoal when broken and stands only in a village. Diorite has a recipe too, and the
-        // generator places it. A vine has no recipe: where it comes from is not asked.
+        // generator places it. Redstone wire has no recipe of its own and stands only where someone laid it.
         ItemKey campfire = ItemKey.of("campfire");
         ItemKey diorite = ItemKey.of("diorite");
-        ItemKey vine = ItemKey.of("vine");
+        ItemKey dust = ItemKey.of("redstone");
         Source fromCampfire = new Source.MineBlock("mine:minecraft:campfire", CHARCOAL, "minecraft:campfire",
                 null, ToolTier.HAND, false, false, false, 2.0, false, null, false);
         Source fromDiorite = new Source.MineBlock("mine:minecraft:diorite", diorite, "minecraft:diorite",
                 null, ToolTier.HAND, false, false, false, 1.0, false, null, true);
-        Source fromVine = new Source.MineBlock("mine:minecraft:vine", vine, "minecraft:vine",
+        Source fromWire = new Source.MineBlock("mine:minecraft:redstone_wire", dust, "minecraft:redstone_wire",
                 null, ToolTier.HAND, false, false, false, 1.0, false, null, false);
         AcquisitionIndex indexOf = AcquisitionIndex.builder().addSource(fromCampfire).addSource(fromDiorite)
-                .addSource(fromVine).build();
+                .addSource(fromWire).build();
         SimpleRecipeBook made = bookWith(
                 recipe("campfire", campfire, 1, CRAFTING_TABLE, one(STICK), one(COAL), one(OAK_LOG)),
                 recipe("diorite", diorite, 2, null, one(COBBLESTONE), one(AMBER)));
         GatherCosts costs = new GatherCosts(made, indexOf, PlannerConfig.defaults(), Exclusions.NONE, EMPTY);
         assertFalse(costs.usable(fromCampfire), "a campfire is not a place to go looking for charcoal");
         assertTrue(costs.usable(fromDiorite), "a block the generator places is a source, recipe or not");
-        assertTrue(costs.usable(fromVine), "a block no recipe makes is a source without being asked");
+        assertFalse(costs.usable(fromWire), "a block nobody generates is not a source, recipe or not");
     }
 
     @Test

@@ -102,13 +102,16 @@ public final class ResolverGameTests {
             {"minecraft:cobblestone", "minecraft:stone"}, {"minecraft:oak_log", "minecraft:oak_log"},
             {"minecraft:raw_iron", "minecraft:iron_ore"}, {"minecraft:coal", "minecraft:coal_ore"},
             {"minecraft:diorite", "minecraft:diorite"}, {"minecraft:clay_ball", "minecraft:clay"},
-            {"minecraft:sand", "minecraft:sand"}, {"minecraft:glowstone_dust", "minecraft:glowstone"}};
+            {"minecraft:sand", "minecraft:sand"}, {"minecraft:glowstone_dust", "minecraft:glowstone"},
+            {"minecraft:redstone", "minecraft:redstone_ore"}, {"minecraft:obsidian", "minecraft:obsidian"},
+            {"minecraft:diamond", "minecraft:diamond_ore"}, {"minecraft:raw_gold", "minecraft:gold_ore"}};
         for (String[] pair : generated) {
             helper.assertTrue(mine(helper, index, pair[0], pair[1], false).generated(), pair[1] + " is not counted as generated");
         }
         String[][] made = {
             {"minecraft:charcoal", "minecraft:campfire"}, {"minecraft:book", "minecraft:bookshelf"},
-            {"minecraft:crafting_table", "minecraft:crafting_table"}, {"minecraft:oak_planks", "minecraft:oak_planks"}};
+            {"minecraft:crafting_table", "minecraft:crafting_table"}, {"minecraft:oak_planks", "minecraft:oak_planks"},
+            {"minecraft:redstone", "minecraft:redstone_wire"}};
         for (String[] pair : made) {
             helper.assertTrue(!mine(helper, index, pair[0], pair[1], false).generated(), pair[1] + " is counted as generated");
         }
