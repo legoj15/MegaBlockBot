@@ -77,8 +77,9 @@ returns its own `Failed`** (the executor does not abort a task that failed itsel
 `waiting()` is true while it waits on the game (a break, a pickup) so the stuck watchdog leaves it alone; `checkpoint()`
 returns hints for where to look after a restart, never facts.
 
-Registered here: `craft`, `smelt` and `equip`. `navigate`, `reach`, `mine`, `fish`, `kill`, `harvest`, `recover_drops`,
-`deposit`, `withdraw`, `look_inside` and `build` are registered by the navigation work (`TaskFeature`), not here.
+Registered here: `craft`, `smelt`, `stonecut`, `smith` and `equip`. `navigate`, `reach`, `mine`, `fish`, `kill`,
+`harvest`, `recover_drops`, `deposit`, `withdraw`, `look_inside` and `build` are registered by the navigation work
+(`TaskFeature`), not here.
 
 What the navigation tasks need from this runtime:
 
@@ -97,11 +98,12 @@ Leaf params: `recipe` (the game recipe id), `times`, `station` (empty or `minecr
 
 Everything about the station block — a table found standing or put down, walked to, opened, broken and taken up again,
 with the walks, the wide search out of a protected area and the interruptions — is `game.task.StationTask`, the base
-class `CraftTask` and `SmeltTask` share; `CraftTask` itself is the crafting grid. What the base class asks of its
-subclass: the station's item and block and what its failures call it, whether a standing one may be used where it is
-(any table, but only a furnace the body's memory says it placed) and whether it may be taken up now (a furnace only
-with a tool that makes it drop), whether the station's menu is open, whether the work is done, what must still be
-carried before anything is put down, and the work itself, which runs with the menu open.
+class `CraftTask`, `SmeltTask`, `StonecutTask` and `SmithTask` share; `CraftTask` itself is the crafting grid. What the
+base class asks of its subclass: the station's item and block and what its failures call it, whether a standing one may
+be used where it is (any crafting table, but only a furnace, stonecutter or smithing table the body's memory says it
+placed, for those are containers or job sites block safety keeps a stranger out of) and whether it may be taken up now
+(a furnace or a stonecutter only with a tool that makes it drop), whether the station's menu is open, whether the work
+is done, what must still be carried before anything is put down, and the work itself, which runs with the menu open.
 
 - The recipe is found again in the game by id (`RecipeManager.byKey`), because a shaped recipe's grid positions are not in
   the planner's book. Cells are the recipe's non-blank ingredients in order (= the planner's slot order); a shaped recipe
@@ -209,11 +211,11 @@ carried before anything is put down, and the work itself, which runs with the me
 The planner counts a crafting table in the inventory, never in the world (`SolverPlanner` ignores `Snapshot.stations`), so a
 table this body put down and never took up (the server stopped between placing and breaking, a cancel, a failure) costs
 the replanned goal four planks, or fails it when there are none to spare. `BotRuntime` therefore looks for one after a
-load and whenever a goal ends (`tidyArmed`): the nearest crafting table or furnace within reach that `BotMemory` says
-this body placed — a furnace while the body carries a tool that makes it drop, under the smelt task's rule below,
-whether or not it holds anything, for breaking one drops what it holds beside it and the tidy task picks that up too
-(`DropPickup`, the one walk to dropped items, over any item within `StationTask.SPILL_RADIUS` (3) blocks of where the
-furnace stood). Found, it runs
+load and whenever a goal ends (`tidyArmed`): the nearest crafting table, furnace, stonecutter or smithing table within
+reach that `BotMemory` says this body placed — a furnace or a stonecutter while the body carries a tool that makes it
+drop, a furnace under the smelt task's rule below, whether or not it holds anything, for breaking one drops what it
+holds beside it and the tidy task picks that up too (`DropPickup`, the one walk to dropped items, over any item within
+`StationTask.SPILL_RADIUS` (3) blocks of where the furnace stood). Found, it runs
 `CraftTask.takeUpStation(level, pos)` (the public face of `StationTask.takeUp`, for the base class is package-private:
 the station's own break and pickup, working nothing) before the executor is
 ticked again, so the next plan sees the station in the inventory. A failure there is logged, naming the block that
@@ -275,6 +277,61 @@ class its run is sized for), `times` (runs) and `station` (`minecraft:furnace`, 
   the burn still ends with the 2 ingots; a cancel in the middle of the burn and the tidy step after it end with the
   furnace, all the iron and nothing on the floor; and through the runtime a body asked to have 1 iron ingot ends
   satisfied.
+
+## `stonecut`
+
+Leaf params: the craft leaf's with an empty `layout` — `recipe` (the game recipe's id), `times` (cuts) and `station`
+(`minecraft:stonecutter`). The station and everything about it is `StationTask`'s; `StonecutTask` is the work in the
+open `StonecutterMenu` (slot 0 the input, slot 1 the result).
+
+- A stonecutter offers several results for one input, so filling the slot is not the work: the menu lists the recipes
+  for what the slot holds (the order `RecipeManager.getRecipesFor` gives), the task finds the leaf's recipe among them
+  and presses it — `clickMenuButton`, the call a client's click on the button row ends in, for a stonecutter selection
+  is a button, not a slot click. A menu that does not list the leaf's recipe, or whose result slot then offers another
+  item, is `Internal` naming the recipe.
+- One cut is: the first alternative carried (the craft task's rule without a layout) goes into the input slot as one
+  right-clicked item, the recipe is pressed, the result slot must offer the recipe's result, and it is taken into the
+  inventory whole or not at all with room asked for before anything is put in. Each cut consumes one input and gives
+  the recipe's result count (2 for slabs), and the leaf's goal is the absolute count after the step, so a task started
+  again makes only what is still missing.
+- The input slot never holds more than one cut's worth. On every exit — done, a failure, a pause, an abort — the
+  menu's close hands what is still in it back to the inventory (`AbstractContainerMenu.removed`), which is the base
+  class's way of emptying what a menu holds; the station is taken up again when the task placed it, as the base class
+  does.
+- A stonecutter is a mason's job site, which block safety keeps the body out of when it did not place it: a standing
+  one is used only when the body's memory says the body placed it, and otherwise the carried one is put down (the
+  furnace's rule). A stonecutter is stone, so it is taken up only with a tool that makes it drop — one broken by hand
+  drops nothing — and without one it is left standing, remembered as the body's, and the task completes all the same.
+- Failures: `TargetGone` for a recipe id the game does not have or one that is no stonecutting recipe; `MissingInput`
+  when the ingredient or the stonecutter is not carried; `NoRoom` before anything is put in; `Internal` as above; the
+  station failures are the base class's. The kind runs on the craft task's budget (the executor's default), for a cut
+  is as quick as a craft.
+- `StationGameTests`: three stone make six slabs and the stonecutter comes back; a missing input is a `MissingInput`
+  that puts nothing down.
+
+## `smith`
+
+Leaf params: the craft leaf's with an empty `layout` — `recipe` (the game recipe's id), `times` (upgrades) and
+`station` (`minecraft:smithing_table`). The station and everything about it is `StationTask`'s; `SmithTask` is the work
+in the open `SmithingMenu` (slot 0 template, 1 base, 2 addition, 3 result).
+
+- A smithing table needs no recipe chosen: with the three inputs in their slots the result slot shows the first
+  matching recipe's result, and taking it uses up one of each. The task puts the first alternative carried into each
+  slot in menu order (the craft task's rule without a layout; the alternatives come from the recipe's own predicates
+  through `StationRecipeSource.acceptedItems`, the same list the book was built with), then checks the result slot
+  offers the leaf's recipe's result — the menu matches against every smithing recipe there is, so a mod's recipe that
+  matches the same inputs would show first — and takes it whole or not at all with room asked for before anything is
+  put in.
+- The three slots never hold more than one upgrade's worth, and every exit hands what is still in them back to the
+  inventory through the menu's close, as the stonecut task's does. A smithing table is wood, so it is always taken up
+  again; the leaf's goal is the absolute count after the step, so a task started again makes only what is missing.
+- A smithing table is a toolsmith's job site, with the furnace's rule for using a standing one (only the body's own,
+  by memory). Failures: `TargetGone` for a recipe id the game does not have, one that is no smithing recipe or one of
+  the armour-trim kind; `MissingInput` naming the first input (in menu order) or the table not carried; `NoRoom`
+  before anything is put in; `Internal` when the result slot offers another item; the station failures are the base
+  class's. The kind runs on the craft task's budget.
+- `StationGameTests`: a template, a diamond pickaxe and a netherite ingot become a netherite pickaxe, the inputs gone
+  and the table back in the inventory.
 
 ## `mine`
 

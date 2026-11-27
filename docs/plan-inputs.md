@@ -46,8 +46,22 @@ Everything runs on the server thread; every product is immutable and published a
   `layout`, and the solver chooses between variants by cost, as between any two recipes that make one item.
   `SmeltTask` runs the leaf (see `docs/bot-runtime.md`); `CookingRecipeSource.variantOf` reads a variant id back into
   the game recipe and the fuel class, which is how the task knows what to run and what to feed it.
-- Other recipe types (campfire cooking, stonecutting, smithing) are unread until a source claims them. The summary
-  line counts them, for example `{minecraft:campfire_cooking=..., ...}`.
+- `StationRecipeSource` claims `minecraft:stonecutting` and `minecraft:smithing`. A stonecutting recipe becomes one
+  `RecipeDef` of kind `stonecut`, station `minecraft:stonecutter`, one slot (the ingredient's items, count 1) and the
+  recipe's result with its count (2 for slabs). A `SmithingTransformRecipe` — the netherite upgrades — becomes one of
+  kind `smith`, station `minecraft:smithing_table`, three slots in menu order (template, base, addition; count 1 each)
+  and the recipe's result count. The ingredients of a smithing recipe are not public in 1.21.1 (only the tests its
+  menu's slots make of an item), so each slot's alternatives are the registered items the recipe's own predicate
+  accepts, in registry order — the same list `StationRecipeSource.acceptedItems` hands the task that runs the leaf, so
+  the book and the task never disagree about what a slot takes. A recipe whose result is empty, one with an empty
+  ingredient among the three, and one that throws while read are skipped and counted in one note each, the way the
+  crafting source skips and notes. `SmithingTrimRecipe`s (armour trims) are skipped and counted in one note: their
+  result is the base item with a trim component, not an item of its own, which the planner's item-count goals cannot
+  ask for. `StonecutTask` and `SmithTask` run the two kinds (see `docs/bot-runtime.md`).
+- Campfire cooking stays unread. Every campfire recipe has a furnace twin the book already holds, and a campfire
+  cannot be taken up again: breaking it gives charcoal, not a campfire, so the planner would lose a station per use.
+  The summary line counts the type among those no source reads, for example
+  `{minecraft:campfire_cooking=...}`.
 
 ## Snapshot
 
@@ -153,7 +167,7 @@ forgets what was noted of the container). `BotMemory.peek(uuid)` reads without m
 `save()` is the compact persistent form; `BotMemory.restore(uuid, tag)` reads one back (tolerant of missing or
 malformed parts) and installs it as that body's memory, replacing what was there, which is how a body gets its memory
 back at spawn (`BotRuntime` installs a loaded memory when it first attaches to the body). `StationTask` notes the station it
-places (the craft task's table, the smelt task's furnace); the tasks that open a container (`withdraw`, `look_inside`) note what they find in it, and `use chest at` records the
+places (the craft task's table, the smelt task's furnace, the stonecut task's stonecutter, the smith task's table); the tasks that open a container (`withdraw`, `look_inside`) note what they find in it, and `use chest at` records the
 owner's word. The registry is cleared when the server stops.
 
 ## Checks

@@ -24,6 +24,12 @@ public record RecipeDef(String id, String kind, List<Slot> slots, ItemKey statio
     /** The kind of a recipe run in a furnace, a blast furnace or a smoker, with its fuel beside the ingredient. */
     public static final String SMELT = "smelt";
 
+    /** The kind of a recipe run at a stonecutter: one ingredient in, the recipe chosen from the list the menu offers. */
+    public static final String STONECUT = "stonecut";
+
+    /** The kind of a recipe run at a smithing table: a template, a base and an addition in, the result out. */
+    public static final String SMITH = "smith";
+
     public RecipeDef {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(kind, "kind");

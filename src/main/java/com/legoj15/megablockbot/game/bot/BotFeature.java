@@ -6,11 +6,14 @@ import com.legoj15.megablockbot.game.body.BotBrains;
 import com.legoj15.megablockbot.game.gametest.BotRuntimeGameTests;
 import com.legoj15.megablockbot.game.gametest.BotRuntimeMiningGameTests;
 import com.legoj15.megablockbot.game.gametest.SmeltGameTests;
+import com.legoj15.megablockbot.game.gametest.StationGameTests;
 import com.legoj15.megablockbot.game.gametest.SupplyChestGameTests;
 import com.legoj15.megablockbot.game.lang.ModelLanguageConfig;
 import com.legoj15.megablockbot.game.task.CraftTask;
 import com.legoj15.megablockbot.game.task.EquipTask;
+import com.legoj15.megablockbot.game.task.SmithTask;
 import com.legoj15.megablockbot.game.task.SmeltTask;
+import com.legoj15.megablockbot.game.task.StonecutTask;
 import com.legoj15.megablockbot.game.task.TaskRegistry;
 import com.legoj15.megablockbot.game.task.WithdrawGameTests;
 import com.legoj15.megablockbot.platform.Platform;
@@ -32,6 +35,8 @@ public final class BotFeature {
 
         TaskRegistry.register(CraftTask.KIND, CraftTask::new);
         TaskRegistry.register(SmeltTask.KIND, SmeltTask::new);
+        TaskRegistry.register(StonecutTask.KIND, StonecutTask::new);
+        TaskRegistry.register(SmithTask.KIND, SmithTask::new);
         TaskRegistry.register(EquipTask.KIND, EquipTask::new);
 
         // The owner's words go through a language model when megablockbot/language.json names one; with none (the
@@ -50,6 +55,6 @@ public final class BotFeature {
         Platform.loader().onServerStopping(server -> BotPlanner.shutdown());
 
         Platform.loader().registerGameTests(BotRuntimeGameTests.class, BotRuntimeMiningGameTests.class,
-                SupplyChestGameTests.class, WithdrawGameTests.class, SmeltGameTests.class);
+                SupplyChestGameTests.class, WithdrawGameTests.class, SmeltGameTests.class, StationGameTests.class);
     }
 }

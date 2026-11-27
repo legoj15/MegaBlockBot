@@ -198,9 +198,9 @@ public final class SmeltTask extends StationTask {
     protected Failure missingCarried(BotPlayer body) {
         int runs = runsWanted(body);
         if (runs <= 0) return null;
-        Failure ingredient = missing(body, ingredients, runs * runIngredient);
+        Failure ingredient = missingInput(body, ingredients, runs * runIngredient, "smelt");
         if (ingredient != null) return ingredient;
-        return missing(body, fuels, runs * runFuel);
+        return missingInput(body, fuels, runs * runFuel, "smelt");
     }
 
     @Override
@@ -420,32 +420,14 @@ public final class SmeltTask extends StationTask {
     }
 
     /**
-     * Shift-clicks what the slot holds into the inventory, whole or not at all — the craft's rule, for the same
-     * reason: a take in part would drop the rest at the feet of a body that cannot pick it up. Null, or why not.
+     * Shift-clicks what the slot holds into the inventory, whole or not at all, counting what arrived: the shared take
+     * every station task makes of a slot ({@link StationTask#takeResult}), over one of the furnace's own.
      */
     @Nullable
     private Failure takeOut(BotPlayer body, AbstractFurnaceMenu menu, int menuSlot) {
-        Slot slot = menu.getSlot(menuSlot);
-        if (!slot.hasItem()) return null;
-        ItemStack offered = slot.getItem();
-        // The slot's own stack: the move empties it, and an emptied stack answers air. What it was is read first.
-        Item item = offered.getItem();
-        int made = offered.getCount();
-        int room = MenuHand.roomFor(body, offered);
-        if (room < made) {
-            return new Failure.NoRoom(ItemKeys.of(item), "there is no room in the inventory for the " + made + " "
-                + ItemKeys.of(item).id() + " the furnace's slot holds (room for " + room + ")" + furnaceWhere());
-        }
-        int before = MenuHand.carriedCount(body, item);
-        new MenuHand(body, menu).moveOut(menuSlot);
-        clicked = true;
-        int arrived = MenuHand.carriedCount(body, item) - before;
-        if (arrived < made) {
-            return new Failure.NoProgress(0, "only " + arrived + " of the " + made + " "
-                + ItemKeys.of(item).id() + " taken from the furnace reached the inventory; the rest was dropped at the feet"
-                + furnaceWhere());
-        }
-        return null;
+        Failure failure = takeResult(body, menu, menuSlot, furnaceWhere());
+        if (failure == null) clicked = true; // the task clicked: whatever else this tick did, it was not a quiet one
+        return failure;
     }
 
     /** The runs still to do: what the inventory still needs of the result, in whole runs. */
@@ -459,24 +441,6 @@ public final class SmeltTask extends StationTask {
         if (!there.isEmpty() && !there.is(item)) return 0;
         int cap = slot.getMaxStackSize(there.isEmpty() ? new ItemStack(item, 1) : there);
         return there.isEmpty() ? cap : cap - there.getCount();
-    }
-
-    /** The first of the items in their own order that the body carries, as a craft takes the first alternative held. */
-    @Nullable
-    private static Item firstCarried(BotPlayer body, List<Item> items) {
-        for (Item item : items) {
-            if (MenuHand.carriedCount(body, item) > 0) return item;
-        }
-        return null;
-    }
-
-    @Nullable
-    private static Failure missing(BotPlayer body, List<Item> items, int wanted) {
-        int carried = 0;
-        for (Item item : items) carried += MenuHand.carriedCount(body, item);
-        if (carried >= wanted) return null;
-        return new Failure.MissingInput(ItemKeys.of(items.get(0)), wanted - carried,
-            "the smelt needs " + wanted + " of " + ItemKeys.of(items.get(0)).id() + " and the body carries " + carried);
     }
 
     /** Whether the furnace is burning: the game's own answer, read from the block it lights while it burns. */

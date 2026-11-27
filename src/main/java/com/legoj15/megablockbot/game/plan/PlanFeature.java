@@ -15,6 +15,7 @@ public final class PlanFeature {
         // RecipeSources.register during their init; the book is built after all of them ran, at server start.
         RecipeSources.register(new CraftingRecipeSource());
         RecipeSources.register(new CookingRecipeSource());
+        RecipeSources.register(new StationRecipeSource());
 
         // Once at server start and after every /reload, after the loader's own data hooks, like the acquisition index.
         Platform.loader().onServerDataLoaded(RecipeBookBuilder::rebuild);

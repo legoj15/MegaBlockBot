@@ -24,7 +24,9 @@ import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ClickType;
+import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -293,14 +295,17 @@ abstract class StationTask extends BodyTask {
         if (state.is(Blocks.FURNACE)) return SmeltTask.takeUp(standing, Items.FURNACE, Blocks.FURNACE);
         if (state.is(Blocks.BLAST_FURNACE)) return SmeltTask.takeUp(standing, Items.BLAST_FURNACE, Blocks.BLAST_FURNACE);
         if (state.is(Blocks.SMOKER)) return SmeltTask.takeUp(standing, Items.SMOKER, Blocks.SMOKER);
+        if (state.is(Blocks.STONECUTTER)) return StonecutTask.takeUp(standing);
+        if (state.is(Blocks.SMITHING_TABLE)) return SmithTask.takeUp(standing);
         return CraftTask.takeUp(standing);
     }
 
     /**
      * The nearest station within reach that this body's memory says it placed and the tidy step may take up, or null.
-     * A crafting table always qualifies; a furnace while the body carries a tool that makes it drop, for a furnace
-     * broken by hand drops nothing and there would be no item to wait for — whether or not it holds anything, for
-     * breaking one drops what it holds beside it and the take-up picks that up too. What {@link #takeUp} is for: a
+     * A crafting table and a smithing table always qualify (a break by hand drops them); a furnace and a stonecutter
+     * while the body carries a tool that makes them drop, for a furnace or a stonecutter broken by hand drops nothing
+     * and there would be no item to wait for — a furnace whether or not it holds anything, for breaking one drops what
+     * it holds beside it and the take-up picks that up too. What {@link #takeUp} is for: a
      * runtime asks after a restart and when a goal ends.
      */
     @Nullable
@@ -326,9 +331,11 @@ abstract class StationTask extends BodyTask {
 
     private static boolean tidyMayTakeUp(ServerLevel level, BotPlayer body, BlockPos pos) {
         BlockState state = level.getBlockState(pos);
-        if (state.is(Blocks.CRAFTING_TABLE)) return true;
-        if (!(state.getBlock() instanceof AbstractFurnaceBlock)) return false;
-        return dropsFor(body, state);
+        if (state.is(Blocks.CRAFTING_TABLE) || state.is(Blocks.SMITHING_TABLE)) return true;
+        // A stonecutter is stone and a furnace is a machine: both drop only for a tool, and a break by hand would
+        // destroy the station the tidy step is there to recover.
+        if (state.is(Blocks.STONECUTTER) || state.getBlock() instanceof AbstractFurnaceBlock) return dropsFor(body, state);
+        return false;
     }
 
     /** Whether the body carries something that makes the block drop when broken: a furnace broken by hand drops nothing. */
@@ -338,6 +345,62 @@ abstract class StationTask extends BodyTask {
             if (!stack.isEmpty() && stack.isCorrectToolForDrops(state)) return true;
         }
         return false;
+    }
+
+    // ─── What a run at a station shares: choosing an input, asking for one, taking the result ──────────────────
+
+    /** The first of the items in their own order that the body carries, as a craft takes the first alternative held. */
+    @Nullable
+    static Item firstCarried(BotPlayer body, List<Item> items) {
+        for (Item item : items) {
+            if (MenuHand.carriedCount(body, item) > 0) return item;
+        }
+        return null;
+    }
+
+    /**
+     * The missing-input failure for one input slot of a recipe, or null when the body carries enough of the slot's
+     * items: it names the slot's first alternative and how many are short, for that is the item a gather would seek.
+     */
+    @Nullable
+    static Failure missingInput(BotPlayer body, List<Item> alternatives, int wanted, String what) {
+        int carried = 0;
+        for (Item item : alternatives) carried += MenuHand.carriedCount(body, item);
+        if (carried >= wanted) return null;
+        return new Failure.MissingInput(ItemKeys.of(alternatives.get(0)), wanted - carried,
+            "the " + what + " needs " + wanted + " of " + ItemKeys.of(alternatives.get(0)).id()
+                + " and the body carries " + carried);
+    }
+
+    /**
+     * Shift-clicks what the slot holds into the inventory and counts what arrived, the take every station task makes
+     * of a result slot. The take is whole or not at all — the craft's rule, for a take in part would drop the rest at
+     * the feet of a body that cannot pick it up — so the slot's whole stack must have room before anything moves.
+     * Null when all of it arrived; otherwise why not. {@code where} names the station in the detail, where the task
+     * knows it.
+     */
+    @Nullable
+    protected Failure takeResult(BotPlayer body, AbstractContainerMenu menu, int menuSlot, String where) {
+        Slot slot = menu.getSlot(menuSlot);
+        if (!slot.hasItem()) return null;
+        ItemStack offered = slot.getItem();
+        // The slot's own stack: the move empties it, and an emptied stack answers air. What it was is read first.
+        Item item = offered.getItem();
+        int made = offered.getCount();
+        int room = MenuHand.roomFor(body, offered);
+        if (room < made) {
+            return new Failure.NoRoom(ItemKeys.of(item), "there is no room in the inventory for the " + made + " "
+                + ItemKeys.of(item).id() + " the slot holds (room for " + room + ")" + where);
+        }
+        int before = MenuHand.carriedCount(body, item);
+        new MenuHand(body, menu).moveOut(menuSlot);
+        int arrived = MenuHand.carriedCount(body, item) - before;
+        if (arrived < made) {
+            return new Failure.NoProgress(0, "only " + arrived + " of the " + made + " "
+                + ItemKeys.of(item).id() + " taken from the slot reached the inventory; the rest was dropped at the feet"
+                + where);
+        }
+        return null;
     }
 
     // ---------------------------------------------------------------------------------------------------------
