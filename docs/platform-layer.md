@@ -40,12 +40,15 @@ The holder's loader arms are the only loader directives outside `platform/<loade
 All are register calls made during init. Listeners run on the server thread, except `onRegisterCommands`, which
 runs wherever the command tree is built (a worker thread while data loads).
 
-- `configDir()`, `onServerStarted`, `onServerStopping`, `onServerTick` (end of each tick),
+- `configDir()`, `onServerStarted`, `onServerStopping`, `onServerStopped`, `onServerTick` (end of each tick),
   `onRegisterCommands` (the dispatcher).
-- `onServerDataLoaded`, `onBlockBroken`, `onBlockPlaced` and `onChatMessage` name NeoForge events that differ on 26.x
-  (`TagsUpdatedEvent` was split, `BlockEvent.BreakEvent` became `BreakBlockEvent`; `ServerChatEvent` is unchecked
-  there), so `NeoForgeLoaderServices` implements them under `//? if bot {` and throws `UnsupportedOperationException`
-  on every other node. Enabling `bot_enabled` on a 26.x node fails to compile there until they are ported.
+- `onServerStopping` is skipped when the tick loop crashes (`MinecraftServer.runServer` posts the event only when the
+  loop ends normally); `onServerStopped` (`ServerStoppedEvent`) runs on every path, after the server has saved and
+  closed, so it is the place to drop per-server state and not one to save or log players out in.
+- `onServerDataLoaded`, `onBlockBroken`, `onBlockPlaced`, `onChatMessage` and `onPlayerLoggedIn` name NeoForge events that differ on 26.x
+  (`TagsUpdatedEvent` was split, `BlockEvent.BreakEvent` became `BreakBlockEvent`; `ServerChatEvent` and
+  `PlayerEvent.PlayerLoggedInEvent` are unchecked there), so `NeoForgeLoaderServices` implements them under
+  `//? if bot {` and throws `UnsupportedOperationException` on every other node. Enabling `bot_enabled` on a 26.x node fails to compile there until they are ported.
 - `onServerDataLoaded`: once at server start (NeoForge: `ServerStartingEvent`, the first moment after the data
   load that has a server) and after every `/reload` (`TagsUpdatedEvent` `SERVER_DATA_LOAD` at LOWEST priority, so
   after NeoForge rebuilt the villager trades; the server comes from `ServerLifecycleHooks`).
@@ -53,6 +56,9 @@ runs wherever the command tree is built (a worker thread while data loads).
   NeoForge 21.1 has no after-the-fact block events, so the implementation takes `BreakEvent` /
   `EntityPlaceEvent` at LOWEST priority (cancelled ones are skipped) and delivers at the end of the tick. Player
   breaks only: explosions, pistons and fluids are not reported.
+- `onPlayerLoggedIn`: a player has finished joining (NeoForge: `PlayerEvent.PlayerLoggedInEvent`, the last thing
+  `placeNewPlayer` does, so the player is listed and in its level), server thread. A body's own join is reported too.
+  A listener that throws fails that player's login, so it must catch what it can.
 - `onChatMessage` with a `ChatListener`: a player's chat line (the raw text they typed), on the server thread. NeoForge
   takes `ServerChatEvent` at LOWEST priority, so a line another handler cancelled is skipped; it only observes and never
   cancels or edits the line. A body's own chat counts: a body is a player.

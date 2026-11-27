@@ -8,12 +8,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import javax.annotation.Nullable;
@@ -56,6 +59,12 @@ public final class BodyManager {
     private final Map<UUID, Integer> pendingRespawns = new LinkedHashMap<>();
     // Where names the server knows are looked up: its own profile cache, unless a test supplies one.
     private Supplier<GameProfileCache> profileCache;
+    // Questions about the server that no GameTest can make come out the other way: it is hardcore (the world's flag
+    // cannot be set from a test) and it is in its final stop (a GameTest runs inside the server it would have to stop).
+    private BooleanSupplier hardcore;
+    private BooleanSupplier serverStopped;
+    // Bodies whose respawn a test makes fail without a throw (vanilla gives no way to), by UUID.
+    private final Set<UUID> respawnsFailing = new HashSet<>();
     @Nullable
     private BodyRecords records;
     private long ticks;
@@ -63,10 +72,28 @@ public final class BodyManager {
     private BodyManager(MinecraftServer server) {
         this.server = server;
         this.profileCache = server::getProfileCache;
+        this.hardcore = server::isHardcore;
+        this.serverStopped = server::isStopped;
     }
 
     public static BodyManager of(MinecraftServer server) {
         return INSTANCES.computeIfAbsent(server, BodyManager::new);
+    }
+
+    /** The server's manager if it has one, without making one: for callers that may run after the server stopped. */
+    @Nullable
+    static BodyManager existing(MinecraftServer server) {
+        return INSTANCES.get(server);
+    }
+
+    /**
+     * The server has stopped, whichever way it ended: drops its manager, so that the map does not keep the server, its
+     * levels and its bodies for as long as the JVM lives. The stopping hook is not where this belongs, since a crash
+     * skips it; this one runs from the {@code finally} that every exit goes through, after the stop itself, which is
+     * also why nothing that needs the server alive (the bodies' logout) is done here.
+     */
+    static void onServerStopped(MinecraftServer server) {
+        if (INSTANCES.remove(server) != null) MegaBlockBot.LOGGER.info("Body manager of the stopped server dropped");
     }
 
     /** The UUID of the body called {@code name}: offline-style and never a real account's. */
@@ -90,21 +117,23 @@ public final class BodyManager {
      * permission level 2 or above (ops, command blocks, the console) is never held back. Below that: only a player
      * can own a body, may own at most {@link BodyConstants#MAX_BODIES_PER_OWNER} of them (spawned or not: a body does
      * not stop being theirs by being logged out), and may not give one the name of a player the server's profile cache
-     * knows, since that player is just offline. A body that already exists is not new: whoever may command it may
-     * spawn it again.
+     * knows, since that player is just offline. A body that already exists is not new, so it is not held to the
+     * owner limit again, but its name is checked all the same: a player of its name may have joined since, and the
+     * body gave way to them ({@link #onPlayerJoined}), which only holds while it is not brought back beside them.
      */
     public void checkMaySpawn(CommandSourceStack source, String name) throws BodyException {
         if (source.hasPermission(BodyConstants.PRIVILEGED_PERMISSION_LEVEL)) return;
-        if (records().findByName(name) != null) return;
-        ServerPlayer caller = source.getPlayer();
-        if (caller == null) throw new BodyException("only a player or an operator may spawn a body");
-        int owned = 0;
-        for (BodyRecords.Entry entry : records().all()) {
-            // A body that died in hardcore is gone for good, so it no longer takes a slot.
-            if (!entry.dead() && caller.getUUID().equals(entry.ownerUuid())) owned++;
-        }
-        if (owned >= BodyConstants.MAX_BODIES_PER_OWNER) {
-            throw new BodyException("you already own " + owned + " bodies, the most a player without operator permission may have");
+        if (records().findByName(name) == null) {
+            ServerPlayer caller = source.getPlayer();
+            if (caller == null) throw new BodyException("only a player or an operator may spawn a body");
+            int owned = 0;
+            for (BodyRecords.Entry entry : records().all()) {
+                // A body that died in hardcore is gone for good, so it no longer takes a slot.
+                if (!entry.dead() && caller.getUUID().equals(entry.ownerUuid())) owned++;
+            }
+            if (owned >= BodyConstants.MAX_BODIES_PER_OWNER) {
+                throw new BodyException("you already own " + owned + " bodies, the most a player without operator permission may have");
+            }
         }
         if (isKnownPlayerName(name)) {
             throw new BodyException(name + " is the name of a player this server knows: a body may not take it");
@@ -129,6 +158,43 @@ public final class BodyManager {
      */
     public void useProfileCache(@Nullable Supplier<GameProfileCache> cache) {
         this.profileCache = cache != null ? cache : server::getProfileCache;
+    }
+
+    /**
+     * Where the manager reads whether the world is hardcore; null restores the server's own answer. A test hook: the
+     * flag is the world's and a GameTest world is not hardcore. Set it only inside one synchronous step of a test: the
+     * manager is the server's, so every body on it sees the answer meanwhile.
+     */
+    public void useHardcore(@Nullable BooleanSupplier hardcore) {
+        this.hardcore = hardcore != null ? hardcore : server::isHardcore;
+    }
+
+    /**
+     * Where the manager reads whether the server is in its final stop (see {@link #leavesLoggedInAtShutdown}); null
+     * restores the server's own answer. A test hook, used like {@link #useHardcore}.
+     */
+    public void useServerStopped(@Nullable BooleanSupplier stopped) {
+        this.serverStopped = stopped != null ? stopped : server::isStopped;
+    }
+
+    /**
+     * Makes every respawn attempt of the body with this UUID fail without a throw, or stops doing so. A test hook:
+     * vanilla's respawn does not fail on demand, and the give-up path ({@link BodyConstants#MAX_RESPAWN_FAILURES}) needs
+     * one that does. Per body, because bodies of other tests die and respawn beside it.
+     */
+    public void failRespawnsOf(UUID id, boolean fail) {
+        if (fail) respawnsFailing.add(id);
+        else respawnsFailing.remove(id);
+    }
+
+    /** What the body record says about one body, for tests and for whatever reports it. */
+    public record RecordSummary(boolean stayLoaded, boolean dead) {}
+
+    /** The record of the body called {@code name} (ignoring case), or null when the record has none. */
+    @Nullable
+    public RecordSummary recordSummary(String name) {
+        BodyRecords.Entry entry = records().findByName(name);
+        return entry == null ? null : new RecordSummary(entry.stayLoaded(), entry.dead());
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -247,21 +313,37 @@ public final class BodyManager {
     }
 
     private void despawn(BotPlayer body, String why) {
-        logOut(body, why, false);
+        logOut(body, why, false, false);
     }
 
     /**
      * Logs the body out and records it as not wanting to stay loaded: whoever despawns a body does not want it back
-     * at the next server start, whatever its goal says. {@code died} marks the record as that of a body that died in a
-     * hardcore world, which is never spawned again.
+     * at the next server start, whatever its goal says, unless {@code keepsGoal}: the server's own decision to take a
+     * body out (its respawn kept failing) is not its owner's, and a body with a goal then still comes back with the
+     * server. What it wanted is read from the brain and from the record, since a respawn that failed halfway has
+     * already moved the brain to a replacement that never came. {@code died} marks the record as that of a body that
+     * died in a hardcore world, which is never spawned again; a body found dead in one is marked whoever asked, since
+     * a despawn in the tick it died in comes before the end-of-tick respawn that would have retired it.
      */
-    private void logOut(BotPlayer body, String why, boolean died) {
+    private void logOut(BotPlayer body, String why, boolean died, boolean keepsGoal) {
         if (body.hasDisconnected()) return;
-        records().put(entryFor(body, false, died));
+        boolean stay = false;
+        if (keepsGoal) {
+            BodyRecords.Entry before = records().get(body.getUUID());
+            stay = body.brain().wantsToStayLoaded() || (before != null && before.stayLoaded());
+        }
+        boolean dead = died || diedInHardcore(body);
+        records().put(entryFor(body, stay, dead));
         idleTicks.remove(body.getUUID());
         pendingRespawns.remove(body.getUUID());
-        MegaBlockBot.LOGGER.info("Despawning body {} ({})", body.getGameProfile().getName(), why);
+        MegaBlockBot.LOGGER.info("Despawning body {} ({}{})", body.getGameProfile().getName(), why,
+            dead && !died ? "; it died in a hardcore world" : "");
         body.logOut(Component.literal(why));
+    }
+
+    /** True for a body that is dead in a hardcore world: vanilla's respawn would make it a spectator, so it is never brought back. */
+    private boolean diedInHardcore(BotPlayer body) {
+        return hardcore.getAsBoolean() && !body.wonGame && body.getHealth() <= 0.0F;
     }
 
     /**
@@ -359,7 +441,68 @@ public final class BodyManager {
                 MegaBlockBot.LOGGER.error("Body {} could not be logged out at server stop", body.getGameProfile().getName(), e);
             }
         }
-        INSTANCES.remove(server);
+    }
+
+    /**
+     * A body's disconnect arrives; true when it is not to be carried out because the server is in its final stop.
+     * That is how a crash reaches the bodies: the stopping hook above never ran, so {@code PlayerList.removeAll} meets
+     * them, and each disconnect that removed its body at once made the walk jump over the entry after it, a real
+     * player's perhaps. In its stop the server has already saved every player ({@code saveAll} comes first), and the
+     * bodies go with the process like a real player whose channel has not closed yet, still listed. What a logout would
+     * have brought up to date in the record is done here instead, since the level save that follows writes the file.
+     * {@code isStopped} is set before {@code stopServer} on every path; on a normal stop the hook above has already
+     * taken the bodies out by then, so this meets none.
+     */
+    boolean leavesLoggedInAtShutdown(BotPlayer body) {
+        if (!serverStopped.getAsBoolean()) return false;
+        try {
+            if (!body.isDeadOrDying()) {
+                // As in logOut: a respawn that failed halfway left this body a brain that wants nothing, and what it
+                // wanted is then only in the record.
+                BodyRecords.Entry before = records().get(body.getUUID());
+                boolean stay = body.brain().wantsToStayLoaded() || (before != null && before.stayLoaded());
+                records().put(entryFor(body, stay, false));
+            }
+        } catch (RuntimeException e) {
+            // A brain that throws here is what may have crashed the server; the record keeps its last entry.
+            MegaBlockBot.LOGGER.error("Record of body {} could not be brought up to date at server stop", body.getGameProfile().getName(), e);
+        }
+        MegaBlockBot.LOGGER.info("Body {} stays listed at the server's final stop; it was saved with the players", body.getGameProfile().getName());
+        return true;
+    }
+
+    /**
+     * A player finished joining. A real player takes the name of a body that has it: vanilla's duplicate-login rule
+     * (the newest login wins, the older session of the same profile is disconnected) compares UUIDs, and a body's is its
+     * own, so it would never meet the body. The body gives way instead: logged out through the normal path, which saves
+     * it and keeps its record, and its owner is told why when they are on. Whatever goes wrong here must not fail the
+     * joining player's login, so nothing is thrown.
+     */
+    void onPlayerJoined(ServerPlayer player) {
+        if (player instanceof BotPlayer) return;
+        try {
+            String name = player.getGameProfile().getName();
+            BotPlayer body = get(name);
+            if (body == null) return;
+            UUID ownerId = body.ownerId();
+            String bodyName = body.getGameProfile().getName();
+            logOut(body, "a player named " + name + " joined", false, false);
+            MegaBlockBot.LOGGER.warn("Body {} gave way to the player {} who joined under its name", bodyName, name);
+            ServerPlayer owner = ownerId == null ? null : server.getPlayerList().getPlayer(ownerId);
+            if (owner != null && !(owner instanceof BotPlayer)) {
+                owner.sendSystemMessage(Component.literal("Your body " + bodyName + " was despawned: a player named " + name
+                    + " joined, and a player keeps their name. The body is kept, but you cannot spawn it again while this server knows that player."));
+            }
+        } catch (RuntimeException e) {
+            MegaBlockBot.LOGGER.error("A body that shares the name of the joining player {} could not give way", player.getGameProfile().getName(), e);
+        }
+    }
+
+    /** Where the loader's login hook lands: the manager of the player's server, if it has one (a server without one has no bodies). */
+    static void playerJoined(ServerPlayer player) {
+        MinecraftServer server = player.getServer();
+        BodyManager manager = server == null ? null : INSTANCES.get(server);
+        if (manager != null) manager.onPlayerJoined(player);
     }
 
     /** End of every server tick. */
@@ -402,7 +545,8 @@ public final class BodyManager {
             String name = body.getGameProfile().getName();
             if (failures >= BodyConstants.MAX_RESPAWN_FAILURES) {
                 MegaBlockBot.LOGGER.error("Body {} could not be respawned {} times; despawning it", name, failures, failure);
-                despawn(body, "its respawn kept failing");
+                // The server's decision, not the owner's: a body with a goal still comes back with the server.
+                logOut(body, "its respawn kept failing", false, true);
             } else {
                 MegaBlockBot.LOGGER.warn("Respawn of body {} failed (attempt {} of {}); trying again next tick", name, failures,
                     BodyConstants.MAX_RESPAWN_FAILURES, failure);
@@ -417,10 +561,11 @@ public final class BodyManager {
      */
     private boolean respawnOrRetire(BotPlayer body) {
         if (!body.isAwaitingRespawn()) return true;
-        if (server.isHardcore() && !body.wonGame && body.getHealth() <= 0.0F) {
-            logOut(body, "died in a hardcore world", true);
+        if (diedInHardcore(body)) {
+            logOut(body, "died in a hardcore world", true, false);
             return true;
         }
+        if (respawnsFailing.contains(body.getUUID())) return false;
         return body.performRespawn();
     }
 

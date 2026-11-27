@@ -10,11 +10,13 @@ import java.nio.file.Path;
 import java.util.function.Consumer;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.loading.FMLPaths;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
+import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 // Used by the bot-only hooks below; kept out of the other nodes' compile so a NeoForge that renames one cannot break them.
@@ -26,6 +28,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.neoforged.bus.api.EventPriority;
 import net.neoforged.neoforge.event.ServerChatEvent;
 import net.neoforged.neoforge.event.TagsUpdatedEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.server.ServerStartingEvent;
 import net.neoforged.neoforge.server.ServerLifecycleHooks;
@@ -70,6 +73,11 @@ public final class NeoForgeLoaderServices implements LoaderServices {
     @Override
     public void onServerStopping(Consumer<MinecraftServer> listener) {
         NeoForge.EVENT_BUS.addListener(ServerStoppingEvent.class, event -> listener.accept(event.getServer()));
+    }
+
+    @Override
+    public void onServerStopped(Consumer<MinecraftServer> listener) {
+        NeoForge.EVENT_BUS.addListener(ServerStoppedEvent.class, event -> listener.accept(event.getServer()));
     }
 
     @Override
@@ -143,6 +151,18 @@ public final class NeoForgeLoaderServices implements LoaderServices {
                 event -> listener.chat(event.getPlayer(), event.getRawText()));
         *///?} else {
         throw new UnsupportedOperationException("onChatMessage is implemented for bot nodes only");
+        //?}
+    }
+
+    @Override
+    public void onPlayerLoggedIn(Consumer<ServerPlayer> listener) {
+        //? if bot {
+        /*// Posted from the last line of PlayerList.placeNewPlayer, on the server thread: the player is listed and in its level.
+        NeoForge.EVENT_BUS.addListener(PlayerEvent.PlayerLoggedInEvent.class, event -> {
+            if (event.getEntity() instanceof ServerPlayer player) listener.accept(player);
+        });
+        *///?} else {
+        throw new UnsupportedOperationException("onPlayerLoggedIn is implemented for bot nodes only");
         //?}
     }
 

@@ -14,6 +14,9 @@ public final class BodyFeature {
         Platform.loader().onServerStarted(server -> BodyManager.of(server).onServerStarted());
         Platform.loader().onServerTick(server -> BodyManager.of(server).tick());
         Platform.loader().onServerStopping(server -> BodyManager.of(server).onServerStopping());
+        // A crash skips the stopping hook; the stopped one is the one every exit reaches.
+        Platform.loader().onServerStopped(BodyManager::onServerStopped);
+        Platform.loader().onPlayerLoggedIn(BodyManager::playerJoined);
         BodyCommands.register();
         Platform.loader().registerGameTests(BodyGameTests.class);
     }

@@ -5,6 +5,7 @@ import java.nio.file.Path;
 import java.util.function.Consumer;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
 
 /**
  * Loader identity, config location and the hooks bot code needs. Every hook is a plain register call made during
@@ -23,6 +24,13 @@ public interface LoaderServices {
 
     /** Runs the listener when a server begins stopping, while its levels and players are still there. */
     void onServerStopping(Consumer<MinecraftServer> listener);
+
+    /**
+     * Runs the listener once a server has stopped, whichever way it ended. {@link #onServerStopping} is not that: a
+     * server whose tick loop crashes never reaches it, while this one runs from the {@code finally} every exit goes
+     * through, after the server has saved and closed. For dropping what is kept per server; nothing that needs the server alive.
+     */
+    void onServerStopped(Consumer<MinecraftServer> listener);
 
     /** Runs the listener at the end of every server tick. */
     void onServerTick(Consumer<MinecraftServer> listener);
@@ -54,6 +62,13 @@ public interface LoaderServices {
      * message, and a message another handler cancelled is not reported.
      */
     void onChatMessage(ChatListener listener);
+
+    /**
+     * Runs the listener when a player has finished joining, on the server thread: the player is in the player list and
+     * its level. A body's own join is reported like any other. It observes; an exception from the listener fails that
+     * player's login, so a listener must not throw.
+     */
+    void onPlayerLoggedIn(Consumer<ServerPlayer> listener);
 
     /**
      * Registers the vanilla {@code @GameTest} methods of the given classes. A no-op unless GameTests are enabled, so it

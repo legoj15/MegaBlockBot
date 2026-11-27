@@ -221,9 +221,21 @@ chat ──► Language layer (LLM, tool calls) ──► typed Goal
   permission level 2 (`BodyManager.checkMaySpawn`): only a player can spawn a body; at most
   `MAX_BODIES_PER_OWNER` (2) bodies may be theirs, spawned or not; and a name the server's profile
   cache knows as a player is refused, since that player is only offline (the cache's own entries
-  for bodies, under a body's UUID, do not count). Level 2 and the console are not limited.
-  `unprivilegedOwnerIsCappedAtTwoBodies`, `knownPlayerNameIsRefusedBelowLevelTwo` and
-  `mayCommandRules` measure these, the first two through the command.
+  for bodies, under a body's UUID, do not count). The name check applies to a body that already
+  exists too (the cap does not: it already counts). Level 2 and the console are not limited.
+  `unprivilegedOwnerIsCappedAtTwoBodies`, `knownPlayerNameIsRefusedBelowLevelTwo`,
+  `knownPlayerNameIsRefusedForAnExistingBodyToo` and `mayCommandRules` measure these, the first
+  three through the command.
+- A real player who joins under the name of an online body is never shut out of it. Vanilla's
+  duplicate-login rule is that the newest login wins (the older session of the same profile is
+  disconnected), but it compares UUIDs and a body's is its own, so nothing in vanilla stops two
+  players of one name. The body gives way: `BodyManager.onPlayerJoined`, run from the loader's
+  player-logged-in hook, logs it out through the normal path (saved, record kept, stay-loaded off),
+  tells its owner if they are online, and the refusal above keeps it from being spawned beside
+  that player for as long as the server knows them (a level 2 source can still spawn it while they
+  are offline, and it gives way again at their next join; while they are online `spawn` refuses
+  the name as taken). `realPlayerJoiningTakesTheNameOfABody` joins a fake player through
+  `placeNewPlayer`.
 - Chunk loading: keeps a ticket around itself only while it has an active goal. A logged-in body
   loads chunks like any player (view distance 6), so the manager despawns a body whose brain does
   not want to stay loaded and whose owner is not online in the same dimension within 128 blocks,
@@ -237,7 +249,12 @@ chat ──► Language layer (LLM, tool calls) ──► typed Goal
   (`bodySpawnedDeadComesBackAlive`). In a hardcore world vanilla's respawn would make the body a
   spectator, so a body that dies there is despawned instead, its record is marked dead, and
   spawning that name again is refused with a message saying why (run on a hardcore dev server;
-  no GameTest can make the world hardcore).
+  no GameTest can make the world hardcore). A despawn in the tick the body dies in, before the
+  end-of-tick respawn would have retired it, marks the record dead the same way
+  (`despawnInTheTickOfAHardcoreDeathMarksTheRecord`, with the manager told the world is hardcore
+  for those few calls). A body that gave up on its respawn keeps its stay-loaded flag, because the
+  server gave up, not its owner: a body with a goal comes back with the server
+  (`bodyThatGaveUpRespawningStillComesBackWithTheServer`).
 
 ### 3.2 Reflex layer
 
@@ -470,7 +487,9 @@ empty food supply cannot hold a goal paused forever without a result.
   an entry that does not decode is skipped and logged; a file with a schema this build does not
   know is left untouched, the record set is read-only for the session, and that is logged once as
   an error naming the file (run on a dev server: the file's hash is the same after a session that
-  spawned a body).
+  spawned a body). A file with no schema tag counts as such a file: schema 1 is the only one this
+  mod has written and it always carries the tag, so there is no older form to read, and the log
+  says "no schema tag" instead of a schema number.
 - **Goal state**, in the body's player data: the root goal, the goal tree's node specs and states,
   a small per-node checkpoint map, the replan counters, pending
   death records (drop positions and death time), the queued goals and the owner's paused flag.
@@ -487,6 +506,19 @@ empty food supply cannot hold a goal paused forever without a result.
   `PlayerList.removeAll` disconnects by index and a body's disconnect shrinks the list at once,
   which would skip the player after it. A GameTest cannot stop the server; on a dev server both
   bodies log out before "Saving players" in the log and come back where they were.
+  A crash gets the same walk without the hook: `MinecraftServer.runServer` posts the stopping event
+  only when the tick loop ends normally, and calls `stopServer` from its `finally` on every path.
+  There `PlayerList.saveAll` has already saved the bodies when `removeAll` meets them, and `server.isStopped()`
+  is true (it is set just before `stopServer`, on every path). A body's disconnect then leaves it
+  listed, as a real player's does until its channel closes, and only brings its record entry up to
+  date (the file is written by the level save that follows); the entry after it is no longer jumped
+  over (`shutdownWalkReachesARealPlayerListedAfterABody` walks the list by index with the manager
+  told the server is stopping). Nothing runs on a hard kill: the record is then up to 200 ticks old
+  (its refresh interval) and player data as old as vanilla's last autosave. The manager of a server is
+  dropped by the loader's server-stopped hook, which also runs on every path, not by the stopping
+  hook that a crash skips; otherwise the static map kept a crashed server, its levels and its bodies
+  reachable for the rest of the JVM (an integrated server that crashes and is followed by another).
+  No GameTest can end the server it runs in, so that last part is measured on a dev server only.
 
 The checkpoint map holds the few facts a task kind declares worth keeping across a restart,
 as hints for where to look (a mine shaft's position and the Y it reached, a village found, a

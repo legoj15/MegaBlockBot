@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.function.Supplier;
+import javax.annotation.Nullable;
 import net.minecraft.advancements.AdvancementHolder;
 import net.minecraft.commands.CommandSource;
 import net.minecraft.commands.CommandSourceStack;
@@ -24,9 +25,12 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.Connection;
+import net.minecraft.network.PacketSendListener;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.contents.TranslatableContents;
+import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.PacketFlow;
+import net.minecraft.network.protocol.common.ClientboundDisconnectPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundSystemChatPacket;
 import net.minecraft.resources.ResourceLocation;
@@ -38,6 +42,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.CommonListenerCookie;
 import net.minecraft.server.players.GameProfileCache;
+import net.minecraft.server.players.PlayerList;
 import net.minecraft.server.players.SleepStatus;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.EntityType;
@@ -347,6 +352,120 @@ public final class BodyGameTests {
         });
     }
 
+    /**
+     * A body that gave up on its respawn is out of the world, but the server did that, not its owner: with a goal it
+     * must come back at the next server start like any body with a goal (the record's stay-loaded flag is what the start
+     * reads). The control has no goal and is not asked back. The respawn is made to fail without a throw, one body at a
+     * time, because vanilla's does not fail on demand.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 60)
+    public static void bodyThatGaveUpRespawningStillComesBackWithTheServer(GameTestHelper helper) {
+        floor(helper);
+        Supplier<BotBrain> factory = CounterBrain::new;
+        Rig goal = Rig.spawn(helper, "gu_goal", new Vec3(5.5, FLOOR_TOP, 8.5), 0.0F, 60, factory);
+        Rig idle = Rig.spawn(helper, "gu_idle", new Vec3(10.5, FLOOR_TOP, 8.5), 0.0F, 60, factory);
+        goal.alongside(idle);
+        int[] tick = {0};
+        goal.onEachTick(() -> {
+            int t = ++tick[0];
+            if (t == 3) {
+                ((CounterBrain) goal.body().brain()).stay = true; // a goal set since the record was last brought up to date
+                for (Rig rig : List.of(goal, idle)) {
+                    rig.manager().failRespawnsOf(rig.id(), true);
+                    rig.body().hurt(helper.getLevel().damageSources().genericKill(), 1000.0F);
+                    helper.assertTrue(rig.body().isDeadOrDying(), "setup: a lethal damage source did not kill " + rig.name());
+                }
+                return;
+            }
+            if (t < 3) return;
+            if (goal.isLoggedIn() || idle.isLoggedIn()) {
+                helper.assertTrue(t < 20, "still logged in " + (t - 3) + " ticks after the death: the respawn was not given up on");
+                return;
+            }
+            BodyManager.RecordSummary kept = goal.manager().recordSummary(goal.name());
+            BodyManager.RecordSummary dropped = idle.manager().recordSummary(idle.name());
+            helper.assertTrue(kept != null && kept.stayLoaded(), "the body with a goal was not recorded as wanting to stay loaded after it gave up: " + kept);
+            helper.assertTrue(dropped != null && !dropped.stayLoaded(), "the body with no goal was recorded as wanting to stay loaded: " + dropped);
+            goal.pass();
+        });
+    }
+
+    /**
+     * A scripted despawn (a command, a task, the idle policy) in the tick a body dies in a hardcore world comes before
+     * the end-of-tick respawn that would have retired it, so it has to mark the record itself: a body that died there is
+     * never spawned again. The world is not hardcore in a GameTest, so the manager is told it is, for these few calls.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 40)
+    public static void despawnInTheTickOfAHardcoreDeathMarksTheRecord(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawn(helper, "hard", new Vec3(8.5, FLOOR_TOP, 8.5), 0.0F, 40);
+        helper.runAfterDelay(3, rig.guard(() -> {
+            BotPlayer body = rig.body();
+            rig.manager().useHardcore(() -> true);
+            try {
+                body.hurt(helper.getLevel().damageSources().genericKill(), 1000.0F);
+                helper.assertTrue(body.isDeadOrDying(), "setup: a lethal damage source did not kill it");
+                rig.manager().despawn(body);
+            } finally {
+                rig.manager().useHardcore(null);
+            }
+            helper.assertTrue(!rig.isLoggedIn(), "the body is still logged in after its despawn");
+            BodyManager.RecordSummary record = rig.manager().recordSummary(rig.name());
+            helper.assertTrue(record != null && record.dead(), "the record of a body that died in a hardcore world and was despawned in the same tick does not say it died: " + record);
+            rig.pass();
+        }));
+    }
+
+    /**
+     * The stop that crashed skipped the stopping hook, so {@code PlayerList.removeAll} (which disconnects each player
+     * by index) meets the bodies, and a body's disconnect used to take it out of the list at once, which made the walk
+     * jump over the entry after it: a real player listed after a body never got its disconnect. This walks the player
+     * list the way {@code removeAll} does, by index, calling the same {@code connection.disconnect} on the body and on a
+     * real player listed right after it (and only on those two: the other players of the other tests are not to be
+     * disconnected). The manager is told the server is in its final stop, which a GameTest cannot be. The real player
+     * is one whose connection keeps its channel open and its place in the list, as a real one's does until the channel
+     * closes. The body is left logged in and the record is brought up to date, because nothing after this brings it up.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 40)
+    public static void shutdownWalkReachesARealPlayerListedAfterABody(GameTestHelper helper) {
+        floor(helper);
+        Supplier<BotBrain> factory = CounterBrain::new;
+        Rig rig = Rig.spawn(helper, "stop", new Vec3(8.5, FLOOR_TOP, 8.5), 0.0F, 40, factory);
+        helper.runAfterDelay(2, rig.guard(() -> {
+            ServerLevel level = helper.getLevel();
+            MinecraftServer server = level.getServer();
+            PlayerList players = server.getPlayerList();
+            // Out and in again in this one step, so that the real player placed next is right behind the body in the list.
+            Vec3 where = rig.body().position();
+            rig.manager().despawn(rig.body());
+            BotPlayer body = rig.respawn(where);
+            ((CounterBrain) body.brain()).stay = true; // a goal set since the record was last brought up to date
+            ProbeConnection connection = ProbeConnection.create();
+            ServerPlayer real = standalonePlayer(server, level, UUID.randomUUID(), "gt_stopreal");
+            join(server, real, connection);
+            try {
+                List<ServerPlayer> list = players.getPlayers();
+                helper.assertTrue(list.indexOf(real) == list.indexOf(body) + 1, "setup: the real player is not listed right after the body");
+                rig.manager().useServerStopped(() -> true);
+                try {
+                    Component reason = Component.translatable("multiplayer.disconnect.server_shutdown");
+                    for (int i = 0; i < list.size(); i++) {
+                        ServerPlayer player = list.get(i);
+                        if (player == body || player == real) player.connection.disconnect(reason);
+                    }
+                } finally {
+                    rig.manager().useServerStopped(null);
+                }
+                helper.assertTrue(connection.disconnectSent, "the real player listed after the body never got its disconnect");
+                BodyManager.RecordSummary record = rig.manager().recordSummary(rig.name());
+                helper.assertTrue(record != null && record.stayLoaded(), "the record was not brought up to date for the body's goal: " + record);
+                rig.pass();
+            } finally {
+                leave(server, real);
+            }
+        }));
+    }
+
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 40)
     public static void inventorySurvivesDespawnAndSpawn(GameTestHelper helper) {
         floor(helper);
@@ -622,6 +741,100 @@ public final class BodyGameTests {
     }
 
     /**
+     * The refusal of a known player's name is not only for new bodies: a body that exists (its record is kept after it is
+     * despawned) is refused to whoever is below level 2 once a player of its name is known to the server, which is
+     * what keeps the body that gave way to a joining player from coming back beside them. Controls: level 2 is not
+     * limited, and with the name unknown the owner may spawn the body again.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 40)
+    public static void knownPlayerNameIsRefusedForAnExistingBodyToo(GameTestHelper helper) {
+        floor(helper);
+        ServerLevel level = helper.getLevel();
+        MinecraftServer server = level.getServer();
+        ServerPlayer owner = playerInArena(helper, "gt_keeper");
+        Rig rig = Rig.spawn(helper, "kept", new Vec3(8.5, FLOOR_TOP, 8.5), 0.0F, 40, null, owner.getGameProfile());
+        helper.runAfterDelay(2, rig.guard(() -> {
+            Path cacheFile = null;
+            try {
+                cacheFile = Files.createTempFile("megablockbot-gametest-usercache", ".json");
+                GameProfileCache cache = new GameProfileCache((names, callback) -> {}, cacheFile.toFile());
+                cache.add(new GameProfile(UUID.randomUUID(), rig.name())); // a player of this name, as the server knows them
+                rig.manager().useProfileCache(() -> cache);
+                rig.manager().despawn(rig.body());
+                helper.assertTrue(rig.manager().recordSummary(rig.name()) != null, "setup: the despawned body has no record");
+
+                Feedback refusal = new Feedback();
+                int result = run(server, source(server, level, 0, owner, refusal), "aiplayer spawn " + rig.name());
+                helper.assertTrue(result == 0 && !rig.isLoggedIn(), "the owner brought back a body under the name of a player the server knows (result " + result + ")");
+                helper.assertTrue(!refusal.messages.isEmpty(), "the refusal did not say anything");
+
+                helper.assertTrue(run(server, source(server, level, 2, owner, new Feedback()), "aiplayer spawn " + rig.name()) == 1 && rig.isLoggedIn(),
+                    "a level-2 source was refused the body of a known player's name");
+                rig.manager().despawn(rig.body());
+
+                rig.manager().useProfileCache(null); // the GameTest server has no profile cache: nobody is known
+                helper.assertTrue(run(server, source(server, level, 0, owner, new Feedback()), "aiplayer spawn " + rig.name()) == 1 && rig.isLoggedIn(),
+                    "the owner was refused their own body under a name nobody knows");
+                rig.pass();
+            } catch (IOException e) {
+                throw new IllegalStateException(e);
+            } finally {
+                rig.manager().useProfileCache(null);
+                if (cacheFile != null) {
+                    try {
+                        Files.deleteIfExists(cacheFile);
+                    } catch (IOException ignored) {
+                        // A leftover file in the temp directory is harmless.
+                    }
+                }
+            }
+        }));
+    }
+
+    /**
+     * Vanilla lets the newest login win a duplicate (it disconnects the older session of the same profile), and a real
+     * player must never be shut out of their own name; a body has its own UUID, so vanilla's rule never meets it. The body
+     * gives way instead: it is logged out with its record kept, its owner is told, and nothing but the joining player
+     * can be under that name until they leave. The fake player joins through {@code placeNewPlayer}, as a client does;
+     * the owner is another one whose connection keeps what it is sent. The owner's notice is told from the join and leave
+     * lines vanilla broadcasts by being a literal text; the control is that those lines did arrive.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 40)
+    public static void realPlayerJoiningTakesTheNameOfABody(GameTestHelper helper) {
+        floor(helper);
+        ServerLevel level = helper.getLevel();
+        MinecraftServer server = level.getServer();
+        PlayerList players = server.getPlayerList();
+        UUID ownerId = UUID.randomUUID();
+        Rig rig = Rig.spawn(helper, "yield", new Vec3(8.5, FLOOR_TOP, 8.5), 0.0F, 40, null, new GameProfile(ownerId, "gt_yieldowner"));
+        helper.runAfterDelay(2, rig.guard(() -> {
+            ServerPlayer owner = standalonePlayer(server, level, ownerId, "gt_yieldowner");
+            ServerPlayer joiner = standalonePlayer(server, level, UUID.randomUUID(), rig.name());
+            EmbeddedChannel ownerChannel = join(server, owner);
+            try {
+                helper.assertTrue(players.getPlayerByName(rig.name()) == rig.body(), "setup: the body is not the player of its name");
+                ownerChannel.outboundMessages().clear();
+
+                join(server, joiner);
+
+                helper.assertTrue(!rig.isLoggedIn(), "the body kept its name after a player of that name joined");
+                helper.assertTrue(players.getPlayerByName(rig.name()) == joiner && !joiner.hasDisconnected(), "the joining player was not left with their name");
+                helper.assertTrue(rig.manager().recordSummary(rig.name()) != null, "the record of the body that gave way was not kept");
+                helper.assertTrue(systemMessages(ownerChannel, true) >= 1, "control failed: the owner was not sent the join line of the player");
+                helper.assertTrue(systemMessages(ownerChannel, false) >= 1, "the owner was not told why the body went");
+
+                // Never alongside them: even a source that no cache check limits cannot put the body back while they are on.
+                helper.assertTrue(run(server, source(server, level, 2, owner, new Feedback()), "aiplayer spawn " + rig.name()) == 0 && !rig.isLoggedIn(),
+                    "the body was spawned beside the player who has its name");
+                rig.pass();
+            } finally {
+                leave(server, joiner);
+                leave(server, owner);
+            }
+        }));
+    }
+
+    /**
      * No owner means nobody to be near it, so a body spawned from the console is given a longer grace than an owned
      * one before the idle policy despawns it. The grace is crossed with the manager's per-body entry point instead of
      * by waiting for it (the periodic check may add a few ticks on top, which the margins allow for).
@@ -786,6 +999,58 @@ public final class BodyGameTests {
             .count();
     }
 
+    /** Places a player the way a client's login does, on a connection whose channel keeps what is sent to it. */
+    private static EmbeddedChannel join(MinecraftServer server, ServerPlayer player) {
+        Connection connection = new Connection(PacketFlow.SERVERBOUND);
+        EmbeddedChannel channel = new EmbeddedChannel(connection);
+        join(server, player, connection);
+        return channel;
+    }
+
+    private static void join(MinecraftServer server, ServerPlayer player, Connection connection) {
+        server.getPlayerList().placeNewPlayer(connection, player, new CommonListenerCookie(player.getGameProfile(), 0, ClientInformation.createDefault(), false));
+    }
+
+    /** Takes a player placed by {@link #join} out again, and forgets what was saved for them. */
+    private static void leave(MinecraftServer server, ServerPlayer player) {
+        if (server.getPlayerList().getPlayer(player.getUUID()) == player) server.getPlayerList().remove(player);
+        forgetPlayerFiles(server, player.getUUID());
+    }
+
+    /** The chat lines a channel was sent: those vanilla makes (translatable, such as the join and leave lines) or ours (literal). */
+    private static long systemMessages(EmbeddedChannel channel, boolean vanilla) {
+        return channel.outboundMessages().stream()
+            .filter(message -> message instanceof ClientboundSystemChatPacket chat
+                && (chat.content().getContents() instanceof TranslatableContents) == vanilla)
+            .count();
+    }
+
+    /**
+     * A real player's connection as far as a shutdown can tell: it keeps the disconnect it is sent and stays open, so
+     * the player stays in the list (a real channel closes on its own thread, later than the call that asks it to).
+     */
+    private static final class ProbeConnection extends Connection {
+        boolean disconnectSent;
+
+        private ProbeConnection() {
+            super(PacketFlow.SERVERBOUND);
+        }
+
+        static ProbeConnection create() {
+            ProbeConnection connection = new ProbeConnection();
+            new EmbeddedChannel(connection);
+            return connection;
+        }
+
+        @Override public void send(Packet<?> packet) { note(packet); }
+        @Override public void send(Packet<?> packet, @Nullable PacketSendListener listener) { note(packet); }
+        @Override public void send(Packet<?> packet, @Nullable PacketSendListener listener, boolean flush) { note(packet); }
+
+        private void note(Packet<?> packet) {
+            if (packet instanceof ClientboundDisconnectPacket) disconnectSent = true;
+        }
+    }
+
     private static void forgetPlayerFiles(MinecraftServer server, UUID id) {
         try {
             Files.deleteIfExists(server.getWorldPath(LevelResource.PLAYER_DATA_DIR).resolve(id + ".dat"));
@@ -847,6 +1112,10 @@ public final class BodyGameTests {
             return name;
         }
 
+        UUID id() {
+            return id;
+        }
+
         boolean isLoggedIn() {
             return manager.get(id) != null;
         }
@@ -903,6 +1172,7 @@ public final class BodyGameTests {
 
         void cleanup() {
             for (Rig companion : companions) companion.cleanup();
+            manager.failRespawnsOf(id, false);
             BotPlayer current = manager.get(id);
             if (current != null) manager.despawn(current);
             try {
