@@ -16,6 +16,8 @@ import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.body.DeathRecord;
 import com.legoj15.megablockbot.game.gametest.BotNavGameTests.NavRun;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
+import com.legoj15.megablockbot.game.nav.BreakFilter;
+import com.legoj15.megablockbot.game.task.BreakRules;
 import com.legoj15.megablockbot.game.task.HarvestTask;
 import com.legoj15.megablockbot.game.task.KillTask;
 import com.legoj15.megablockbot.game.task.TaskFeature;
@@ -30,9 +32,10 @@ import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
-import net.minecraft.world.entity.animal.Cow;
+import net.minecraft.world.entity.animal.Sheep;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
@@ -44,15 +47,15 @@ import net.minecraft.world.phys.Vec3;
 /**
  * The tasks that kill and harvest (issues 22 and 15): what a {@code kill} leaf and a {@code harvest} leaf become in
  * the world, and the typed result each ends with. What these protect: that such leaves end with the item, taken by the
- * body's own hands, and leave alone what is not the body's to take -- a named cow, an unripe crop, the lowest block of
- * a plant. Each test builds the leaf the way the planner would, gets its task from the {@link TaskRegistry} (or makes
- * one with small search bounds, for the failures), and runs it on a real body through the shared harness, inside a
- * tick budget. No assertion on the wording of a phrase.
+ * body's own hands, and leave alone what is not the body's to take -- a named sheep, an unripe crop, the lowest block
+ * of a plant. Each test builds the leaf the way the planner would, gets its task from the {@link TaskRegistry} (or
+ * makes one with small search bounds, for the failures), and runs it on a real body through the shared harness, inside
+ * a tick budget. No assertion on the wording of a phrase.
  *
- * <p>The cow tests each have a batch of their own: the scan for a quarry does not stop at walls, so cows in one arena
- * are targets for a body standing in another, and tests that run side by side would go after each other's herds. The
- * tests whose bodies only walk and stand (never fight) make them invulnerable: arenas share one world, and a
- * neighbour's mob may reach them.
+ * <p>The sheep tests each have a batch of their own: the scan for a quarry does not stop at walls, so sheep in one
+ * arena are targets for a body standing in another, and tests that run side by side would go after each other's
+ * flocks. The tests whose bodies only walk and stand (never fight) make them invulnerable: arenas share one world,
+ * and a neighbour's mob may reach them.
  */
 public final class KillHarvestGameTests {
     private static final String ITEM = "minecraft:";
@@ -64,55 +67,56 @@ public final class KillHarvestGameTests {
     // ---------------------------------------------------------------------------------------------------------
 
     /**
-     * A walled pen of cows and a body with a wooden sword (set-up, once before the task starts: the pen's walls keep
-     * the herd where it is, with a gap the body can walk through), a {@code kill} leaf for one leather from a cow: it
-     * ends holding at least one leather. A cow drops 0 to 2 leather (no leather one time in three), so with two cows a
-     * run without any is one in nine; the pen holds four, which makes it one in eighty-one.
+     * A walled pen of white sheep and a body with a wooden sword (set-up, once before the task starts: the pen's
+     * walls keep the flock where it is, with a gap the body can walk through), a {@code kill} leaf for one wool from
+     * a sheep: it ends holding at least one wool. A white sheep always drops one wool, so one kill is always
+     * enough and the run is no dice.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 3000, batch = "kill_pen")
-    public static void aKillLeafGetsLeatherFromAPennedCow(GameTestHelper helper) {
+    public static void aKillLeafGetsWoolFromAPennedSheep(GameTestHelper helper) {
         room(helper, 5, Blocks.BARRIER);
         pen(helper);
-        List<Entity> cows = new ArrayList<>();
-        for (int i = 0; i < 4; i++) cow(helper, cows, new Vec3(5.5 + i, FLOOR_Y + 1, 10.5 + (i % 2)), null);
-        Job job = Job.start(helper, "kleath", new Vec3(7.5, FLOOR_Y + 1, 4.5), 3000, killLeaf("leather", 1, "cow"));
+        List<Entity> flock = new ArrayList<>();
+        for (int i = 0; i < 4; i++) sheep(helper, flock, new Vec3(5.5 + i, FLOOR_Y + 1, 10.5 + (i % 2)), null);
+        Job job = Job.start(helper, "kwool", new Vec3(7.5, FLOOR_Y + 1, 4.5), 3000, killLeaf("white_wool", 1, "sheep"));
         job.body().getInventory().setItem(0, new ItemStack(Items.WOODEN_SWORD));
-        job.run.atEnd(() -> cows.forEach(Entity::discard));
+        job.run.atEnd(() -> flock.forEach(Entity::discard));
         job.run.each(2400, () -> {
             failIfFailed(helper, job);
             inside(helper, job.body());
             if (job.task.state() != TaskState.COMPLETED) return;
-            int leather = job.body().getInventory().countItem(Items.LEATHER);
-            helper.assertTrue(leather >= 1, "completed holding " + leather + " leather");
-            MegaBlockBot.LOGGER.info("Kill-harvest GameTest: leather after {} ticks from {} cow(s)",
-                job.run.ticks, cows.stream().filter(c -> !c.isAlive()).count());
+            int wool = job.body().getInventory().countItem(Items.WHITE_WOOL);
+            helper.assertTrue(wool >= 1, "completed holding " + wool + " wool");
+            MegaBlockBot.LOGGER.info("Kill-harvest GameTest: wool after {} ticks from {} sheep",
+                job.run.ticks, flock.stream().filter(s -> !s.isAlive()).count());
             job.run.pass();
         });
     }
 
     /**
-     * A cow with a custom name stands with four unnamed ones: the leaf's leather comes from an unnamed cow, and the
-     * named one is alive at the end. Four unnamed, as in the pen test, so that a run without any leather (one in
-     * eighty-one) cannot leave the task hunting for a cow it may not touch.
+     * A sheep with a custom name stands nearest the body, with four unnamed ones beyond it: the leaf's wool comes
+     * from an unnamed sheep, and the named one is alive at the end. The named one being the nearest is what makes
+     * the test about the rule: without the custom-name check the task would take the nearest sheep first, and that
+     * one is the named one.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 3000, batch = "kill_named")
-    public static void aNamedCowIsLeftAlone(GameTestHelper helper) {
+    public static void aNamedSheepIsLeftAlone(GameTestHelper helper) {
         room(helper, 5, Blocks.BARRIER);
         pen(helper);
-        List<Entity> cows = new ArrayList<>();
-        Cow named = cow(helper, cows, new Vec3(6.5, FLOOR_Y + 1, 12.5), Component.literal("Daisy"));
-        for (int i = 0; i < 4; i++) cow(helper, cows, new Vec3(5.5 + i, FLOOR_Y + 1, 10.5 + (i % 2)), null);
-        Job job = Job.start(helper, "kname", new Vec3(7.5, FLOOR_Y + 1, 4.5), 3000, killLeaf("leather", 1, "cow"));
+        List<Entity> flock = new ArrayList<>();
+        Sheep named = sheep(helper, flock, new Vec3(7.5, FLOOR_Y + 1, 9.5), Component.literal("Daisy"));
+        for (int i = 0; i < 4; i++) sheep(helper, flock, new Vec3(5.5 + i, FLOOR_Y + 1, 11.5 + (i % 2)), null);
+        Job job = Job.start(helper, "kname", new Vec3(7.5, FLOOR_Y + 1, 4.5), 3000, killLeaf("white_wool", 1, "sheep"));
         job.body().getInventory().setItem(0, new ItemStack(Items.WOODEN_SWORD));
-        job.run.atEnd(() -> cows.forEach(Entity::discard));
+        job.run.atEnd(() -> flock.forEach(Entity::discard));
         job.run.each(2400, () -> {
             failIfFailed(helper, job);
             inside(helper, job.body());
             if (job.task.state() != TaskState.COMPLETED) return;
-            int leather = job.body().getInventory().countItem(Items.LEATHER);
-            helper.assertTrue(leather >= 1, "completed holding " + leather + " leather");
-            helper.assertTrue(named.isAlive() && !named.isRemoved(), "the named cow is not alive at the end");
-            MegaBlockBot.LOGGER.info("Kill-harvest GameTest: named cow alive after {} ticks", job.run.ticks);
+            int wool = job.body().getInventory().countItem(Items.WHITE_WOOL);
+            helper.assertTrue(wool >= 1, "completed holding " + wool + " wool");
+            helper.assertTrue(named.isAlive() && !named.isRemoved(), "the named sheep is not alive at the end");
+            MegaBlockBot.LOGGER.info("Kill-harvest GameTest: named sheep alive after {} ticks", job.run.ticks);
             job.run.pass();
         });
     }
@@ -139,6 +143,44 @@ public final class KillHarvestGameTests {
             helper.assertTrue(none.source().equals("kill:minecraft:cow"), "NoSource carries source '" + none.source() + "'");
             helper.assertTrue(job.run.ticks <= 600, "failed only at tick " + job.run.ticks);
             MegaBlockBot.LOGGER.info("Kill-harvest GameTest: NoSource after {} ticks: {}", job.run.ticks, none.detail());
+            job.run.pass();
+        });
+    }
+
+    /**
+     * A quarry that appears only after the first look: the sheep is put in the world once the task has begun to
+     * explore for one. The exploring command is still working when the step it belongs to ends (the arena is open
+     * at the sides, so the exploring has somewhere to go), and the step's command is ended with the step -- so the
+     * hunt gives its follow, the sheep is fought rather than set aside as one the body cannot get at, and the task
+     * ends holding the wool.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 1200)
+    public static void aQuarryThatAppearsDuringTheSearchIsFought(GameTestHelper helper) {
+        // Open at the sides (a floor, no walls): the first exploring stretch has somewhere to go and keeps running,
+        // so the sheep arrives under the task's own explore command, not between commands.
+        room(helper, 0, Blocks.BARRIER);
+        KillTask task = new KillTask(killLeaf("white_wool", 1, "sheep"), Map.of(), new KillTask.Search(30, 3));
+        Job job = Job.start(helper, "klate", new Vec3(7.5, FLOOR_Y + 1, 7.5), 1200, task);
+        job.body().getInventory().setItem(0, new ItemStack(Items.WOODEN_SWORD));
+        List<Entity> flock = new ArrayList<>();
+        job.run.atEnd(() -> flock.forEach(Entity::discard));
+        boolean[] added = {false};
+        job.run.each(700, () -> {
+            failIfFailed(helper, job);
+            BotNavigator nav = BotNavigator.of(job.body());
+            if (!added[0]) {
+                // The first command this task gives is its exploring: the sheep is put in the world while that
+                // command is still working.
+                if (nav.serial() != 1 || nav.state() != BotNavigator.State.WORKING) return;
+                sheep(helper, flock, new Vec3(10.5, FLOOR_Y + 1, 10.5), null);
+                added[0] = true;
+                return;
+            }
+            if (job.task.state() != TaskState.COMPLETED) return;
+            int wool = job.body().getInventory().countItem(Items.WHITE_WOOL);
+            helper.assertTrue(wool >= 1, "completed holding " + wool + " wool");
+            helper.assertTrue(task.setAside().isEmpty(), "the sheep was set aside: " + task.setAside().size() + " quarries");
+            MegaBlockBot.LOGGER.info("Kill-harvest GameTest: the late quarry was fought after {} ticks", job.run.ticks);
             job.run.pass();
         });
     }
@@ -195,8 +237,7 @@ public final class KillHarvestGameTests {
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600)
     public static void aBerryBushIsPickedNotBroken(GameTestHelper helper) {
         room(helper, 3, Blocks.BARRIER);
-        helper.setBlock(8, FLOOR_Y + 1, 8, Blocks.GRASS_BLOCK);
-        helper.setBlock(8, FLOOR_Y + 2, 8, Blocks.SWEET_BERRY_BUSH.defaultBlockState().setValue(SweetBerryBushBlock.AGE, 3));
+        berryBush(helper, new BlockPos(8, FLOOR_Y + 2, 8));
         Job job = Job.start(helper, "hberry", new Vec3(2.5, FLOOR_Y + 1, 4.5), 600,
             harvestLeaf("sweet_berries", 1, "sweet_berry_bush"));
         job.body().setInvulnerable(true);
@@ -208,6 +249,78 @@ public final class KillHarvestGameTests {
             BlockState bush = helper.getBlockState(new BlockPos(8, FLOOR_Y + 2, 8));
             helper.assertTrue(bush.is(Blocks.SWEET_BERRY_BUSH), "the bush is gone: " + bush);
             MegaBlockBot.LOGGER.info("Kill-harvest GameTest: berries picked after {} ticks, bush is {}", job.run.ticks, bush);
+            job.run.pass();
+        });
+    }
+
+    /**
+     * A berry harvest paused while it works the bush -- after the use that picked it, before the berries are in the
+     * inventory -- and resumed: no exception, and the task completes with the berries and the bush standing. The
+     * pause and the resume are the task's own, made the way a reflex hold's are.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 900)
+    public static void aPausedBerryHarvestResumesAndCompletes(GameTestHelper helper) {
+        room(helper, 3, Blocks.BARRIER);
+        BlockPos bush = new BlockPos(8, FLOOR_Y + 2, 8);
+        berryBush(helper, bush);
+        Job job = Job.start(helper, "hbpause", new Vec3(2.5, FLOOR_Y + 1, 4.5), 900,
+            harvestLeaf("sweet_berries", 1, "sweet_berry_bush"));
+        job.body().setInvulnerable(true);
+        // 0 while it works the bush, 1 while it is paused, 2 once it is resumed.
+        int[] step = {0};
+        int[] atPause = {0};
+        job.run.each(700, () -> {
+            failIfFailed(helper, job);
+            BlockState state = helper.getBlockState(bush);
+            if (step[0] == 0 && state.is(Blocks.SWEET_BERRY_BUSH) && state.getValue(SweetBerryBushBlock.AGE) < 3
+                && job.body().getInventory().countItem(Items.SWEET_BERRIES) == 0) {
+                job.task.pause(job.body(), "the test pauses the pick");
+                step[0] = 1;
+                atPause[0] = job.run.ticks;
+                return;
+            }
+            if (step[0] == 1 && job.run.ticks - atPause[0] >= 40) {
+                job.task.resume(job.body());
+                step[0] = 2;
+            }
+            if (job.task.state() != TaskState.COMPLETED) return;
+            int berries = job.body().getInventory().countItem(Items.SWEET_BERRIES);
+            helper.assertTrue(berries >= 1, "completed holding " + berries + " sweet berries");
+            helper.assertTrue(helper.getBlockState(bush).is(Blocks.SWEET_BERRY_BUSH),
+                "the bush is gone: " + helper.getBlockState(bush));
+            MegaBlockBot.LOGGER.info("Kill-harvest GameTest: paused berry harvest completed after {} ticks", job.run.ticks);
+            job.run.pass();
+        });
+    }
+
+    /**
+     * A break filter put in while the harvest holds a bush preserved is still the navigator's filter after the task
+     * is paused. The set-up says the harvest holds the bush preserved: the navigator's filter refuses exactly the
+     * bush's cell, which the arena's rules allow, and nothing but the preserve refuses it. The filter the test puts
+     * in is the reflex layer's own move (its "break nothing", on taking the body over the tick the task is paused
+     * for it), and giving the preserve back must not write over it.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600)
+    public static void aFilterInstalledDuringAPreserveOutlivesThePause(GameTestHelper helper) {
+        room(helper, 3, Blocks.BARRIER);
+        BlockPos bush = new BlockPos(8, FLOOR_Y + 2, 8);
+        berryBush(helper, bush);
+        Job job = Job.start(helper, "hbfilter", new Vec3(2.5, FLOOR_Y + 1, 4.5), 600,
+            harvestLeaf("sweet_berries", 1, "sweet_berry_bush"));
+        job.body().setInvulnerable(true);
+        BreakFilter ours = (level, at, state) -> false;
+        job.run.atEnd(() -> BotNavigator.of(job.body()).setBreakFilter(BreakRules.filterFor(job.body())));
+        job.run.each(500, () -> {
+            failIfFailed(helper, job);
+            if (job.task.state() != TaskState.RUNNING) return;
+            BotNavigator nav = BotNavigator.of(job.body());
+            if (nav.breakFilter().mayBreak(helper.getLevel(), helper.absolutePos(bush), helper.getBlockState(bush))) {
+                return; // the preserve is not up yet
+            }
+            nav.setBreakFilter(ours);
+            job.task.pause(job.body(), "the test pauses the task in its preserve");
+            helper.assertTrue(nav.breakFilter() == ours, "the filter the test put in did not survive the pause");
+            MegaBlockBot.LOGGER.info("Kill-harvest GameTest: the test's filter outlived the pause at tick {}", job.run.ticks);
             job.run.pass();
         });
     }
@@ -289,8 +402,8 @@ public final class KillHarvestGameTests {
     }
 
     /**
-     * A pen for the cows (set-up): walls two high with a gap the body can walk through, so the herd stays put and the
-     * task has to go in after it.
+     * A pen for the sheep (set-up): walls two high with a gap the body can walk through, so the flock stays put and
+     * the task has to go in after it.
      */
     private static void pen(GameTestHelper helper) {
         for (int x = 4; x <= 10; x++) {
@@ -304,16 +417,27 @@ public final class KillHarvestGameTests {
         }
     }
 
-    /** A cow made without the spawn code's dice, persistent so it does not despawn mid-test; named when the test says so. */
-    private static Cow cow(GameTestHelper helper, List<Entity> mobs, Vec3 relative, Component name) {
-        Cow cow = EntityType.COW.create(helper.getLevel());
+    /** A sweet berry bush ripe for the picking, on the raised block the pick-up walks to (set-up). */
+    private static void berryBush(GameTestHelper helper, BlockPos at) {
+        helper.setBlock(at.getX(), at.getY() - 1, at.getZ(), Blocks.GRASS_BLOCK);
+        helper.setBlock(at.getX(), at.getY(), at.getZ(), Blocks.SWEET_BERRY_BUSH.defaultBlockState()
+            .setValue(SweetBerryBushBlock.AGE, 3));
+    }
+
+    /**
+     * A white sheep made without the spawn code's dice, persistent so it does not despawn mid-test; named when the
+     * test says so. White, because a white sheep always drops one wool: the kill tests' outcome is not a roll.
+     */
+    private static Sheep sheep(GameTestHelper helper, List<Entity> mobs, Vec3 relative, Component name) {
+        Sheep sheep = EntityType.SHEEP.create(helper.getLevel());
         Vec3 at = helper.absoluteVec(relative);
-        cow.moveTo(at.x, at.y, at.z, 0.0F, 0.0F);
-        cow.setPersistenceRequired();
-        if (name != null) cow.setCustomName(name);
-        helper.getLevel().addFreshEntity(cow);
-        mobs.add(cow);
-        return cow;
+        sheep.moveTo(at.x, at.y, at.z, 0.0F, 0.0F);
+        sheep.setColor(DyeColor.WHITE);
+        sheep.setPersistenceRequired();
+        if (name != null) sheep.setCustomName(name);
+        helper.getLevel().addFreshEntity(sheep);
+        mobs.add(sheep);
+        return sheep;
     }
 
     /**

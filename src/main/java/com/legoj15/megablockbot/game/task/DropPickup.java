@@ -25,7 +25,10 @@ import net.minecraft.world.phys.AABB;
  * body's own steps, which break nothing; steps that a block's edge stops end in the navigator being asked for the
  * drop's cell exactly. A drop the navigator cannot reach, or one that lies in the box and is not taken (no room for
  * it), is given up and another looked for. The pick-up has a time of its own, counted from the last drop that came
- * in, so a drop the water carries away cannot hold its task and a death's thirty stacks each get their walk.
+ * in, so a drop the water carries away cannot hold its task and a death's thirty stacks each get their walk, and a
+ * bound that nothing starts again: however many drops come and go, the pick-up itself ends. However it ends, the
+ * body's movement input is stood still and its look let go; a navigator command another owner is running is waited
+ * for, never walked over.
  */
 final class DropPickup {
     /**
@@ -38,6 +41,14 @@ final class DropPickup {
      * of {@link #STEPS_ALLOWED} and a wait.
      */
     static final int BUDGET_TICKS = 400;
+    /**
+     * Ticks the whole pick-up may last from its {@code start}, whatever comes in or goes away and however often the
+     * per-drop budget starts again: a drop that bobs across the edge of the search box is out of the box on one tick
+     * and in on the next, and each leaving starts {@link #BUDGET_TICKS} anew, so nothing else would end the walk.
+     * Five of those budgets: a death's many stacks, lying close together, each get their walk, and a pick-up this
+     * long is over.
+     */
+    static final int HARD_BOUND_TICKS = 2000;
     /**
      * Past this many blocks from a drop, measured flat, the navigator walks the body towards it; nearer, the body walks
      * itself. {@link #APPROACH} plus the way a drop lies off its cell's centre, so an arrival always hands over to the
@@ -60,6 +71,8 @@ final class DropPickup {
     private int waited;
     private int steps;
     private int ticks;
+    /** Ticks since this pick-up began, never started again by anything: the bound that always ends it. */
+    private int hardTicks;
     /** The navigator command this pick-up gave last, so another's failure is not taken for its own. */
     private long serial = -1;
     private boolean waiting;
@@ -71,6 +84,7 @@ final class DropPickup {
         waited = 0;
         steps = 0;
         ticks = 0;
+        hardTicks = 0;
         serial = -1;
         waiting = false;
     }
@@ -106,8 +120,15 @@ final class DropPickup {
             }
         }
         if (after != null && pursued == null) ticks = 0; // the one it was after is taken (or gone): the time starts again
-        if (++ticks > BUDGET_TICKS) return false;
-        if (drop == null) return false;
+        hardTicks++;
+        if (++ticks > BUDGET_TICKS || hardTicks > HARD_BOUND_TICKS) {
+            standStill(body);
+            return false;
+        }
+        if (drop == null) {
+            standStill(body);
+            return false;
+        }
         if (!drop.getUUID().equals(after)) {
             after = drop.getUUID();
             waited = 0;
@@ -148,8 +169,14 @@ final class DropPickup {
             givenUp.add(drop.getUUID()); // not one this body can walk to: another is looked for
             return true;
         }
-        BotNavigator.of(body).issuingFor(owner).goTo(drop.blockPosition(), radius);
-        serial = BotNavigator.of(body).serial();
+        if (nav.state() == BotNavigator.State.WORKING && nav.runsCommandOfAnother(owner)) {
+            // Someone else's command is running (the reflex layer's, say): not this pick-up's to walk over, as it
+            // is not its task's to stop. It is waited for, as a hunt waits, and the pick-up's own bound ends the
+            // wait if the command never does.
+            return true;
+        }
+        nav.issuingFor(owner).goTo(drop.blockPosition(), radius);
+        serial = nav.serial();
         return true;
     }
 
@@ -169,5 +196,11 @@ final class DropPickup {
         body.input().strafe = 0.0F;
         body.input().jump = false;
         body.input().sprint = false;
+    }
+
+    /** The pick-up is over, however it ended: the body stands, and the look the walk wrote at a drop is let go. */
+    private static void standStill(BotPlayer body) {
+        stand(body);
+        body.input().clearLook();
     }
 }

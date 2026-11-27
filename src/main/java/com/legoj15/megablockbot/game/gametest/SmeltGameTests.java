@@ -15,6 +15,7 @@ import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.bot.BotRuntime;
 import com.legoj15.megablockbot.game.bot.BotSpeech;
 import com.legoj15.megablockbot.game.plan.BotMemory;
+import com.legoj15.megablockbot.game.plan.CookingRecipeSource;
 import com.legoj15.megablockbot.game.task.TaskRegistry;
 import java.util.ArrayList;
 import java.util.List;
@@ -38,8 +39,9 @@ import net.minecraft.world.phys.Vec3;
  * The smelt task against a running server (issue #14). The sticks variant of the iron recipe cooks one raw iron per
  * run in 200 ticks with two sticks, so the two runs every test asks for take about 400 ticks of game time plus the
  * placing, the walks and the take-up. What these protect: that a smelt leaf ends with the result in the inventory and
- * nothing lost, whatever stands in the way — no pickaxe for the furnace, a furnace somebody else put there, no fuel,
- * an interruption in the middle of the burn.
+ * nothing lost, whatever stands in the way — no pickaxe for the furnace, the only pickaxe outside the hotbar, a
+ * furnace somebody else put there, no fuel, an interruption in the middle of the burn, an abort in the middle of the
+ * burn.
  *
  * <p>Each test spawns its own body (a name unique to this run) in the arena, whose floor is the stone layer at y=1:
  * feet stand at y=2.0. Bodies are despawned and forgotten when the test ends, passed or not. Placing items in a
@@ -49,8 +51,14 @@ public final class SmeltGameTests {
     private static final int FLOOR_Y = 1;
     private static final double FLOOR_TOP = FLOOR_Y + 1.0;
     private static final String RUN_ID = Integer.toString((int) (System.nanoTime() & 0xFFFFF), 36);
-    /** Two runs of the sticks variant: 400 ticks of cooking, the placing, the walks and the take-up. */
-    private static final int SMELT_TICKS = 800;
+    /**
+     * The bound of a two-run smelt. The cooking alone is 2 x 200 ticks; the place, the walks, the feeding (one click an
+     * item, six of them) and the take-up (a wooden pickaxe breaks a furnace in about fifty ticks, and its item lands
+     * after a ten-tick pickup delay and a few hops) are another two hundred at most, so the work needs about 600. The
+     * bound is twice that: a slow hop or a longer walk than the arena usually forces must not fail a test that is
+     * about something else.
+     */
+    private static final int SMELT_TICKS = 1200;
     private static final String VARIANT = "minecraft:iron_ingot_from_smelting_raw_iron#sticks";
 
     private SmeltGameTests() {}
@@ -77,6 +85,36 @@ public final class SmeltGameTests {
             helper.assertTrue(rig.count(Items.RAW_IRON) == 0 && rig.count(Items.STICK) == 0,
                 "the raw iron or the sticks were not all spent: " + rig.count(Items.RAW_IRON) + " raw iron, "
                     + rig.count(Items.STICK) + " sticks");
+            helper.assertTrue(rig.count(Items.FURNACE) == 1, "the furnace is not back in the inventory: " + rig.count(Items.FURNACE));
+            helper.assertTrue(rig.furnacesInArena().isEmpty(), "a furnace was left standing at " + rig.furnacesInArena());
+            helper.assertTrue(itemsOnTheFloor(helper).isEmpty(), "items lie in the arena: " + itemsOnTheFloor(helper));
+            helper.assertTrue(BotMemory.of(rig.id()).placedCount() == 0, "the body still remembers a block it placed");
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * The same with the only pickaxe outside the hotbar, in the main storage (set-up: inventory slot 20): placing the
+     * furnace swaps whatever was in the hand out of the hotbar, so the pickaxe the take-up must reach for is often
+     * not on the hotbar any more, and the take-up still breaks the furnace with it. On the commit before the take-up
+     * chose its tool from the whole carried inventory this failed on a value: the task broke the furnace with whatever
+     * the hotbar had left, a hand drops nothing, and the furnace was destroyed while the goal said satisfied. It is
+     * kept as the test that review asked for; it passes on the tree as it stands because of that fix.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = SMELT_TICKS)
+    public static void aPickaxeOutsideTheHotbarStillBreaksTheFurnace(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawn(helper, "slot20", SMELT_TICKS);
+        rig.give(Items.FURNACE, 1);
+        rig.give(Items.RAW_IRON, 2);
+        rig.give(Items.STICK, 4);
+        rig.body().getInventory().setItem(20, new ItemStack(Items.WOODEN_PICKAXE));
+        TaskRun run = new TaskRun(smeltTask(2));
+        rig.onEachTick(() -> {
+            if (!run.tick(rig.body())) return;
+            helper.assertTrue(run.result instanceof TickResult.Completed, "the smelt ended " + run.result);
+            helper.assertTrue(rig.count(Items.IRON_INGOT) == 2, "expected 2 iron ingots, got " + rig.count(Items.IRON_INGOT));
             helper.assertTrue(rig.count(Items.FURNACE) == 1, "the furnace is not back in the inventory: " + rig.count(Items.FURNACE));
             helper.assertTrue(rig.furnacesInArena().isEmpty(), "a furnace was left standing at " + rig.furnacesInArena());
             helper.assertTrue(itemsOnTheFloor(helper).isEmpty(), "items lie in the arena: " + itemsOnTheFloor(helper));
@@ -150,7 +188,7 @@ public final class SmeltGameTests {
         rig.onEachTick(() -> {
             if (!run.tick(rig.body())) return;
             helper.assertTrue(run.failure() instanceof Failure.MissingInput missing
-                && missing.key().id().equals("minecraft:stick"), "the smelt ended " + run.result);
+                && fuelClassOfTheVariant().contains(missing.key()), "the smelt ended " + run.result);
             helper.assertTrue(rig.furnacesInArena().isEmpty(), "a furnace was put down at " + rig.furnacesInArena());
             helper.assertTrue(rig.count(Items.FURNACE) == 1 && rig.count(Items.RAW_IRON) == 2, "something was lost");
             rig.assertHandsEmpty();
@@ -162,12 +200,13 @@ public final class SmeltGameTests {
      * A pause and a resume in the middle of the burn, as the craft tests pause and resume: the goal is paused once
      * the furnace is burning and nothing is made yet, the body is walked off through its own input until the furnace
      * is out of reach, and the goal is resumed. It still ends with the 2 ingots, the furnace back in the inventory and
-     * nothing left in the furnace or spilled.
+     * nothing left in the furnace or spilled. The bound: 400 ticks of cooking, a walk out of reach (up to 150 ticks of
+     * the body's own input), the walk back and the take-up — about 800 together, and the bound is twice that.
      */
-    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 1000)
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 1600)
     public static void aSmeltInterruptedMidBurnCarriesOn(GameTestHelper helper) {
         floor(helper);
-        Rig rig = Rig.spawn(helper, "midburn", 1000);
+        Rig rig = Rig.spawn(helper, "midburn", 1600);
         giveTheKit(rig, true);
         rig.runtime().submit(new Goal.HaveItem(ItemKey.of("iron_ingot"), 2));
         int[] stage = {0};
@@ -227,13 +266,61 @@ public final class SmeltGameTests {
     }
 
     /**
-     * Through the runtime, a goal and not a bare leaf (set-up: 1 raw iron, 2 sticks, a furnace and a wooden pickaxe):
-     * asked to have 1 iron ingot, the plan smelts the raw iron it carries and ends satisfied.
+     * A smelt cancelled while the furnace burns, then the tidy step, as the runtime runs it for a crafting table after
+     * a goal ends: the furnace still holds the body's raw iron and sticks, and the tidy step takes it up all the
+     * same — broken, it drops what it holds beside it, and that is picked up with its own item. The body ends holding
+     * the furnace and all the iron it put in or that had cooked, and nothing is left on the floor or standing in the
+     * arena. The bound: reaching the burn (the place, the open, the feed) is about a hundred ticks, and the tidy
+     * step's break and pick-ups about two hundred more (a wooden pickaxe breaks a furnace in about fifty ticks, each
+     * drop lands after a ten-tick delay and hops for a few more) — about three hundred together, and the bound is
+     * better than twice that.
      */
-    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 700)
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 800)
+    public static void aSmeltAbortedMidBurnIsEmptiedAndTakenUp(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawn(helper, "abort", 800);
+        giveTheKit(rig, true);
+        rig.runtime().submit(new Goal.HaveItem(ItemKey.of("iron_ingot"), 2));
+        int[] stage = {0};
+        rig.onEachTick(() -> {
+            GoalResult result = rig.runtime().lastResult();
+            switch (stage[0]) {
+                case 0 -> {
+                    helper.assertTrue(result == null, "the goal ended before the burn began: "
+                        + (result == null ? "" : BotSpeech.result(result)));
+                    if (rig.litFurnace() != null && rig.count(Items.IRON_INGOT) == 0) {
+                        rig.runtime().cancel(false);
+                        stage[0] = 1;
+                    }
+                }
+                default -> {
+                    if (result == null) return; // the cancel has not been published yet
+                    helper.assertTrue(result.status() == GoalResult.Status.CANCELLED, "the goal ended " + BotSpeech.result(result));
+                    // The tidy step has the body until the furnace is broken, its item is in and what it held is picked up.
+                    if (rig.count(Items.FURNACE) != 1 || !rig.furnacesInArena().isEmpty()
+                        || !itemsOnTheFloor(helper).isEmpty()) return;
+                    helper.assertTrue(rig.count(Items.IRON_INGOT) + rig.count(Items.RAW_IRON) == 2,
+                        "the iron the body put in or that had cooked was lost: " + rig.count(Items.IRON_INGOT)
+                            + " ingots and " + rig.count(Items.RAW_IRON) + " raw iron");
+                    helper.assertTrue(itemsOnTheFloor(helper).isEmpty(), "items lie in the arena: " + itemsOnTheFloor(helper));
+                    helper.assertTrue(BotMemory.of(rig.id()).placedCount() == 0, "the body still remembers a block it placed");
+                    rig.assertHandsEmpty();
+                    rig.pass();
+                }
+            }
+        });
+    }
+
+    /**
+     * Through the runtime, a goal and not a bare leaf (set-up: 1 raw iron, 2 sticks, a furnace and a wooden pickaxe):
+     * asked to have 1 iron ingot, the plan smelts the raw iron it carries and ends satisfied. The bound: one run cooks
+     * in 200 ticks and the planning, the place, the walks and the take-up are another two hundred at most, so the work
+     * needs about 400 and the bound is twice that.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 800)
     public static void oneIronIngotThroughThePlanner(GameTestHelper helper) {
         floor(helper);
-        Rig rig = Rig.spawn(helper, "ingot", 700);
+        Rig rig = Rig.spawn(helper, "ingot", 800);
         rig.give(Items.RAW_IRON, 1);
         rig.give(Items.STICK, 2);
         rig.give(Items.FURNACE, 1);
@@ -276,6 +363,15 @@ public final class SmeltGameTests {
     private static Task<BotPlayer> smeltTask(int times) {
         return TaskRegistry.create(NodeSpec.leaf(new Goal.HaveItem(ItemKey.of("iron_ingot"), 2), "smelt",
             Map.of("recipe", VARIANT, "times", Integer.toString(times), "station", "minecraft:furnace"), ""), Map.of());
+    }
+
+    /**
+     * The items of the fuel class the variant is sized for: a missing-fuel failure names one item of the class, and
+     * which one is the class's business, not this test's — the behaviour pinned is that the failure names a fuel.
+     */
+    private static List<ItemKey> fuelClassOfTheVariant() {
+        String fuelClass = VARIANT.substring(VARIANT.indexOf('#') + 1);
+        return CookingRecipeSource.fuelOf(fuelClass).orElseThrow().items();
     }
 
     /** Every item entity in the arena. */

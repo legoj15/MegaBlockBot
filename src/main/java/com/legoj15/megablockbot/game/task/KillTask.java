@@ -432,6 +432,10 @@ public final class KillTask extends BodyTask {
         } else if (stepTicks < search.stepTicks() && nav.state() == BotNavigator.State.WORKING) {
             return TickResult.RUNNING;
         }
+        // The step's own command ends with the step, whatever its state. The hunt that follows gives its follow
+        // only when nothing of this task's is still working, and an explore left running would walk the body on
+        // under it while the quarry the next look finds is set aside for never being approached.
+        stopOurCommand(nav);
         phase = Phase.HUNTING;
         return TickResult.RUNNING;
     }

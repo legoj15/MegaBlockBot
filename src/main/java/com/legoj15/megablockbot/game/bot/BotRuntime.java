@@ -122,6 +122,9 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     private boolean tidyArmed;
     @Nullable
     private Task<BotPlayer> tidy;
+    /** The block that stood where the tidy task is taking a station up: what its failure log names. */
+    @Nullable
+    private String tidyStation;
 
     /** The task the executor last asked for: the one whose end resets the body's input. */
     @Nullable
@@ -326,8 +329,9 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
             BlockPos leftover = CraftTask.leftoverStation(current);
             if (leftover != null) {
                 BlockState state = current.serverLevel().getBlockState(leftover);
+                tidyStation = state.getBlock().getName().getString();
                 MegaBlockBot.LOGGER.info("{} takes up the {} it left standing at {}",
-                        current.getGameProfile().getName(), state.getBlock().getName().getString(), leftover.toShortString());
+                        current.getGameProfile().getName(), tidyStation, leftover.toShortString());
                 tidy = CraftTask.takeUpStation(current.serverLevel(), leftover);
                 tidy.start(current);
             }
@@ -336,11 +340,12 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         TickResult result = tidy.tick(current);
         if (result instanceof TickResult.Running) return true;
         if (result instanceof TickResult.Failed failed) {
-            // Not a goal's failure: the table stays, remembered, and the next craft that needs one takes it up.
-            MegaBlockBot.LOGGER.warn("{} could not take up the crafting table it left standing: {}",
-                    current.getGameProfile().getName(), BotSpeech.reason(failed.failure()));
+            // Not a goal's failure: the station stays, remembered, and the next task that needs one takes it up.
+            MegaBlockBot.LOGGER.warn("{} could not take up the {} it left standing: {}",
+                    current.getGameProfile().getName(), tidyStation, BotSpeech.reason(failed.failure()));
         }
         tidy = null;
+        tidyStation = null;
         return false;
     }
 
@@ -370,6 +375,7 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         if (tidy != null) {
             tidy.abort(dead, "died");
             tidy = null;
+            tidyStation = null;
         }
         List<Pos> drops = new ArrayList<>();
         for (BlockPos drop : death.dropPositions()) drops.add(pos(drop));

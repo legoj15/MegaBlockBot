@@ -155,6 +155,10 @@ public final class HarvestTask extends BodyTask {
      */
     @Nullable
     private BlockPos preserving;
+    /** The composite filter {@link #preserve} installed over the one in force, so {@link #unpreserve} can tell
+     *  whether that is still the one the navigator holds. */
+    @Nullable
+    private BreakFilter preserveFilter;
     private boolean pendingReplant;
     /** The walk to what a harvest dropped, shared with the kill task. */
     private final DropPickup pickup = new DropPickup();
@@ -246,10 +250,25 @@ public final class HarvestTask extends BodyTask {
 
     @Override
     protected void resumeWork(BotPlayer body) {
-        // Everything is looked at again from the world: what stands where, what is grown, what the body holds.
-        at = null;
-        preserving = null; // the break rules were armed afresh by the resume; so was the world
-        pendingReplant = false;
+        // Everything is looked at again from the world: what stands where, what is grown, what the body holds. A
+        // block the task was working is owed what that work left -- the drops of a taking may lie in its cell, and
+        // a break owes the spot its replant -- so the pick-up around it is started again and the world decides
+        // whether anything is still owed (nothing lying there ends it at once, and the search for the next block
+        // follows). A block the task was only going to is let go and looked for again. The pause already let the
+        // preserve go (letGo); when the block still standing is one a player uses, it is preserved again for the
+        // walk back to its drops.
+        boolean owed = at != null && phase != Phase.GOING && phase != Phase.EXPLORING;
+        preserving = null;
+        preserveFilter = null;
+        if (!owed) {
+            at = null;
+            pendingReplant = false;
+            phase = Phase.GOING;
+        } else {
+            if (harvestedByUse(body.serverLevel().getBlockState(at))) preserve(body, at);
+            pickup.start();
+            phase = Phase.LOOTING;
+        }
         phaseTicks = 0;
         cooldown = 0;
     }
@@ -340,14 +359,23 @@ public final class HarvestTask extends BodyTask {
         unpreserve(body);
         preserving = pos.immutable();
         BreakFilter rules = nav(body).breakFilter();
-        nav(body).setBreakFilter((level, spot, state) -> !spot.equals(preserving) && mayBreak(rules, level, spot, state));
+        preserveFilter = (level, spot, state) -> !spot.equals(preserving) && mayBreak(rules, level, spot, state);
+        nav(body).setBreakFilter(preserveFilter);
     }
 
-    /** The task no longer owes a block its survival: the break rules go back to what they were. */
+    /**
+     * The task no longer owes a block its survival: the break rules go back to the standard one -- but only while
+     * the navigator still holds the filter the preserve installed. Someone else may have put their own in since
+     * (the reflex layer's "break nothing", on taking the body over before this task was paused), and that one is
+     * not this task's to replace: whoever installed it gives the rules back themselves.
+     */
     private void unpreserve(BotPlayer body) {
         if (preserving == null) return;
         preserving = null;
-        nav(body).setBreakFilter(BreakRules.filterFor(body));
+        if (preserveFilter != null && nav(body).breakFilter() == preserveFilter) {
+            nav(body).setBreakFilter(BreakRules.filterFor(body));
+        }
+        preserveFilter = null;
     }
 
     private TickResult breaking(BotPlayer body) {
@@ -426,6 +454,13 @@ public final class HarvestTask extends BodyTask {
             body.input().lookAt(click);
             body.getInteractionManager().interactBlock(body, level, body.getMainHandItem(), InteractionHand.MAIN_HAND,
                 new BlockHitResult(click, Direction.UP, here.below(), false));
+        }
+        // The replant is done (or the world refused it, which is not a failure): the count is asked before the
+        // next block is looked for. A harvest that holds its goal is done, and a look now can only fail -- the
+        // one ripe block there was is taken, and what is left may be forbidden or nothing at all.
+        if (held(body) >= target) {
+            release(body);
+            return TickResult.COMPLETED;
         }
         return findNext(body);
     }

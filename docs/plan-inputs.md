@@ -152,8 +152,8 @@ one entry per inventory: a double chest is one entry holding both halves, with t
 forgets what was noted of the container). `BotMemory.peek(uuid)` reads without making one.
 `save()` is the compact persistent form; `BotMemory.restore(uuid, tag)` reads one back (tolerant of missing or
 malformed parts) and installs it as that body's memory, replacing what was there, which is how a body gets its memory
-back at spawn (`BotRuntime` installs a loaded memory when it first attaches to the body). `CraftTask` notes the table it
-places; the tasks that open a container (`withdraw`, `look_inside`) note what they find in it, and `use chest at` records the
+back at spawn (`BotRuntime` installs a loaded memory when it first attaches to the body). `StationTask` notes the station it
+places (the craft task's table, the smelt task's furnace); the tasks that open a container (`withdraw`, `look_inside`) note what they find in it, and `use chest at` records the
 owner's word. The registry is cleared when the server stops.
 
 ## Checks

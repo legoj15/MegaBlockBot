@@ -312,8 +312,11 @@ public final class BotNavigator {
      *   <li>breaks only inside the blueprint's box, and only what the break filter allows: the box is added to the
      *       filter for as long as this command runs, so a wall the body may not break is neither mined through nor
      *       left standing inside the hut either;</li>
-     *   <li>builds the whole thing at once: no layers, no repeats, no orientation flips, the anchor the min
-     *       corner.</li>
+     *   <li>builds layer by layer from the bottom, so a wall stands before a roof closes it off. Built nearest
+     *       block first, a live run roofed a three-block hut before its walls were done and then stood outside
+     *       it: the gaps left in the wall could only be filled from a cell the roof had made too low to stand
+     *       in;</li>
+     *   <li>no repeats, no orientation flips, the anchor the min corner.</li>
      * </ul>
      * Done when the builder finishes; failed when it cannot go on. The builder's own answer to running out of a block
      * is to pause and say what is missing ({@code BuilderProcess}: "Missing materials ... Unable to do it. Pausing."),
@@ -331,9 +334,12 @@ public final class BotNavigator {
         // Only what the body carries, and only where the blueprint says: see the javadoc.
         s.acceptableThrowawayItems.set(new ArrayList<>());
         s.allowInventory.set(true);
-        s.buildInLayers.set(false);
+        s.buildInLayers.set(true);
+        s.layerOrder.set(false); // bottom to top
         s.startAtLayer.set(0);
-        s.skipFailedLayers.set(false);
+        // A layer that cannot be finished (a block the body has run out of) does not hold up the layers above it:
+        // everything that can stand is built, and the end still says what is missing.
+        s.skipFailedLayers.set(true);
         s.buildRepeat.set(new Vec3i(0, 0, 0));
         s.buildRepeatCount.set(-1);
         // The anchor is the min corner as it was given: none of the orientation flips upstream offers.

@@ -1,5 +1,6 @@
 package com.legoj15.megablockbot.game.task;
 
+import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.goal.Goal;
@@ -7,6 +8,7 @@ import com.legoj15.megablockbot.core.plan.NodeSpec;
 import com.legoj15.megablockbot.core.planner.RecipeDef;
 import com.legoj15.megablockbot.core.task.Failure;
 import com.legoj15.megablockbot.core.task.Task;
+import com.legoj15.megablockbot.core.task.TaskState;
 import com.legoj15.megablockbot.core.task.TickResult;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.plan.BotMemory;
@@ -33,7 +35,6 @@ import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.item.crafting.RecipeHolder;
 import net.minecraft.world.item.crafting.RecipeType;
 import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
@@ -68,7 +69,9 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
  * <p><b>Interruptions.</b> On pause, abort or failure the cursor is empty and the menu is closed; what the task put
  * into the furnace stays there, the furnace stays remembered, and a resumed task walks back to it, opens it and
  * carries on from what the slots hold — an ingredient already in the furnace counts as carried for the runs still to
- * do.
+ * do. An end that is not a completion — an abort, a failure, the budget — says what is still inside and where the
+ * furnace stands (the log, and a failure's detail), for the tidy step is what gets it back: it takes a furnace up
+ * whether or not it holds anything, and what drops beside it when it breaks is picked up with the furnace.
  *
  * <p><b>Failures.</b> {@code TargetGone} for a recipe id the game does not have, one that is no cooking recipe, one
  * that does not run at the leaf's station, or one whose fuel class the game no longer knows; {@code MissingInput}
@@ -113,6 +116,10 @@ public final class SmeltTask extends StationTask {
     private int stallTicks;
     /** Whether the furnace was burning when the work last looked: what {@link #waitingWork} reports. */
     private boolean burning;
+    /** Whether the work clicked anything this tick: a click is something happening, so the no-progress count starts again. */
+    private boolean clicked;
+    /** What the furnace's own three slots held last tick: a change between ticks is the game's doing, and progress too. */
+    private int slotsLastTick;
 
     public SmeltTask(NodeSpec leaf, Map<String, String> hints) {
         super(leaf, hints);
@@ -174,6 +181,13 @@ public final class SmeltTask extends StationTask {
         return dropsFor(body, body.serverLevel().getBlockState(station));
     }
 
+    /** The take-up of a furnace gathers what it held: the tidy step breaks one with the body's ingredient, fuel or
+     *  result still inside, and what drops beside it is picked up before the task ends. */
+    @Override
+    protected boolean gathersSpills() {
+        return takeUpOnly;
+    }
+
     /**
      * The ingredient and the fuel are asked for before anything is put down, so a smelt that cannot run leaves the
      * furnace in the inventory. This is asked only when no furnace of the body's stands, so what is carried is all
@@ -215,9 +229,11 @@ public final class SmeltTask extends StationTask {
         }
         stationText = stationParam.replace("minecraft:", "").replace('_', ' ');
         stationItem = itemOf(family);
-        stationBlock = blockOf(stationParam);
-        if (stationItem == null) {
-            fail(new Failure.Internal(null, "no registered item for the station " + stationParam));
+        // The block comes from the key the family was checked against, never from the raw parameter: ItemKey.of
+        // normalizes a namespace-less id, and the raw string would name the wrong block for one of those.
+        stationBlock = blockOf(family);
+        if (stationItem == null || stationBlock == null) {
+            fail(new Failure.Internal(null, "no registered item or block for the station " + stationParam));
             return;
         }
         Optional<CookingRecipeSource.Fuel> fuelClass = CookingRecipeSource.fuelOf(variant.get().fuelClass());
@@ -253,14 +269,16 @@ public final class SmeltTask extends StationTask {
             return;
         }
         // The leaf's goal is the absolute count after this step, so a task started again after a restart (some runs
-        // already cooked) makes only what is still missing — rounded up, for a run is whole.
+        // already cooked) makes only what is still missing — rounded up, for a run is whole. Both branches work to the
+        // clamped runs, never past the leaf's times: a goal above what they make is the planner's to top up, not this
+        // task's to spend another node's material on (the craft task's remaining is the same rule).
         int carried = MenuHand.carriedCount(body, resultItem);
         int runs = times;
         if (leaf.goal() instanceof Goal.HaveItem have) {
             runs = Math.floorDiv(have.count() - carried + perRunResult - 1, perRunResult);
         }
         runs = Math.max(0, Math.min(times, runs));
-        targetCount = leaf.goal() instanceof Goal.HaveItem have ? have.count() : carried + runs * perRunResult;
+        targetCount = carried + runs * perRunResult;
 
         String hint = hints.get("station");
         if (hint != null) {
@@ -293,6 +311,7 @@ public final class SmeltTask extends StationTask {
             return TickResult.RUNNING;
         }
         burning = isLit(body);
+        clicked = false;
         // The result comes out whenever the slot holds any, as a player empties a furnace they stand at.
         Failure failure = takeOut(body, menu, RESULT_SLOT);
         if (failure != null) return stop(body, failure);
@@ -333,7 +352,12 @@ public final class SmeltTask extends StationTask {
 
     /** Nothing to click: the run is burning, or nothing is happening at all. */
     private TickResult watch(BotPlayer body, AbstractFurnaceMenu menu) {
-        if (burning) {
+        int slotsNow = slotsSignature(menu);
+        // The count means "nothing happened for this long", so any tick in which something did starts it again: the
+        // furnace burns, the task clicked (a feed, a take-out), or the game moved an item between the slots.
+        boolean happened = burning || clicked || slotsNow != slotsLastTick;
+        slotsLastTick = slotsNow;
+        if (happened) {
             stallTicks = 0;
             return TickResult.RUNNING;
         }
@@ -343,10 +367,22 @@ public final class SmeltTask extends StationTask {
             // without burning is a smelt that will never run.
             if (++stallTicks > NO_PROGRESS_TICKS) {
                 return stop(body, new Failure.NoProgress(stallTicks, "the furnace has held its ingredient and its fuel for "
-                    + stallTicks + " ticks without burning, so the game refuses the smelt (something in a slot is not what the recipe takes)"));
+                    + stallTicks + " ticks without burning, so the game refuses the smelt (something in a slot is not what the recipe takes)"
+                    + furnaceWhere()));
             }
         }
         return TickResult.RUNNING;
+    }
+
+    /** The furnace's own three slots as one number — the item and the count of each — so a change between ticks is one the game made. */
+    private static int slotsSignature(AbstractFurnaceMenu menu) {
+        int hash = 1;
+        for (int slot = 0; slot <= RESULT_SLOT; slot++) {
+            ItemStack stack = menu.getSlot(slot).getItem();
+            hash = hash * 31 + BuiltInRegistries.ITEM.getId(stack.getItem());
+            hash = hash * 31 + stack.getCount();
+        }
+        return hash;
     }
 
     /**
@@ -367,7 +403,7 @@ public final class SmeltTask extends StationTask {
         if (held + carriedCount < wanted) {
             return new Failure.MissingInput(ItemKeys.of(items.get(0)), wanted - held - carriedCount,
                 "the runs still to do need " + (wanted - held) + " of " + ItemKeys.of(items.get(0)).id()
-                    + ", the furnace holds " + held + " and the body carries " + carriedCount);
+                    + ", the furnace holds " + held + " and the body carries " + carriedCount + furnaceWhere());
         }
         int toPlace = Math.min(wanted - held, carriedCount);
         if (toPlace <= 0) return null;
@@ -378,6 +414,7 @@ public final class SmeltTask extends StationTask {
         for (int i = 0; i < Math.min(toPlace, room) && !menu.getCarried().isEmpty(); i++) {
             hand.placeOne(menuSlot);
         }
+        clicked = true; // the task clicked: whatever else this tick did, it was not a quiet one
         hand.putBack();
         return null;
     }
@@ -397,14 +434,16 @@ public final class SmeltTask extends StationTask {
         int room = MenuHand.roomFor(body, offered);
         if (room < made) {
             return new Failure.NoRoom(ItemKeys.of(item), "there is no room in the inventory for the " + made + " "
-                + ItemKeys.of(item).id() + " the furnace's slot holds (room for " + room + ")");
+                + ItemKeys.of(item).id() + " the furnace's slot holds (room for " + room + ")" + furnaceWhere());
         }
         int before = MenuHand.carriedCount(body, item);
         new MenuHand(body, menu).moveOut(menuSlot);
+        clicked = true;
         int arrived = MenuHand.carriedCount(body, item) - before;
         if (arrived < made) {
             return new Failure.NoProgress(0, "only " + arrived + " of the " + made + " "
-                + ItemKeys.of(item).id() + " taken from the furnace reached the inventory; the rest was dropped at the feet");
+                + ItemKeys.of(item).id() + " taken from the furnace reached the inventory; the rest was dropped at the feet"
+                + furnaceWhere());
         }
         return null;
     }
@@ -450,6 +489,45 @@ public final class SmeltTask extends StationTask {
     private boolean furnaceEmpty(BotPlayer body) {
         if (station == null) return true;
         return !(body.serverLevel().getBlockEntity(station) instanceof AbstractFurnaceBlockEntity furnace) || furnace.isEmpty();
+    }
+
+    /**
+     * The end of a smelt that is not its completion says what is still in the furnace and where it stands: an abort, a
+     * failure or the budget can leave the body's ingredient, fuel and result inside a block nothing else will open, and
+     * the log is what says they are there (a completion emptied the furnace through the menu first, and a pause is not
+     * an end — a resume carries on from inside).
+     */
+    @Override
+    protected void letGo(BotPlayer body) {
+        if (body != null && state() != TaskState.PAUSED) {
+            String held = stillInside(body);
+            if (held != null) {
+                MegaBlockBot.LOGGER.warn("{} ends its smelt with {} still in the furnace at {}: the tidy step and the next smelt take them up",
+                    body.getGameProfile().getName(), held, station.toShortString());
+            }
+        }
+        super.letGo(body);
+    }
+
+    /** What the furnace still holds, as "2 minecraft:raw_iron, 3 minecraft:stick"; null with no furnace of this task's or nothing inside it. */
+    @Nullable
+    private String stillInside(BotPlayer body) {
+        if (station == null || takeUpOnly) return null;
+        if (!(body.serverLevel().getBlockEntity(station) instanceof AbstractFurnaceBlockEntity furnace) || furnace.isEmpty()) return null;
+        StringBuilder held = new StringBuilder();
+        for (int slot = 0; slot < furnace.getContainerSize(); slot++) {
+            ItemStack stack = furnace.getItem(slot);
+            if (stack.isEmpty()) continue;
+            if (!held.isEmpty()) held.append(", ");
+            held.append(stack.getCount()).append(' ').append(ItemKeys.of(stack.getItem()).id());
+        }
+        return held.isEmpty() ? null : held.toString();
+    }
+
+    /** Where the furnace stands, for a failure's detail: what it still holds stays there when the task fails, and the
+     *  detail is where a look for it starts. Empty when no station is known. */
+    private String furnaceWhere() {
+        return station == null ? "" : "; the furnace at " + station.toShortString();
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -498,11 +576,10 @@ public final class SmeltTask extends StationTask {
         return null;
     }
 
-    private static Block blockOf(String station) {
-        return switch (station) {
-            case "minecraft:blast_furnace" -> Blocks.BLAST_FURNACE;
-            case "minecraft:smoker" -> Blocks.SMOKER;
-            default -> Blocks.FURNACE;
-        };
+    /** The registered block the key's item places, or null when the game has none: the item half of this is {@link #itemOf}. */
+    @Nullable
+    private static Block blockOf(ItemKey key) {
+        ResourceLocation id = ResourceLocation.tryParse(key.id());
+        return id == null ? null : BuiltInRegistries.BLOCK.getOptional(id).orElse(null);
     }
 }

@@ -31,7 +31,6 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.AbstractFurnaceBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
@@ -103,6 +102,11 @@ abstract class StationTask extends BodyTask {
     /** Within this many blocks of the body a drop is walked to by input; further off, by the navigator. */
     static final double NEAR_DROP = 2.5;
     /**
+     * How far from where the station stood what it held is looked for once it is broken: a furnace drops its contents
+     * beside the block, and they hop a little before they settle.
+     */
+    static final double SPILL_RADIUS = 3.0;
+    /**
      * Ticks of walking at a near drop by input before the navigator is asked for the drop's own block instead: a
      * second is several times what the last steps take, so a drop still not taken lies where walking at it does not
      * bring the body (seen on a live server: in a dip one block deep, straight under the edge the body stood on, a
@@ -155,6 +159,13 @@ abstract class StationTask extends BodyTask {
     private boolean dropWalkFailed;
     /** Ticks this pick-up has walked at a near drop by input without taking it. */
     private int inputSteps;
+    /** Picks up what fell out of the station besides its own item (what a furnace held), after that item is in. */
+    private final DropPickup spillPickup = new DropPickup();
+    /** Where the station whose spills are being picked up stood, kept for the search's centre. */
+    @Nullable
+    private BlockPos spillAt;
+    /** The pick-up of what the station held is under way. */
+    private boolean gathering;
 
     // Finding a place for the station, and walking to it or back to the station.
     /** Places the body stood at or walked to without finding a usable spot, so that they are not offered again. */
@@ -256,6 +267,16 @@ abstract class StationTask extends BodyTask {
         return false;
     }
 
+    /**
+     * Whether what the station held is gathered from the ground after its own item is in. The tidy step breaks a
+     * furnace that still holds the body's ingredient, fuel or result, and what drops beside it is as much the body's
+     * as the furnace: it is picked up ({@link DropPickup}, any item within {@link #SPILL_RADIUS} blocks of where the
+     * station stood) before the task ends.
+     */
+    protected boolean gathersSpills() {
+        return false;
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // The take-up task, and what the tidy step looks for
     // ---------------------------------------------------------------------------------------------------------
@@ -277,10 +298,10 @@ abstract class StationTask extends BodyTask {
 
     /**
      * The nearest station within reach that this body's memory says it placed and the tidy step may take up, or null.
-     * A crafting table always qualifies; a furnace only while it holds nothing (breaking one that still holds items
-     * would spill them) and while the body carries a tool that makes it drop, for a furnace broken by hand drops
-     * nothing and there would be no item to wait for. What {@link #takeUp} is for: a runtime asks after a restart and
-     * when a goal ends.
+     * A crafting table always qualifies; a furnace while the body carries a tool that makes it drop, for a furnace
+     * broken by hand drops nothing and there would be no item to wait for — whether or not it holds anything, for
+     * breaking one drops what it holds beside it and the take-up picks that up too. What {@link #takeUp} is for: a
+     * runtime asks after a restart and when a goal ends.
      */
     @Nullable
     public static BlockPos leftover(BotPlayer body) {
@@ -307,7 +328,6 @@ abstract class StationTask extends BodyTask {
         BlockState state = level.getBlockState(pos);
         if (state.is(Blocks.CRAFTING_TABLE)) return true;
         if (!(state.getBlock() instanceof AbstractFurnaceBlock)) return false;
-        if (!(level.getBlockEntity(pos) instanceof AbstractFurnaceBlockEntity furnace) || !furnace.isEmpty()) return false;
         return dropsFor(body, state);
     }
 
@@ -395,6 +415,13 @@ abstract class StationTask extends BodyTask {
             MegaBlockBot.LOGGER.info("{} leaves the {} at {} standing: the body carries no tool that makes it drop when broken",
                 body.getGameProfile().getName(), stationName(), station.toShortString());
             return complete(body);
+        }
+        if (spillAt != null) {
+            // The station is gone and its own item is in, but what it held lies on the ground yet: the pick-up's
+            // gather finishes that before the task ends (a pause in the middle of it comes back here).
+            phase = Phase.PICKUP;
+            phaseTicks = 0;
+            return TickResult.RUNNING;
         }
         if (stationItem() != null) {
             // No station of the body's to take up: one it found standing, or none it still knows of. Said, because a
@@ -696,9 +723,11 @@ abstract class StationTask extends BodyTask {
         if (++phaseTicks > BREAK_WAIT_TICKS) {
             // The work is made, and that is what the goal asked for, so the station's fate cannot fail it. The break
             // never finished, so it stands on; it stays remembered as the body's, and the tidy step or the next task
-            // takes it up (complete below releases the break in progress).
+            // takes it up (the break in progress is stopped first, while the position is still known: a release after
+            // the station is forgotten cannot stop it).
             MegaBlockBot.LOGGER.info("{} stops breaking the {} at {} after {} ticks and leaves it standing: the work is made",
                 body.getGameProfile().getName(), stationName(), station.toShortString(), phaseTicks);
+            abortBreaking(body);
             station = null;
             return complete(body);
         }
@@ -753,6 +782,9 @@ abstract class StationTask extends BodyTask {
     private TickResult pickUp(BotPlayer body) {
         Item item = stationItem();
         if (item != null && MenuHand.carriedCount(body, item) > stationsBefore) {
+            // The station's own item is in. What it held fell beside it — the tidy step breaks a furnace with the
+            // body's ingredient, fuel or result still inside — and that is picked up too before the task ends.
+            if (gathersSpills() && gatherSpills(body)) return TickResult.RUNNING;
             station = null;
             return complete(body);
         }
@@ -770,11 +802,22 @@ abstract class StationTask extends BodyTask {
         return TickResult.RUNNING;
     }
 
+    /** Gathers what fell out of the station around where it stood; true while that goes on. */
+    private boolean gatherSpills(BotPlayer body) {
+        if (spillAt == null) spillAt = station;
+        if (spillAt == null) return false;
+        if (!gathering) {
+            gathering = true;
+            spillPickup.start();
+        }
+        return spillPickup.tick(this, body, drop -> true, new AABB(spillAt).inflate(SPILL_RADIUS));
+    }
+
     /** The nearest dropped station item within {@link #DROP_SEARCH_RADIUS} blocks of where the station stood, or null. */
     @Nullable
     private ItemEntity nearestDrop(BotPlayer body) {
         Item item = stationItem();
-        if (item == null) return null;
+        if (item == null || station == null) return null;
         ItemEntity nearest = null;
         double nearestDistance = Double.MAX_VALUE;
         for (ItemEntity drop : body.serverLevel().getEntitiesOfClass(ItemEntity.class, new AABB(station).inflate(DROP_SEARCH_RADIUS),
@@ -847,7 +890,7 @@ abstract class StationTask extends BodyTask {
         return TickResult.COMPLETED;
     }
 
-    /** Lets go of everything: the break, the sneak, the open menu, the cursor and the work's slots. Never throws on a body in any state. */
+    /** Lets go of everything: the break, the sneak, the open menu, the cursor, the work's slots and the pick-up of what fell. Never throws on a body in any state. */
     @Override
     protected void letGo(BotPlayer body) {
         phase = Phase.PREPARE;
@@ -858,16 +901,30 @@ abstract class StationTask extends BodyTask {
             body.input().reset();
             walking = false;
         }
-        IInteractionManager hand = body.getInteractionManager();
-        if (hand.isMining() && station != null && station.equals(hand.getMiningPos())) {
-            hand.processBlockBreakingAction(station, Action.ABORT_DESTROY_BLOCK, Direction.UP,
-                    body.level().getMaxBuildHeight(), sequence++);
+        if (gathering) {
+            gathering = false;
+            spillPickup.rest();
+            body.input().reset();
         }
+        abortBreaking(body);
         // Closing a menu hands back its slots and cursor (AbstractContainerMenu.removed).
         if (body.containerMenu != body.inventoryMenu) body.closeContainer();
         MenuHand own = new MenuHand(body, body.inventoryMenu);
         own.putBack();
         giveBack(body, own);
+    }
+
+    /**
+     * Stops the break of the station in progress, if one is. The abort names the position being broken, so it is made
+     * while the station is still known: a task that forgets the station first leaves its break running unowned, and
+     * whatever touches the body next inherits a half-broken block.
+     */
+    private void abortBreaking(BotPlayer body) {
+        IInteractionManager hand = body.getInteractionManager();
+        if (hand.isMining() && station != null && station.equals(hand.getMiningPos())) {
+            hand.processBlockBreakingAction(station, Action.ABORT_DESTROY_BLOCK, Direction.UP,
+                    body.level().getMaxBuildHeight(), sequence++);
+        }
     }
 
     // ---------------------------------------------------------------------------------------------------------

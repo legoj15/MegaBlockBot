@@ -73,7 +73,7 @@ the brain with a fresh one (its contract).
 `TaskRegistry.register(kind, factory)` from a feature's `init()`; one factory per kind (a second registration throws).
 A task extends `core.task.AbstractTask<BotPlayer>`, acts only through the body it is handed each tick, finds the body's
 memory with `BotMemory.of(body.getUUID())`, and must release what it holds in `onAbort` and `onPause` **and before it
-returns its own `Failed`** (the executor does not abort a task that failed itself; `CraftTask.stop` does this).
+returns its own `Failed`** (the executor does not abort a task that failed itself; `StationTask.stop` does this).
 `waiting()` is true while it waits on the game (a break, a pickup) so the stuck watchdog leaves it alone; `checkpoint()`
 returns hints for where to look after a restart, never facts.
 
@@ -87,7 +87,7 @@ What the navigation tasks need from this runtime:
 - The runtime resets `body.input()` on the tick after the last active task ends, so a task need not clear the input of a
   task that ended; it still clears its own on pause and abort.
 - `BlockSafety.of(server).mayBreak/ noteBotPlaced` and `BotMemory.notePlaced/forgetPlaced` are the contract for any block
-  the bot places or breaks (see `CraftTask.placeTable`).
+  the bot places or breaks (see `StationTask.place`).
 - The snapshot reads `BotMemory` for stations and containers; a `deposit` task notes what it saw (`ContainerAccess.note`), as `withdraw` and `look_inside` do.
 - `Failure.Died` is reported through `onDeath`; a task whose body died does not also fail with `Died`.
 
@@ -145,7 +145,7 @@ carried before anything is put down, and the work itself, which runs with the me
 - No usable spot within reach: the body walks, with `BotNavigator.goTo`, to the nearest place it can stand (feet and head
   free, a full-height floor) that has a usable spot beside it, searched shell by shell outward within
   `TableSites.DEFAULT_RADIUS` (12) blocks in every direction, and looks again from where it arrives. Up to
-  `CraftTask.WALKS_ALLOWED` (4) walks; a walk that fails (`NO_PATH`, `STUCK`, or a navigator that stops three times) makes
+  `StationTask.WALKS_ALLOWED` (4) walks; a walk that fails (`NO_PATH`, `STUCK`, or a navigator that stops three times) makes
   the next nearest place the next try, and a walk that gets there clears the remembered failure.
 - Leaving a protected area. Inside the protected square around the owner's respawn point or the world spawn block safety
   refuses every spot, since the table could not be taken up again. When the search found candidates and every one of them was
@@ -163,7 +163,7 @@ carried before anything is put down, and the work itself, which runs with the me
   broken -- it stays standing and remembered as the body's, and the tidy step or the next craft takes it up once there is
   room -- because the item of a table broken into a full inventory would lie on the floor for good. The item hops
   about and now and then rests outside the body's pickup box (a block on each side), so from 20 ticks after the break the
-  body goes to a table item within `CraftTask.DROP_SEARCH_RADIUS` (12) blocks of where the table stood: through
+  body goes to a table item within `StationTask.DROP_SEARCH_RADIUS` (12) blocks of where the table stood: through
   `BotNavigator.goTo` while the item is more than `NEAR_DROP` (2.5) away, by its movement input for the last steps (or all of
   them when the navigator will not go; the input is reset when the item is in or the task lets go). A table the body did not place is left standing; a table is the body's when this task placed it or
   `BotMemory` says an earlier one did. The task records what it placed in `BotMemory` (and `BlockSafety.noteBotPlaced`). A
@@ -210,13 +210,16 @@ The planner counts a crafting table in the inventory, never in the world (`Solve
 table this body put down and never took up (the server stopped between placing and breaking, a cancel, a failure) costs
 the replanned goal four planks, or fails it when there are none to spare. `BotRuntime` therefore looks for one after a
 load and whenever a goal ends (`tidyArmed`): the nearest crafting table or furnace within reach that `BotMemory` says
-this body placed — a furnace only while it holds nothing (breaking one that still holds items would spill them) and
-while the body carries a tool that makes it drop, under the smelt task's rule below. Found, it runs
+this body placed — a furnace while the body carries a tool that makes it drop, under the smelt task's rule below,
+whether or not it holds anything, for breaking one drops what it holds beside it and the tidy task picks that up too
+(`DropPickup`, the one walk to dropped items, over any item within `StationTask.SPILL_RADIUS` (3) blocks of where the
+furnace stood). Found, it runs
 `CraftTask.takeUpStation(level, pos)` (the public face of `StationTask.takeUp`, for the base class is package-private:
 the station's own break and pickup, working nothing) before the executor is
-ticked again, so the next plan sees the station in the inventory. A failure there is logged, not a goal's failure; the
-station stays, remembered. A station the rules do not let the body break stays standing and remembered too (the tidy task completes,
-and looks again at the next goal's end). Covered by `BotRuntimeGameTests.aTableLeftStandingByALogoutIsTakenUp`.
+ticked again, so the next plan sees the station in the inventory. A failure there is logged, naming the block that
+stood there, not a goal's failure; the station stays, remembered. A station the rules do not let the body break stays
+standing and remembered too (the tidy task completes, and looks again at the next goal's end). Covered by
+`BotRuntimeGameTests.aTableLeftStandingByALogoutIsTakenUp`.
 
 ## `smelt`
 
@@ -227,7 +230,10 @@ class its run is sized for), `times` (runs) and `station` (`minecraft:furnace`, 
 - The recipe is found again by id and must be an `AbstractCookingRecipe` of the station's kind; the fuel class and the
   run's counts are read back from `CookingRecipeSource` (`variantOf`, `fuelOf`, `runOf`), never worked out again. One
   run takes `p` of the ingredient and `q` of the fuel and makes `p` times the recipe's result; the leaf's goal is the
-  absolute count after the step, so a task started again makes only what is still missing, in whole runs.
+  absolute count after the step, so a task started again makes only what is still missing, in whole runs — and never
+  more than the leaf's `times` runs on either branch: the count worked to is what is carried plus the clamped runs'
+  results, as the craft task works to its clamped `remaining`, so a goal above what the leaf budgeted is the planner's
+  to top up rather than this task's to spend another node's material on.
 - The furnace is a container, and block safety keeps the body out of containers it did not place, so a standing
   furnace of the right kind within reach is used only when `BotMemory` says the body placed it; otherwise the carried
   one is put down. The ingredient and the fuel are asked for before anything is put down (`MissingInput` naming the
@@ -246,20 +252,29 @@ class its run is sized for), `times` (runs) and `station` (`minecraft:furnace`, 
 - Interruptions and exits: on pause, abort or failure the cursor is empty and the menu is closed; what the task put
   into the furnace stays there, the furnace stays remembered, and a resumed task walks back to it, opens it and
   carries on from what the slots hold (an ingredient already in the furnace counts as carried for the runs still to
-  do). A body carried out of reach while the work runs closes the menu itself and is walked back.
+  do). A body carried out of reach while the work runs closes the menu itself and is walked back. An end that is not
+  the completion — an abort, a failure, the kind's budget — leaves the body's ingredient, fuel and result inside a
+  block nothing else would open, so it is said: the log names what is inside and where the furnace stands, a failure
+  the work itself made carries the position in its detail, and the tidy step is what gets the items back (it takes a
+  furnace up whether or not it holds anything; see "A station left standing").
 - Failures: the station failures the base class already has; `TargetGone` for a recipe id the game does not have, one
   that is no cooking recipe of the station's kind, or one whose fuel class the game no longer knows; `MissingInput`
   when the ingredient, the fuel or the furnace is not carried; `NoRoom`; and `NoProgress` when the furnace holds the
-  ingredient and the fuel and has not burned for `SmeltTask.NO_PROGRESS_TICKS` (100) ticks — vanilla lights a furnace
+  ingredient and the fuel and has not burned for `SmeltTask.NO_PROGRESS_TICKS` (100) ticks — counted only over ticks in
+  which nothing happened, for the count starts again on any tick in which the task clicked or the furnace's own slots
+  changed, so a slow feed or an emptying slot is not a stall — vanilla lights a furnace
   within a tick or two of both slots being filled, so that is "something else is in a slot, or the game refuses the
   recipe".
 - Time: a stack takes 12800 ticks in a furnace and the executor's default budget for a task is 12000, so the `smelt`
   kind has its own budget where the runtime builds its `ExecutorConfig` (`BotRuntime.SMELT_BUDGET_TICKS`, 72000 — one
   hour of game time, five and a half stacks, still bounding a smelt that has stopped for good).
-- `SmeltGameTests`: the two-run sticks variant ends with 2 ingots and nothing lost; the same without a pickaxe leaves
+- `SmeltGameTests`: the two-run sticks variant ends with 2 ingots and nothing lost; the same with the only pickaxe in
+  the main storage, off the hotbar, still takes the furnace up; the same without a pickaxe leaves
   the furnace standing and remembered; a furnace somebody else put there is not opened, and the body puts its own
   down; no fuel is a `MissingInput` naming a fuel item with nothing put down; a pause and a resume in the middle of
-  the burn still ends with the 2 ingots; and through the runtime a body asked to have 1 iron ingot ends satisfied.
+  the burn still ends with the 2 ingots; a cancel in the middle of the burn and the tidy step after it end with the
+  furnace, all the iron and nothing on the floor; and through the runtime a body asked to have 1 iron ingot ends
+  satisfied.
 
 ## `mine`
 
@@ -418,9 +433,12 @@ that source.
   and floats: one that leaves the box is walked after, it does not end the pick-up. Further than `WALK` (3.5, flat) the
   navigator brings the body to within `APPROACH` (2) blocks of the drop's cell — two, since nothing a body can stand in
   is within one block of a bush on a raised block — then the body's own steps (`STEPS_ALLOWED`, 40), which break
-  nothing, then the drop's cell exactly. A drop the navigator cannot reach, or one in the box and not taken for
-  `WAIT_TICKS` (60), is given up; the whole pick-up has `BUDGET_TICKS` (400), so a drop the water carries off cannot
-  hold the task.
+  nothing, then the drop's cell exactly; a navigator command another owner is running is waited for, not walked over.
+  A drop the navigator cannot reach, or one in the box and not taken for `WAIT_TICKS` (60), is given up; the whole
+  pick-up has `BUDGET_TICKS` (400) counted from the last drop that came in, and a hard bound that nothing starts again
+  (`HARD_BOUND_TICKS`, 2000), so a drop the water carries off — or one that bobs across the edge of the search box,
+  starting the budget anew each time it leaves — cannot hold the task. However the pick-up ends, the body's movement
+  input is stood still and its look let go.
 - A target the body cannot get at is set aside, as the mine task sets a block aside, and another is taken. A follow
   command never fails for want of a path (it keeps trying), so the task watches the chase itself: a quarry neither
   closer nor within reach for `KillTask.CHASE_STALL_TICKS` ticks (the navigator's own stall bound for one block) is set
@@ -431,8 +449,10 @@ that source.
   bounded number of rounds (`KillTask.Search`), then fails `NoSource` with the leaf's item and source id, so the executor
   excludes the source and the next plan gathers the item another way. A round is a look, a stretch of exploring and
   another look; an exploring command that fails at once ends the round and never the search, since one tick is not a
-  search and a mob may walk into range a moment later. No room for the item before it starts or after a
-  kill's drops are gathered is `NoRoom`, as in the mine task.
+  search and a mob may walk into range a moment later, and an exploring command that is still working when the round
+  ends is stopped with it — the hunt gives its follow only when nothing of the task's is running, and an explore left
+  running would walk the body on under it while the quarry the next look finds is set aside unapproached. No room for
+  the item before it starts or after a kill's drops are gathered is `NoRoom`, as in the mine task.
 - `progress()`: looking for a cow, going to one at x y z, fighting one, picking up what fell — and how many of the item it
   holds.
 
@@ -456,11 +476,18 @@ Leaf params: `item`, `count`, `block`. The leaf's source id (`harvest:minecraft:
 - A crop that was broken is replanted when the body holds the plant's item (the seed, the carrot — read from the block as the
   resolver reads it: the block's own item, or what pick-block gives) and the block below is farmland: a use-item click puts
   the same plant back. The replant is finished before the step can end, so a harvest that took the crop owes the field its
-  seed back even when the count is reached. Not replanting is not a failure.
+  seed back even when the count is reached; once the replant is done the count is asked first, so a harvest that holds
+  its goal completes instead of scanning again — a scan that could only fail, the one ripe block there was being taken.
+  Not replanting is not a failure.
 - Drops are picked up as in `kill` (`DropPickup`). What a picked bush drops lies in the bush's own cell, the engine
   counts a berry bush as a block never to be stood in, and a goal of that cell would have it break the bush to stand
   there: so the navigator is never asked into the drop's cell first, and its break rules refuse that block for as long
-  as the task owes it.
+  as the task owes it. When the owe ends, the standard rules go back only if the navigator still holds the filter the
+  preserve installed: a filter someone else put in in the meantime (the reflex layer's "break nothing", on taking the
+  body over before the task was paused) is not this task's to replace.
+- A harvest paused while it works a block resumes at that block's pick-up: what the taking left — drops in its cell, a
+  replant owed to the spot — is kept and paid before the search goes on, and a use-harvested block still standing is
+  preserved again for the walk back to its drops. A block the task was only going to is let go and looked for again.
 - Blocks it cannot get at are set aside (kept for the task's life and its checkpoint); when
   no grown block is known it explores for a bounded number of rounds (`HarvestTask.Search`), then fails `NoSource` with the
   leaf's item and source id — the planner has no wait-for-it-to-grow yet, so an unripe field is a source to exclude and
