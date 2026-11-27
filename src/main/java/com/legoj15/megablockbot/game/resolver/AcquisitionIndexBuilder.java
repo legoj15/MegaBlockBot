@@ -39,6 +39,10 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.util.GsonHelper;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.MobCategory;
+import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.attributes.DefaultAttributes;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.BucketItem;
@@ -275,9 +279,18 @@ public final class AcquisitionIndexBuilder {
             String entityId = BuiltInRegistries.ENTITY_TYPE.getKey(type).toString();
             String table = type.getDefaultLootTable().location().toString();
             if (environment.table(table) == null) continue;
+            // What the fight is, from the type's own attributes: the planner prices a kill by them. A kind in no
+            // spawn category of its own (MISC: golems, villagers) is one the world does not put there by itself.
+            @SuppressWarnings("unchecked")
+            AttributeSupplier attributes = DefaultAttributes.getSupplier((EntityType<? extends LivingEntity>) type);
+            double health = attributes.hasAttribute(Attributes.MAX_HEALTH)
+                ? attributes.getBaseValue(Attributes.MAX_HEALTH) : Source.KillMob.BASE_HEALTH;
+            double attack = attributes.hasAttribute(Attributes.ATTACK_DAMAGE)
+                ? attributes.getBaseValue(Attributes.ATTACK_DAMAGE) : 0.0;
+            boolean spawnsNaturally = type.getCategory() != MobCategory.MISC;
             for (Route route : eval.routes(table, EnumSet.of(Tool.PLAIN), true, LootEval.StateRule.MINED)) {
                 index.addSource(new Source.KillMob("kill:" + entityId, ItemKey.of(route.item()), entityId, route.byPlayer(),
-                    route.expected(), route.random()));
+                    route.expected(), route.random(), health, attack, spawnsNaturally));
             }
         }
     }

@@ -386,7 +386,7 @@ public final class KillTask extends BodyTask {
     }
 
     private TickResult loot(BotPlayer body) {
-        if (fellAt != null && pickup.tick(this, body, item, new AABB(fellAt).inflate(LOOT_RADIUS))) return TickResult.RUNNING;
+        if (fellAt != null && pickup.tick(this, body, drop -> drop.getItem().is(item), new AABB(fellAt).inflate(LOOT_RADIUS))) return TickResult.RUNNING;
         return lootDone(body);
     }
 
@@ -425,6 +425,9 @@ public final class KillTask extends BodyTask {
             // Nowhere further to look from here. That ends this step, not the whole search: an exploring command
             // that fails at once has looked at nothing, and a mob may walk into range or come into the world a
             // moment later, so the step stands its minimum and another look follows, until the search's own bound.
+            // A failure that is not about the search at all ends the step with what it is (BodyTask.exploreFailure).
+            TickResult notTheSource = exploreFailure(body, nav, entityLabel);
+            if (notTheSource != null) return notTheSource;
             if (stepTicks < MIN_STEP_TICKS) return TickResult.RUNNING;
         } else if (stepTicks < search.stepTicks() && nav.state() == BotNavigator.State.WORKING) {
             return TickResult.RUNNING;

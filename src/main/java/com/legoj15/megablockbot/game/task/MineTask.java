@@ -66,7 +66,9 @@ import net.minecraft.world.phys.Vec3;
  * {@link Search#targetStallTicks} ticks without getting closer, or when the engine finds no path to it. The task keeps
  * those blocks for its whole life, whatever commands it gives the navigator (and in its checkpoint, so a retry does not
  * go back to them). The task also watches itself: when neither the count held nor the best distance to a known block
- * has improved for {@link Search#noGainTicks} ticks it sets every block the navigator knows aside (a stalled round) and
+ * has improved for {@link Search#noGainTicks} ticks -- not counting ticks the navigator itself spends waiting, for the
+ * body's air or for a second look at the world, which its own deadline bounds -- it sets every block the navigator
+ * knows aside (a stalled round) and
  * looks elsewhere, as it does when the navigator finds nothing. After {@link Search#maxStalledRounds} stalled rounds, or
  * when the search is spent, it fails {@code NoSource} either way: with blocks set aside (there were some, and none could
  * be got at -- blocks withheld for want of air are set aside with them) the failure says how many were found and carries
@@ -321,7 +323,10 @@ public final class MineTask extends BodyTask {
         waiting = nav.breaking();
         navWait = nav.waitState();
         headingFor = phase == Phase.MINING ? nav.focusTarget() : null;
-        if (phase == Phase.MINING && nav.state() == BotNavigator.State.WORKING) {
+        if (phase == Phase.MINING && nav.state() == BotNavigator.State.WORKING && navWait == BotNavigator.Wait.NONE) {
+            // While the navigator bridges a gap the engine left -- waiting for the body's air, or for a second look
+            // at the world -- nothing is being approached or broken, so the no-gain clock stands still; the
+            // navigator's own deadline bounds that wait (BotNavigator.waitForAir), not this watch.
             TickResult stalled = watchGain(body, nav);
             if (stalled != null) return stalled;
         }
@@ -428,23 +433,9 @@ public final class MineTask extends BodyTask {
         stepTicks++;
         double moved = horizontal(body.position(), stepFrom);
         if (nav.state() == BotNavigator.State.FAILED) {
-            // Why the exploring ended decides what the failure says about the source. Only "explored and found none"
-            // (the engine could not path toward any chunk it has not seen: nowhere further to look) says the leaf's
-            // source has nothing to give, which is what NoSource tells the executor. An engine error is a bug
-            // (Internal, with the exception); anything else -- the body replaced, removed or moved to another
-            // dimension while it explored -- says nothing about the source, and the task answers it the way the reach
-            // task answers the navigator (Unreachable), never with a failure that excludes a source.
-            BotNavigator.FailKind kind = nav.failKind();
-            if (kind == BotNavigator.FailKind.ENGINE_ERROR) {
-                release(body);
-                return TickResult.failed(new Failure.Internal(nav.failureCause(),
-                    "the navigation engine failed while exploring for " + blockLabel + ": " + nav.failure()));
-            }
-            if (kind != BotNavigator.FailKind.EXPLORE_FAILED) {
-                release(body);
-                return TickResult.failed(unreachable(blockLabel, nav.failure(),
-                    "could not explore for " + blockLabel + ": " + nav.failure()));
-            }
+            // Why the exploring ended decides what the failure says about the source (BodyTask.exploreFailure).
+            TickResult notTheSource = exploreFailure(body, nav, blockLabel);
+            if (notTheSource != null) return notTheSource;
             exploredBlocks += moved;
             return giveUp(body);
         }

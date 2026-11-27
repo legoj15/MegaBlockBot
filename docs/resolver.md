@@ -91,7 +91,13 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
   feature: of those peaking at or below the dimension's sea level (the noise settings' `sea_level`), the one with the
   largest veins, then the widest range; when none peaks that low, the lowest peak. So iron is 16 (the middle feature),
   not the mountain-only 232, and diamond is -64.
-- Kill sources: entity types that have attributes (a living entity), other than the player and the armor stand.
+- Kill sources: entity types that have attributes (a living entity), other than the player and the armor stand. Each
+  carries what the fight is, from the type's default attributes: `health` (max health), `attack` (attack damage, 0
+  when it has none) and `spawnsNaturally` (its spawn category is not `MISC`: a golem or a villager stands only where a
+  village or a player made it). The planner prices a kill by them (`GatherCosts.fightCost`: the base price is a cow's,
+  times health over ten, plus a quarter for each point of the mob's blow) and does not plan a kill of a mob the world
+  does not spawn on its own. Found by a live run: with every kill at one price, four ingots from an iron golem was
+  the cheapest iron, and "equip iron armor" began by exploring for a golem.
 - Trades: each listing of `VillagerTrades.TRADES` and the wandering trader is sampled 64 times with a fixed seed against
   an unplaced villager. Explorer-map listings are skipped (each roll would allocate a world map), a null listing is
   noted and skipped, and a listing that throws, while it offers or while its offer is read, is noted and skipped on its

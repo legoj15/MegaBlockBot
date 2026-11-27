@@ -46,6 +46,12 @@ import java.util.function.ToLongFunction;
  * so the failure reported for an item with no other way is that source's own.
  */
 public final class GatherCosts implements CostModel<String, ItemKey> {
+    /**
+     * What each point of a mob's blow adds to the price of killing it, as a share of the price: a quarter, so a
+     * zombie's three points come to three quarters more than a harmless mob of its health.
+     */
+    private static final double BLOW_SHARE = 0.25;
+
     private final RecipeBook recipes;
     private final AcquisitionIndex index;
     private final PlannerConfig config;
@@ -129,6 +135,11 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
                 return "a crafted block: it stands only where someone placed one";
             }
         }
+        if (source instanceof Source.KillMob kill && !kill.spawnsNaturally()) {
+            // An iron golem is four ingots a kill, cheaper on paper than a mine and a furnace; one stands only in a
+            // village or where a player built it. As with a generated chest, the finding is what is not planned.
+            return "a mob the world does not spawn on its own: finding one is not planned yet";
+        }
         if (source instanceof Source.Trade trade && !(trade.chance() > 0)) return "the offer never comes up";
         // One item per trade: a trade that takes one or more of that item back leaves the stock no higher.
         if (source instanceof Source.Trade trade && trade.cost().getOrDefault(trade.item(), 0) >= 1) {
@@ -200,7 +211,7 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
         if (source instanceof Source.Harvest harvest) {
             return sighted(ceilDiv(config.harvest(), source.yield()), harvest.block());
         }
-        if (source instanceof Source.KillMob) return ceilDiv(config.kill(), source.yield());
+        if (source instanceof Source.KillMob kill) return ceilDiv(fightCost(kill), source.yield());
         if (source instanceof Source.Fishing) return ceilDiv(config.fish(), source.yield());
         if (source instanceof Source.Trade trade) {
             // One trade gives one item; a trade that comes up with chance p is tried 1/p times per success.
@@ -226,6 +237,17 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
      * The breaking attempt's cost spread over the drop, plus the depth charge of an ore and what the sight says of the
      * block. A tool the bot has to make first is charged by the caller.
      */
+    /**
+     * One kill's price: the base price is a cow's (ten health, no blow of its own), a mob with more health takes that
+     * many times the swings, and each point of its blow adds {@link #BLOW_SHARE} of the price for the health and the
+     * time the fight costs the body. A zombie (20 health, a blow of 3) comes to three and a half cows.
+     */
+    private long fightCost(Source.KillMob kill) {
+        double swings = Math.max(1.0, kill.health() / Source.KillMob.BASE_HEALTH);
+        double danger = 1.0 + Math.max(0.0, kill.attack()) * BLOW_SHARE;
+        return (long) Math.min((double) UNOBTAINABLE - 1, Math.ceil(config.kill() * swings * danger));
+    }
+
     private long breakingCost(Source.MineBlock mine) {
         long cost = ceilDiv(config.mineBase(), mine.yield());
         return sighted(mine.ore() != null ? saturatingAdd(cost, config.deepOre()) : cost, mine.block());

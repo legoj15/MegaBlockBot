@@ -439,7 +439,7 @@ public final class HarvestTask extends BodyTask {
     }
 
     private TickResult loot(BotPlayer body) {
-        if (at != null && pickup.tick(this, body, item, new AABB(at).inflate(LOOT_RADIUS))) return TickResult.RUNNING;
+        if (at != null && pickup.tick(this, body, drop -> drop.getItem().is(item), new AABB(at).inflate(LOOT_RADIUS))) return TickResult.RUNNING;
         return lootDone(body);
     }
 
@@ -479,7 +479,10 @@ public final class HarvestTask extends BodyTask {
         phaseTicks++;
         BotNavigator nav = nav(body);
         if (nav.state() == BotNavigator.State.FAILED) {
-            // Nowhere further to look from here: the search is spent.
+            // Nowhere further to look from here: the search is spent -- when that is what the failure says
+            // (BodyTask.exploreFailure).
+            TickResult notTheSource = exploreFailure(body, nav, blockLabel);
+            if (notTheSource != null) return notTheSource;
             return giveUp(body);
         }
         if (phaseTicks < search.stepTicks() && nav.state() == BotNavigator.State.WORKING) return TickResult.RUNNING;

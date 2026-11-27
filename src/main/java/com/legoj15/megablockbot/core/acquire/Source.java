@@ -55,13 +55,29 @@ public sealed interface Source {
      */
     record OreRange(int minY, int maxY, int bestY) {}
 
-    /** Killing a mob. {@code playerKillOnly} is true when the drop needs a kill by a player. */
-    record KillMob(String id, ItemKey item, String entity, boolean playerKillOnly, double yield, boolean random)
+    /**
+     * Killing a mob. {@code playerKillOnly} is true when the drop needs a kill by a player.
+     *
+     * <p>The fight is part of the price, so the source carries what the game says of the mob: {@code health} is its
+     * full health and {@code attack} the damage of its blow (0 for one that does not fight back), both the type's own
+     * defaults. {@code spawnsNaturally} is false for a kind the world does not spawn on its own account (an iron
+     * golem, a villager): one stands only where a village or a player made it, and finding one is not planned.
+     */
+    record KillMob(String id, ItemKey item, String entity, boolean playerKillOnly, double yield, boolean random,
+                   double health, double attack, boolean spawnsNaturally)
         implements Source {
+        /** The health of the mob the planner's base price of a kill is for: a cow's. */
+        public static final double BASE_HEALTH = 10.0;
+
         public KillMob {
             Objects.requireNonNull(id, "id");
             Objects.requireNonNull(item, "item");
             Objects.requireNonNull(entity, "entity");
+        }
+
+        /** A harmless mob of a cow's health that spawns on its own: what a fixture that is not about the fight needs. */
+        public KillMob(String id, ItemKey item, String entity, boolean playerKillOnly, double yield, boolean random) {
+            this(id, item, entity, playerKillOnly, yield, random, BASE_HEALTH, 0.0, true);
         }
     }
 

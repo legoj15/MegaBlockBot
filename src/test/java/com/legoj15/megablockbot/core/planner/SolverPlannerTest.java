@@ -2480,6 +2480,27 @@ final class SolverPlannerTest {
     }
 
     @Test
+    void aKillIsPricedByTheFightAndAMobThatDoesNotSpawnOnItsOwnIsNotHunted() {
+        // A cow is the mob the base price is for; a zombie has twice its health and hits back; an iron golem gives
+        // four ingots a kill and stands only where a village or a player made one.
+        Source cow = new Source.KillMob("kill:minecraft:cow", ItemKey.of("leather"), "minecraft:cow", false, 1.0, false,
+                10.0, 0.0, true);
+        Source zombie = new Source.KillMob("kill:minecraft:zombie", ItemKey.of("rotten_flesh"), "minecraft:zombie", false,
+                1.0, false, 20.0, 3.0, true);
+        Source golem = new Source.KillMob("kill:minecraft:iron_golem", IRON_INGOT, "minecraft:iron_golem", false, 4.0,
+                false, 100.0, 15.0, false);
+        AcquisitionIndex indexOf = AcquisitionIndex.builder().addSource(cow).addSource(zombie).addSource(golem).build();
+        PlannerConfig config = PlannerConfig.defaults();
+        GatherCosts costs = new GatherCosts(book(), indexOf, config, Exclusions.NONE, EMPTY);
+        assertEquals(config.kill(), costs.costOf(cow), "a harmless mob of a cow's health costs the base price");
+        assertTrue(costs.costOf(zombie) > 2 * costs.costOf(cow),
+                "twice the health and a blow of its own cost more than twice: " + costs.costOf(zombie));
+        assertEquals(com.legoj15.solver.CostModel.UNOBTAINABLE, costs.costOf(golem),
+                "a mob that does not spawn on its own is not hunted");
+        assertFalse(costs.usable(golem));
+    }
+
+    @Test
     void aBlockInSightCostsLessThanTheSameBlockOutOfItHoweverFarAndOnlyBlockSourcesAreCharged() {
         Source oak = new Source.MineBlock("mine:minecraft:oak_log", OAK_LOG, OAK_LOG_BLOCK,
                 null, ToolTier.HAND, false, false, false, 1.0, false, null);

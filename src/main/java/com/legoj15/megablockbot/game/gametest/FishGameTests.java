@@ -119,17 +119,17 @@ public final class FishGameTests {
      * A body holding a rod (set-up, once before the task starts) is given a {@code fish} leaf for one cod from the
      * fishing table: within the test's budget the body holds a cod, caught by its own casts. Fishing is random: a
      * cod is about half of what a cast brings up (the fish pool is 85 per cent of the table and cod 60 of the fish
-     * weights), so over the ten-odd casts this budget allows the odds of not one cod are about one in a thousand.
+     * weights), so over the twenty-odd casts this budget allows the odds of not one cod are about one in a million.
      * The body never stood in the water (its position is tracked every tick), and no hook is left in the arena.
      */
-    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 4200)
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 8400)
     public static void fishingCatchesACodFromThePool(GameTestHelper helper) {
         room(helper, 4, Blocks.BARRIER);
         pool(helper, 8, 8);
-        Job job = Job.start(helper, "fcatch", new Vec3(3.5, FLOOR_Y + 1, 3.5), 4200, fishLeaf("cod", 1));
+        Job job = Job.start(helper, "fcatch", new Vec3(3.5, FLOOR_Y + 1, 3.5), 8400, fishLeaf("cod", 1));
         job.body().getInventory().setItem(0, rod(helper, true));
         boolean[] inWater = {false};
-        job.run.each(3900, () -> {
+        job.run.each(8100, () -> {
             failIfFailed(helper, job);
             BotPlayer body = job.body();
             inWater[0] |= body.level().getFluidState(body.blockPosition()).is(FluidTags.WATER);
@@ -194,15 +194,15 @@ public final class FishGameTests {
      * A pause while the hook is out and a resume: the pause reels the line in (no hook entity is left in the arena
      * while the task is paused) and resets the input, and the resumed task still ends with the cod.
      */
-    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 4200)
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 8400)
     public static void aPausedFishingTaskResumesAndStillCatches(GameTestHelper helper) {
         room(helper, 4, Blocks.BARRIER);
         pool(helper, 8, 8);
-        Job job = Job.start(helper, "fpause", new Vec3(3.5, FLOOR_Y + 1, 3.5), 4200, fishLeaf("cod", 1));
+        Job job = Job.start(helper, "fpause", new Vec3(3.5, FLOOR_Y + 1, 3.5), 8400, fishLeaf("cod", 1));
         job.body().getInventory().setItem(0, rod(helper, true));
         int[] pausedAt = {-1};
         boolean[] pauseChecked = {false};
-        job.run.each(3900, () -> {
+        job.run.each(8100, () -> {
             failIfFailed(helper, job);
             BotPlayer body = job.body();
             FishingHook hook = body.fishing;

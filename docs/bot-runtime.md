@@ -31,8 +31,9 @@ offline: the log and the command's feedback only. `/aiplayer status` is `BotSpee
 `Step i of n: <kind> (<goal>)`, then `On it for 2m 13s: <what the task says>` (how long the body has been on the
 step: `BotRuntime` notes the game time when the executor first asks for a task for that node, a retry of it keeps
 counting; the phrase is `Task.progress()`, empty by default, for a mine task "heading for a block at x y z", "waiting
-for its air to come back" (the wait for air is made out of the water: the navigator gets the body's head above the
-surface first, and only then counts the wait), "waiting to look again", "exploring for oak_log" and how many blocks it
+for its air to come back" (that wait is part of the mine command, not a walk of the navigator's own: the navigator
+holds the body afloat with jump until the air is full again, one game-time deadline bounding the whole wait, and gives
+the wet targets up when it passes), "waiting to look again", "exploring for oak_log" and how many blocks it
 set aside; when the step ends because every block of the leaf's source it found was beyond reach, the failure is
 `NoSource` carrying that source, which the executor excludes so the next plan gathers the item another way), replans,
 queue; an idle bot repeats its last result.
@@ -274,16 +275,32 @@ A failed exploration is `NoSource` only when it explored and found none: the nav
 which. An engine error ends the step `Internal` with the exception, and a body that is no longer the navigator's (replaced,
 removed, moved to another dimension) ends it `Unreachable`, the failure the reach task answers the navigator with — neither
 says anything about the source, so neither has the executor exclude one
-(`MoveAndMineGameTests.aBodyDespawnedWhileExploringDoesNotFailNoSource`).
+(`MoveAndMineGameTests.aBodyDespawnedWhileExploringDoesNotFailNoSource`). The rule is one method,
+`BodyTask.exploreFailure`, and every task that explores for a source asks it: `mine`, `fish`, `kill` and `harvest`.
+
+Blocks the body would have to stand in or under water to break are held back while its air is not full, and the wait
+for that air is part of the mine command: the navigator keeps the command's owner (a pause, an abort, a release of the
+task stops the body), and holds jump through the body's input — what a player does to rise in a water column and float
+at the surface, forward toward the place to breathe when it is not straight above — until the air is full again, when
+the engine's mine process restarts under the same command. One game-time deadline bounds the whole wait (150 ticks:
+filling the 300 air at 4 a tick with the eyes out is 75, the rest is room to get the head out); when it passes with
+the air not full, or the head stays under for 60 ticks, or there is nowhere to breathe within the four blocks up and
+around the navigator searches — no way up — the wet targets are set aside like any block that cannot be got at, so
+the step ends `NoSource` naming the source when nothing else is left, never a failure that would be retried into the
+same dive. While the navigator waits, the task's own no-gain clock stands still
+(`MoveAndMineGameTests.aBodyInTheWaterGetsItsHeadOutWithoutLeavingTheMineCommand`,
+`aBodyWithNoWayUpGivesUpTheWetTargets`, `abortingAMineWhileItBringsTheBodyUpForAirStopsTheBody`).
 
 ## `recover_drops`
 
 The node the executor puts in front of the new tree after a death (`RecoverDropsTask`): walk to each place the death's items
 fell and pick up what still lies there. Drops move — items roll, fall and float — so at each recorded position the task looks
-for item entities within a named radius (4 blocks) horizontally and down to a named depth (8 blocks) below it, and walks to
-each it finds at the item's own position, as a player walks over an item; a position with nothing within that radius is done
-at once. An item the body cannot get at is skipped, and so is one the pickup wait (40 ticks) ran out on; a drop that has been
-picked up or despawned is never waited for. The task never fails the goal: the node is best-effort, always completing.
+for item entities within a named radius (4 blocks) horizontally and down to a named depth (8 blocks) below it, and picks
+each up through `DropPickup`, the one walk to dropped items (see `kill`); a position with nothing within that radius is done
+at once. The walk to the record comes first, however far: what lies there cannot be seen before its chunks are loaded
+around the body. An item the body cannot get at is given up, and so is one that lies in reach and is not taken; a drop that
+has been picked up or despawned is never waited for. The task never fails the goal: the node is best-effort, always
+completing.
 
 ## `build`
 

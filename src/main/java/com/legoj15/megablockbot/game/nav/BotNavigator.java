@@ -1,5 +1,6 @@
 package com.legoj15.megablockbot.game.nav;
 
+import com.legoj15.megablockbot.game.body.BodyInput;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.build.Blueprint;
 import com.legoj15.megablockbot.nav.NavRuntime;
@@ -108,12 +109,20 @@ public final class BotNavigator {
      */
     public static final int TARGET_STALL_TICKS = 400;
     /**
-     * Ticks a mine command waits for the body's air to fill again when the only blocks it knows are ones it would take
-     * standing in or under water. Filling from empty takes about 75 ticks once the eyes are out of the water, and a
-     * body still in it loses air all the while, so the wait is counted only from the tick the eyes are out (see
-     * {@link #waitForAir}); this leaves room for the air to be coming back from a fall as well.
+     * Ticks the whole wait for air may take in one mine command, from its first tick to the air being full again: the
+     * 300 air refill at 4 a tick with the eyes out, which is 75 ticks, plus room to get the head out first (a body
+     * holding jump rises in water at about a block every ten ticks, and the place to breathe is at most the
+     * {@link #SURFACE_RADIUS} search away). One deadline for the whole wait (see {@link #waitForAir}); past it the wet
+     * targets are given up.
      */
-    static final int AIR_WAIT_TICKS = 200;
+    static final int AIR_WAIT_TICKS = 150;
+    /**
+     * Ticks the head may stay in the water while the wait for air brings it out. There is no walk whose failure would
+     * say there is no way up (nothing moves the body but the wait's own input), so the time says it instead: rising
+     * the {@link #SURFACE_RADIUS} blocks the search looks over takes about forty ticks, and this leaves room for a
+     * body working its way along a roof.
+     */
+    static final int SURFACE_TICKS = 60;
     /** Ticks between a scan that found nothing and the second look (see {@link #lookAgain}). */
     static final int LOOK_AGAIN_TICKS = 10;
     /** How far up and around from the body the navigator looks for a place to get its head out of the water. */
@@ -163,7 +172,8 @@ public final class BotNavigator {
     @Nullable
     private BlockPos focus;
     private int seenBroken;
-    private int airWaitTicks;
+    /** Game time the current wait for air began at (see {@link #waitForAir}); 0 while none is on. */
+    private long airWaitStart;
     /** The engine gave up on exactly one block in this command and the command was started again once for it. */
     private boolean retriedGiveUp;
     /** How many times the engine, finding nothing, was asked again in this command, and the ticks waited for the next. */
@@ -263,7 +273,8 @@ public final class BotNavigator {
      * goes on to the next block it knows. When every block it knows is set aside the command fails
      * ({@link FailKind#NOTHING_TO_MINE}), as it does when it knows none. Blocks the body would have to stand in or
      * under water to break are taken only when no other is known, and not while the body's air is below full; the wait
-     * for that air is made out of the water (see {@link #waitForAir}), and the blocks are set aside when it cannot be.
+     * for that air is part of this command (see {@link #waitForAir}) -- the navigator holds the body afloat until the
+     * air is full again, or gives the blocks up when it cannot be.
      *
      * @param setAside blocks to leave alone, filled by the navigator and the caller; must be safe to read from the
      *                 engine's search threads (a concurrent set)
@@ -278,7 +289,7 @@ public final class BotNavigator {
         targetStallTicks = Math.max(1, stallTicks);
         watches.clear();
         seenBroken = brokenCount();
-        airWaitTicks = 0;
+        airWaitStart = 0;
         retriedGiveUp = false;
         looksAgain = 0;
         lookAgainTicks = 0;
@@ -442,6 +453,7 @@ public final class BotNavigator {
         kind = null;
         goal = null;
         focus = null;
+        airWaitStart = 0;
         blueprint = null;
         buildAnchor = null;
         buildBox = null;
@@ -838,9 +850,14 @@ public final class BotNavigator {
             // The engine's process is ended (or waiting on the navigator): nothing is being headed for, whatever
             // the last block was, so the status must not keep naming it.
             focus = null;
-            if (airWithheld && waitForAir(process)) {
-                waiting = Wait.FOR_AIR;
-                return;
+            if (airWithheld) {
+                if (waitForAir(process)) {
+                    waiting = Wait.FOR_AIR;
+                    return;
+                }
+                // The wet targets were given up: the command goes on with what is left, as it does below.
+            } else {
+                endAirWait(); // the withholding ended without the wait: whatever it held on the body is let go
             }
             if (lookAgain(process)) {
                 waiting = Wait.TO_LOOK_AGAIN;
@@ -853,6 +870,7 @@ public final class BotNavigator {
             return;
         }
         waiting = Wait.NONE;
+        endAirWait(); // the engine drives the body again: no wait of the navigator's is still on
         watchTargets(process);
     }
 
@@ -962,34 +980,89 @@ public final class BotNavigator {
     }
 
     /**
-     * The engine ended its command because every block it knows is one the policy holds back for want of air. The body
-     * waits for its air and then starts the engine's mine process afresh, for up to {@link #AIR_WAIT_TICKS} ticks --
-     * but out of the water: a body whose eyes are in it loses air all the while and can drown while it "waits for
-     * air", so the head is got out first, with a short {@code goTo} to the nearest place it can breathe at (the surface
-     * of the water column it is in is the usual answer), and the wait is counted only from the tick the eyes are out.
-     * The {@code goTo} ends this command; the task that gave it starts the mine again once the body is where it can
-     * breathe, and the wait picks up from there. Nowhere in range to get the head out, or air that does not come back
-     * in the bound, and the wet targets are given up for this command. True while it waits.
+     * The engine ended its command because every block it knows is one the policy holds back for want of air. The
+     * wait for that air is part of this mine command, not a second one: the navigator keeps the command's kind, issuer
+     * and serial, so the task that gave it can still stop the body (its release, pause and abort reach this wait),
+     * and moves the body itself through its input -- jump held, which is how a player rises in a water column and
+     * floats at the surface (the hazard reflex surfaces a body the same way), and forward toward the place to breathe
+     * when it is not straight above. No {@code goTo} is issued by the navigator on its own, so no walk of its own can
+     * fail the step or run on behind the owner's back.
+     *
+     * <p>One game-time deadline bounds the whole wait, set when it first runs for a withholding in this command and
+     * moved by nothing the navigator does: {@link #AIR_WAIT_TICKS} for the air to be full again, and
+     * {@link #SURFACE_TICKS} for the head to be out of the water at all. Past either, the wet targets are given up
+     * (set aside, as a block the engine found no path to is) and the command goes on with what is left, so the step
+     * ends as it does for any exhausted set of targets. Nowhere to breathe within {@link #SURFACE_RADIUS} blocks ends
+     * the wait the same way, at once. The air full again, the engine's mine process is started afresh under this same
+     * command. True while it waits.
      */
     private boolean waitForAir(MineProcess process) {
+        long now = body.level().getGameTime();
+        if (airWaitStart == 0) airWaitStart = now;
         if (body.isEyeInFluid(FluidTags.WATER)) {
             BlockPos out = placeToBreathe();
             if (out == null) {
                 giveUpWetTargets("nowhere within " + SURFACE_RADIUS + " blocks to get the head out of the water");
+                endAirWait();
                 return false;
             }
-            goTo(out, 0);
-            return true;
-        }
-        if (++airWaitTicks > AIR_WAIT_TICKS) {
-            giveUpWetTargets("the air did not come back within " + AIR_WAIT_TICKS + " ticks of getting out of the water");
-            return false;
+            if (now - airWaitStart > SURFACE_TICKS) {
+                giveUpWetTargets("the head did not come out of the water within " + SURFACE_TICKS + " ticks");
+                endAirWait();
+                return false;
+            }
+            holdAfloat(out);
+        } else {
+            holdAfloat(null);
         }
         if (body.getAirSupply() >= body.getMaxAirSupply()) {
+            // The air is back: the wait is over (the jump is let go) and the engine takes the body again.
+            endAirWait();
             airWithheld = false;
             process.mine(0, mineBlocks.toArray(Block[]::new));
+            return true;
+        }
+        if (now - airWaitStart > AIR_WAIT_TICKS) {
+            giveUpWetTargets("the air did not come back within " + AIR_WAIT_TICKS + " ticks of the wait starting");
+            endAirWait();
+            return false;
         }
         return true;
+    }
+
+    /**
+     * What keeps the body up while it waits: jump held through the body's input while any of it is in water. Written
+     * after the engine's own tick (this runs from {@link #tickMine}, below {@code engine.serverTick()} in
+     * {@link #tick}), which writes the input every tick itself whatever drives it, so this is the body's last word
+     * this tick; the engine's keys take over again the tick it next drives. {@code toward} is the place to breathe
+     * when the head is still under and it is not straight above: the body swims for it, as a player would.
+     */
+    private void holdAfloat(@Nullable BlockPos toward) {
+        BodyInput input = body.input();
+        input.jump = body.isInWater();
+        input.forward = 0.0F;
+        input.strafe = 0.0F;
+        input.sprint = false;
+        if (toward == null) return;
+        BlockPos feet = body.blockPosition();
+        if (toward.getX() == feet.getX() && toward.getZ() == feet.getZ()) return;
+        input.lookAt(Vec3.atBottomCenterOf(toward));
+        input.forward = 1.0F;
+    }
+
+    /**
+     * However the wait for air ended -- the air full again, the wet targets given up, the withholding gone -- the
+     * hold it kept on the body's input is let go and the wait's clock cleared. Nothing else of the command's changes.
+     */
+    private void endAirWait() {
+        if (airWaitStart == 0) return;
+        airWaitStart = 0;
+        BodyInput input = body.input();
+        input.forward = 0.0F;
+        input.strafe = 0.0F;
+        input.jump = false;
+        input.sprint = false;
+        input.clearLook();
     }
 
     /**
@@ -1073,7 +1146,8 @@ public final class BotNavigator {
     /**
      * Water in the working column -- the block's own cell and the two cells above and the two below it, and no cell that
      * merely touches it from the side: the engine's mine goal puts the body's feet at the block or one or two below it,
-     * so these are the cells its feet and head can be in, while water beside the block never touches the body at all.
+     * so these are the cells its feet and head can be in, and side water reaches the body only through them, if at all,
+     * which is why the column alone is asked about.
      * The engine itself already refuses to break a block with liquid directly above it or at its sides (its cost is
      * infinite, so such a block is never a target at all), so a block that gets this far is wet only from below or from
      * two cells up.

@@ -874,41 +874,174 @@ public final class MoveAndMineGameTests {
     }
 
     /**
-     * A body standing on the floor of a pool two blocks deep, with only a wet log known and its air set low once before
-     * the command starts (set-up: a body that came down through the water on the way): the wait for air happens out of
-     * the water or not at all. Within the budget its eyes are out of the water -- a body still in it keeps losing air
-     * all the while -- its air is rising again, and it is alive; the step then still gets the log, so the wait was a
-     * wait and not a give-up.
+     * A body standing on the floor of a pool three deep whose surface is the walking layer itself, with only a wet
+     * log known and its air set low once before the command starts (set-up: a body that came down through the water
+     * on the way): the water covers its head while it waits, and getting out of it is part of the mine command, not a
+     * second command the task cannot stop. On some tick the navigator's wait was "for air" with the body's eyes in
+     * the water, under the command the task gave; the head then comes out under that same command, the air rises, and
+     * the step still gets the log -- the log stands on the plateau beside the pool, so once the air is full again it
+     * is get-at-able and the wait was a wait, not a give-up -- and the body is alive.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 2400)
-    public static void aBodyInTheWaterGetsItsHeadOutToWaitForAir(GameTestHelper helper) {
+    public static void aBodyInTheWaterGetsItsHeadOutWithoutLeavingTheMineCommand(GameTestHelper helper) {
         int top = plateau(helper);
-        // A pool two blocks deep, sunk into the plateau over one column: water at top and top-1, barrier under it.
-        helper.setBlock(10, top - 1, 8, Blocks.WATER);
-        helper.setBlock(10, top, 8, Blocks.WATER);
+        surfacePool(helper, top);
         // A kind no other test places: the tests run side by side, and a body goes for the nearest log of its kind.
         wetLog(helper, top, 4, 4, Blocks.STRIPPED_JUNGLE_LOG);
-        Job job = Job.start(helper, "mhead", new Vec3(10.5, top + 1, 8.5), 2400,
+        Job job = Job.start(helper, "mhead", new Vec3(10.5, top - 1, 8.5), 2400,
             mineLeaf("stripped_jungle_log", 1, "stripped_jungle_log", Map.of()));
         // Set-up, once before the command starts driving anything: the body comes to the command short of air.
         job.body().setAirSupply(60);
-        boolean[] wasUnder = {false};
+        boolean[] waitedUnder = {false};
+        long[] command = {-1};
         int[] airWhenOut = {-1};
         job.run.each(2100, () -> {
             failIfFailed(helper, job);
             BotPlayer body = job.body();
-            if (body.isEyeInFluid(FluidTags.WATER)) {
-                wasUnder[0] = true;
-                helper.assertTrue(body.isAlive(), "the body died in the water at tick " + job.run.ticks + " with " + body.getAirSupply() + " air");
-                return;
+            BotNavigator nav = BotNavigator.of(body);
+            boolean under = body.isEyeInFluid(FluidTags.WATER);
+            if (nav.waitState() == BotNavigator.Wait.FOR_AIR && under) {
+                // The mechanism, not only the outcome: the wait happens with the head covered, and it is this mine
+                // command that waits -- a second command, an escape walk of the navigator's own, moves the serial on.
+                if (command[0] < 0) command[0] = nav.serial();
+                else helper.assertTrue(nav.serial() == command[0],
+                    "the wait for air ran under command " + nav.serial() + ", it began under " + command[0]);
+                waitedUnder[0] = true;
             }
-            if (wasUnder[0] && airWhenOut[0] < 0) airWhenOut[0] = body.getAirSupply();
+            if (!under && waitedUnder[0] && airWhenOut[0] < 0) {
+                helper.assertTrue(nav.serial() == command[0], "the head came out under command " + nav.serial()
+                    + " (" + nav.state() + "), the wait began under " + command[0]);
+                airWhenOut[0] = body.getAirSupply();
+            }
             if (job.task.state() != TaskState.COMPLETED) return;
-            helper.assertTrue(wasUnder[0], "completed without ever having its eyes in the water");
+            helper.assertTrue(waitedUnder[0], "completed without ever waiting for air under water");
             helper.assertTrue(airWhenOut[0] >= 1, "completed without getting its head out of the water");
             helper.assertTrue(body.getAirSupply() > airWhenOut[0],
                 "the air never rose again once the head was out: out at " + airWhenOut[0] + ", now " + body.getAirSupply());
+            helper.assertTrue(body.isAlive(), "the body died in the water with " + body.getAirSupply() + " air");
             helper.assertTrue(body.getInventory().countItem(Items.STRIPPED_JUNGLE_LOG) == 1, "completed without the log");
+            helper.assertBlockPresent(Blocks.AIR, new BlockPos(4, top + 1, 4));
+            job.run.pass();
+        });
+    }
+
+    /**
+     * A body in a roofed, water-filled room under a solid mass, with only a wet stem known -- it stands on the mass's
+     * top, above the room (set-up) -- and air set once at set-up high enough to outlast the wait: 270 of 300, and a
+     * body loses one air a tick under water, so about 290 ticks, past the navigator's 150-tick deadline for the whole
+     * wait and the bounded search after it. The nearest air is the mass's own surface, the fifth cell up and behind
+     * two layers of solid: no way leads to it. The wet targets are given up within the deadline -- the navigator's
+     * head-out bound is 60 ticks -- and land in the task's set-aside; the step ends {@code NoSource} naming the source
+     * (stems were known and none could be got at, so the executor excludes the source instead of retrying the same
+     * dive), the stem stands, and the body is alive when it does.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 900)
+    public static void aBodyWithNoWayUpGivesUpTheWetTargets(GameTestHelper helper) {
+        int surface = FLOOR_Y + 10;
+        room(helper, surface + 1, Blocks.BARRIER);
+        for (int x = 1; x <= 14; x++) {
+            for (int z = 1; z <= 14; z++) {
+                for (int y = FLOOR_Y + 1; y <= surface - 1; y++) helper.setBlock(x, y, z, Blocks.BARRIER);
+            }
+        }
+        // The room: two cells of water under the mass's top two layers. From its floor, the four cells up and around
+        // the navigator searches hold water and solid; the first air is the mass's surface, which geometry finds and
+        // nothing reaches.
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                helper.setBlock(10 + dx, surface - 4, 8 + dz, Blocks.WATER);
+                helper.setBlock(10 + dx, surface - 3, 8 + dz, Blocks.WATER);
+            }
+        }
+        wetLog(helper, surface - 1, 4, 4, Blocks.CRIMSON_STEM);
+        BlockPos stem = helper.absolutePos(new BlockPos(4, surface, 4));
+        // One short exploring step and one attempt: the room is sealed, so the search is over quickly either way.
+        MineTask.Search small = new MineTask.Search(2, 20, 4, 1);
+        Job job = Job.start(helper, "mroof", new Vec3(10.5, surface - 4, 8.5), 900,
+            new MineTask(mineLeaf("crimson_stem", 1, "crimson_stem", Map.of()), Map.of(), small));
+        // Set-up, once before the command starts driving anything: enough air to outlast the deadline and the search.
+        job.body().setAirSupply(270);
+        boolean[] waitedUnder = {false};
+        int[] gaveUpAt = {-1};
+        job.run.each(700, () -> {
+            helper.assertTrue(job.task.state() != TaskState.COMPLETED, "mined a stem through a roof it cannot break");
+            BotPlayer body = job.body();
+            helper.assertTrue(body.isAlive(), "the body died in the room at tick " + job.run.ticks
+                + " with " + body.getAirSupply() + " air");
+            if (BotNavigator.of(body).waitState() == BotNavigator.Wait.FOR_AIR && body.isEyeInFluid(FluidTags.WATER)) {
+                waitedUnder[0] = true;
+            }
+            if (gaveUpAt[0] < 0 && ((MineTask) job.task).setAside().contains(stem)) {
+                gaveUpAt[0] = job.run.ticks;
+                // The navigator's whole-wait deadline is 150 ticks and its head-out bound 60 (BotNavigator); a body
+                // whose head cannot come out is released well inside that, allowing for the engine's first scans.
+                helper.assertTrue(job.run.ticks <= 120, "gave the wet targets up only at tick " + job.run.ticks);
+            }
+            if (job.task.state() != TaskState.FAILED) return;
+            if (!(job.task.failure() instanceof Failure.NoSource none)) {
+                helper.fail("failed as " + job.task.failure());
+                return;
+            }
+            helper.assertTrue(waitedUnder[0], "the step ended without ever waiting for air under water");
+            helper.assertTrue(gaveUpAt[0] >= 0, "the step ended without the task's set-aside holding the wet stem");
+            helper.assertTrue(none.key().equals(ItemKey.of("crimson_stem")), "NoSource names " + none.key());
+            helper.assertTrue(none.source().equals("mine:minecraft:crimson_stem"),
+                "NoSource carries source '" + none.source() + "'");
+            helper.assertTrue(job.run.ticks <= 250, "the step ended only at tick " + job.run.ticks);
+            helper.assertTrue(body.getAirSupply() > 0, "the body is out of air: " + body.getAirSupply());
+            helper.assertBlockPresent(Blocks.CRIMSON_STEM, new BlockPos(4, surface, 4));
+            MegaBlockBot.LOGGER.info("Move-and-mine GameTest: NoSource after {} ticks: {}", job.run.ticks, none.detail());
+            job.run.pass();
+        });
+    }
+
+    /**
+     * While the navigator brings the body up for air -- the wait inside the mine command holding it afloat, the head
+     * still under -- the task is aborted: getting to air is part of the command the task gave, so its abort stops the
+     * navigator at once. On the next tick the navigator is idle, no movement input is left on (the wait's jump above
+     * all) and no break is in progress; the log stands and the body is alive.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 900)
+    public static void abortingAMineWhileItBringsTheBodyUpForAirStopsTheBody(GameTestHelper helper) {
+        int top = plateau(helper);
+        surfacePool(helper, top);
+        wetLog(helper, top, 4, 4, Blocks.STRIPPED_JUNGLE_LOG);
+        Job job = Job.start(helper, "mabair", new Vec3(10.5, top - 1, 8.5), 900,
+            mineLeaf("stripped_jungle_log", 1, "stripped_jungle_log", Map.of()));
+        // Set-up, once before the command starts driving anything: the body comes to the command short of air.
+        job.body().setAirSupply(60);
+        int[] abortedAt = {-1};
+        int[] under = {0};
+        job.run.each(700, () -> {
+            BotPlayer body = job.body();
+            BotNavigator nav = BotNavigator.of(body);
+            if (abortedAt[0] < 0) {
+                failIfFailed(helper, job);
+                helper.assertTrue(body.isAlive(), "the body died in the water at tick " + job.run.ticks);
+                // The wait is bringing the head up: for air, the eyes still in the water, and the jump held.
+                if (nav.waitState() != BotNavigator.Wait.FOR_AIR || !body.isEyeInFluid(FluidTags.WATER)) {
+                    under[0] = 0;
+                    return;
+                }
+                // The brain reads the body's in-water flags before the game brings them up to date for the tick, so
+                // on the first tick in water there is nothing to hold a jump for yet: the second tick is asked.
+                if (++under[0] < 2) return;
+                helper.assertTrue(body.input().jump, "the wait for air holds no jump while the head is under");
+                job.task.abort(body, "test");
+                abortedAt[0] = job.run.ticks;
+                helper.assertTrue(job.task.state() == TaskState.CANCELLED, "the aborted task is " + job.task.state());
+                return;
+            }
+            if (job.run.ticks <= abortedAt[0] + 1) return;
+            helper.assertTrue(nav.state() == BotNavigator.State.IDLE,
+                "the navigator is " + nav.state() + " on the tick after the abort");
+            BodyInput input = body.input();
+            helper.assertTrue(input.forward == 0.0F && input.strafe == 0.0F && !input.jump && !input.sneak && !input.sprint,
+                "movement input left on: forward " + input.forward + " strafe " + input.strafe + " jump " + input.jump
+                    + " sneak " + input.sneak + " sprint " + input.sprint);
+            helper.assertTrue(!((BodyInteractionManager) body.getInteractionManager()).isMining(), "a break is still in progress");
+            helper.assertTrue(body.isAlive(), "the body died in the water");
+            helper.assertBlockPresent(Blocks.STRIPPED_JUNGLE_LOG, new BlockPos(4, top + 1, 4));
             job.run.pass();
         });
     }
@@ -947,6 +1080,25 @@ public final class MoveAndMineGameTests {
     private static void wetLog(GameTestHelper helper, int top, int x, int z, Block log) {
         helper.setBlock(x, top - 1, z, Blocks.WATER);
         helper.setBlock(x, top + 1, z, log);
+    }
+
+    /**
+     * A pool three deep over a 3 x 3 area of the plateau, its surface the walking layer itself: water in the
+     * plateau's top two layers and the one above them, rimmed with barrier so the uppermost water stays put. A body
+     * on the pool's floor -- feet on the plateau's solid, eyes two cells up -- is well under, and one floating in it
+     * has its eyes in the air above: the water really covers the head of a body waiting at the bottom, which a pool
+     * sunk into the plateau (whose surface is a layer below the walking one) never does.
+     */
+    private static void surfacePool(GameTestHelper helper, int top) {
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                if (Math.max(Math.abs(dx), Math.abs(dz)) <= 1) {
+                    for (int y = top - 1; y <= top + 1; y++) helper.setBlock(10 + dx, y, 8 + dz, Blocks.WATER);
+                } else {
+                    helper.setBlock(10 + dx, top + 1, 8 + dz, Blocks.BARRIER);
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -1030,28 +1182,6 @@ public final class MoveAndMineGameTests {
             if (job.task.state() != TaskState.COMPLETED) return;
             helper.assertTrue(job.body().getInventory().countItem(Items.DIAMOND) == 1, "completed without the item");
             helper.assertTrue(drop.isRemoved(), "the item entity is still in the world");
-            job.run.pass();
-        });
-    }
-
-    /**
-     * One recorded position with nothing within the radius around it: the position is done at once -- the task does
-     * not wait a pickup wait out for it -- and the task completes within a few ticks of the body reaching the record.
-     */
-    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600)
-    public static void recoverDropsWithNothingNearThePositionIsDoneAtOnce(GameTestHelper helper) {
-        room(helper, 3, Blocks.BARRIER);
-        BlockPos recorded = helper.absolutePos(new BlockPos(12, FLOOR_Y + 1, 12));
-        Job job = Job.start(helper, "mdrop5", new Vec3(2.5, FLOOR_Y + 1, 2.5), 600, recoverLeaf(helper, recorded));
-        int[] arrived = {-1};
-        job.run.each(500, () -> {
-            failIfFailed(helper, job);
-            // The task walks to the recorded position first: that is the centre it looks around from.
-            if (arrived[0] < 0 && job.body().blockPosition().distSqr(recorded) <= 4) arrived[0] = job.run.ticks;
-            if (job.task.state() != TaskState.COMPLETED) return;
-            helper.assertTrue(arrived[0] >= 0, "completed at tick " + job.run.ticks + " without ever reaching the recorded position");
-            helper.assertTrue(job.run.ticks - arrived[0] <= 10,
-                "done with the empty position only " + (job.run.ticks - arrived[0]) + " ticks after reaching it");
             job.run.pass();
         });
     }
@@ -1196,9 +1326,10 @@ public final class MoveAndMineGameTests {
 
     /**
      * A chest with room for only part of what the leaf moves (set-up, once before the task starts: every slot full of
-     * dirt but one, which holds 60 cobblestone and so has room for four more): the task completes having moved
-     * exactly what fitted -- four, counted by what left the body, not by what the clicks were meant to move -- the
-     * body still holds the rest, and nothing is on the cursor or the floor.
+     * dirt but one, which holds 60 cobblestone and so has room for four more), and a body holding sixteen for a leaf
+     * that moves eight: a part of a stack, so the move is made click by click and not by one shift-click. The task
+     * completes having moved exactly what fitted -- four, counted by what left the body, not by what the clicks were
+     * meant to move -- the body still holds the rest, and nothing is on the cursor or the floor.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 1200)
     public static void depositIntoAFullChestMovesOnlyWhatFits(GameTestHelper helper) {
@@ -1209,14 +1340,14 @@ public final class MoveAndMineGameTests {
         for (int slot = 0; slot < 26; slot++) chest.setItem(slot, new ItemStack(Items.DIRT, 64));
         chest.setItem(26, new ItemStack(Items.COBBLESTONE, 60));
         Job job = Job.start(helper, "mdep7", new Vec3(3.5, FLOOR_Y + 1, 3.5), 1200, depositLeaf(helper, chestPos, "cobblestone", 8));
-        job.body().getInventory().setItem(3, new ItemStack(Items.COBBLESTONE, 8));
+        job.body().getInventory().setItem(3, new ItemStack(Items.COBBLESTONE, 16));
         job.run.each(1050, () -> {
             failIfFailed(helper, job);
             if (job.task.state() != TaskState.COMPLETED) return;
             helper.assertTrue(chest.countItem(Items.COBBLESTONE) == 64,
                 "the chest holds " + chest.countItem(Items.COBBLESTONE) + " cobblestone, room was for 4 more");
-            helper.assertTrue(job.body().getInventory().countItem(Items.COBBLESTONE) == 4,
-                "the body holds " + job.body().getInventory().countItem(Items.COBBLESTONE) + " cobblestone, not the 4 that did not fit");
+            helper.assertTrue(job.body().getInventory().countItem(Items.COBBLESTONE) == 12,
+                "the body holds " + job.body().getInventory().countItem(Items.COBBLESTONE) + " cobblestone, not the 12 that stay");
             assertNoMenuOpen(helper, job.body());
             helper.assertTrue(onTheGround(job.body(), Items.COBBLESTONE) == 0, "cobblestone was dropped: "
                 + onTheGround(job.body(), Items.COBBLESTONE));

@@ -5,9 +5,9 @@ import com.legoj15.megablockbot.game.nav.BotNavigator;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 import javax.annotation.Nullable;
 import net.minecraft.world.entity.item.ItemEntity;
-import net.minecraft.world.item.Item;
 import net.minecraft.world.phys.AABB;
 
 /**
@@ -24,8 +24,8 @@ import net.minecraft.world.phys.AABB;
  * drop's own cell, which for a harvest taken by use is the cell the plant still stands in; the last stretch is the
  * body's own steps, which break nothing; steps that a block's edge stops end in the navigator being asked for the
  * drop's cell exactly. A drop the navigator cannot reach, or one that lies in the box and is not taken (no room for
- * it), is given up and another looked for. The whole pick-up has a time of its own, so a drop the water carries away
- * cannot hold its task.
+ * it), is given up and another looked for. The pick-up has a time of its own, counted from the last drop that came
+ * in, so a drop the water carries away cannot hold its task and a death's thirty stacks each get their walk.
  */
 final class DropPickup {
     /**
@@ -33,7 +33,10 @@ final class DropPickup {
      * player threw for 40; half as much again on top.
      */
     static final int WAIT_TICKS = 60;
-    /** Ticks one pick-up may take in all: twenty seconds, several walks of {@link #STEPS_ALLOWED} and a wait. */
+    /**
+     * Ticks the pick-up may go on without the drop it is after coming in or going away: twenty seconds, several walks
+     * of {@link #STEPS_ALLOWED} and a wait.
+     */
     static final int BUDGET_TICKS = 400;
     /**
      * Past this many blocks from a drop, measured flat, the navigator walks the body towards it; nearer, the body walks
@@ -83,14 +86,27 @@ final class DropPickup {
     }
 
     /**
-     * One tick. True while a drop of {@code item} within {@code where} is being walked to or waited for; false when
-     * none is left to get (taken, gone, given up) or the time is spent. {@code owner} is the task, whose navigator
-     * commands these are.
+     * One tick. True while a drop that is {@code wanted} within {@code where} is being walked to or waited for; false
+     * when none is left to get (taken, gone, given up) or the time is spent. {@code owner} is the task, whose
+     * navigator commands these are.
      */
-    boolean tick(Object owner, BotPlayer body, Item item, AABB where) {
+    boolean tick(Object owner, BotPlayer body, Predicate<ItemEntity> wanted, AABB where) {
         waiting = false;
+        ItemEntity pursued = null;
+        ItemEntity drop = null;
+        double nearest = Double.MAX_VALUE;
+        for (ItemEntity candidate : body.serverLevel().getEntitiesOfClass(ItemEntity.class, where,
+                item -> item.isAlive() && wanted.test(item))) {
+            if (candidate.getUUID().equals(after)) pursued = candidate;
+            if (givenUp.contains(candidate.getUUID())) continue;
+            double distance = candidate.distanceToSqr(body);
+            if (distance < nearest) {
+                nearest = distance;
+                drop = candidate;
+            }
+        }
+        if (after != null && pursued == null) ticks = 0; // the one it was after is taken (or gone): the time starts again
         if (++ticks > BUDGET_TICKS) return false;
-        ItemEntity drop = nearest(body, item, where);
         if (drop == null) return false;
         if (!drop.getUUID().equals(after)) {
             after = drop.getUUID();
@@ -141,22 +157,6 @@ final class DropPickup {
     private static void stopOurs(Object owner, BotPlayer body) {
         BotNavigator nav = BotNavigator.of(body);
         if (nav.state() == BotNavigator.State.WORKING && !nav.runsCommandOfAnother(owner)) nav.stop();
-    }
-
-    @Nullable
-    private ItemEntity nearest(BotPlayer body, Item item, AABB where) {
-        ItemEntity nearest = null;
-        double nearestDistance = Double.MAX_VALUE;
-        for (ItemEntity drop : body.serverLevel().getEntitiesOfClass(ItemEntity.class, where,
-                candidate -> candidate.isAlive() && candidate.getItem().is(item))) {
-            if (givenUp.contains(drop.getUUID())) continue;
-            double distance = drop.distanceToSqr(body);
-            if (distance < nearestDistance) {
-                nearestDistance = distance;
-                nearest = drop;
-            }
-        }
-        return nearest;
     }
 
     /** The box the game takes items into a player from. */

@@ -4,9 +4,11 @@ import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.plan.NodeSpec;
 import com.legoj15.megablockbot.core.task.AbstractTask;
 import com.legoj15.megablockbot.core.task.Failure;
+import com.legoj15.megablockbot.core.task.TickResult;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
 import java.util.Map;
+import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 
@@ -114,6 +116,30 @@ abstract class BodyTask extends AbstractTask<BotPlayer> {
     /** A registry id, or null when it is not one. */
     protected static ResourceLocation idOf(String text) {
         return ResourceLocation.tryParse(text.trim());
+    }
+
+    /**
+     * What a failed exploring command says, for every task that explores for a source. Only "explored and found none"
+     * (the engine could not path toward any chunk it has not seen: nowhere further to look) says the source has nothing
+     * to give; that answers null, and the caller goes on to its own search bound and its {@code NoSource}. An engine
+     * error is a bug ({@code Internal}, with the exception); anything else -- the body replaced, removed or moved to
+     * another dimension while it explored -- says nothing about the source, and is answered the way the reach task
+     * answers the navigator ({@code Unreachable}), never with a failure that has the executor exclude a source.
+     * The task has let go of the body when this answers a failure.
+     */
+    @Nullable
+    protected final TickResult exploreFailure(BotPlayer body, BotNavigator nav, String what) {
+        BotNavigator.FailKind kind = nav.failKind();
+        if (kind == BotNavigator.FailKind.ENGINE_ERROR) {
+            release(body);
+            return TickResult.failed(new Failure.Internal(nav.failureCause(),
+                "the navigation engine failed while exploring for " + what + ": " + nav.failure()));
+        }
+        if (kind != BotNavigator.FailKind.EXPLORE_FAILED) {
+            release(body);
+            return TickResult.failed(unreachable(what, nav.failure(), "could not explore for " + what + ": " + nav.failure()));
+        }
+        return null;
     }
 
     protected static Failure unreachable(String target, String reason, String detail) {

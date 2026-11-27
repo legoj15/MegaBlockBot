@@ -316,7 +316,9 @@ public final class FishTask extends BodyTask {
         stepTicks++;
         double moved = horizontal(body.position(), stepFrom);
         if (nav.state() == BotNavigator.State.FAILED) {
-            // No path toward anything unexplored: there is nowhere further to look.
+            // Only "explored and found none" says there is no water to fish in (BodyTask.exploreFailure).
+            TickResult notTheSource = exploreFailure(body, nav, "water to fish in");
+            if (notTheSource != null) return notTheSource;
             exploredBlocks += moved;
             return giveUp(body);
         }
@@ -402,8 +404,10 @@ public final class FishTask extends BodyTask {
 
     /**
      * The pitch (radians, positive is down) at which a cast comes down {@code distance} blocks away on a surface
-     * {@code drop} below the eyes: the range falls as the look goes down, so the pitch is closed in on from both sides.
-     * A distance past the farthest cast gives the farthest cast.
+     * {@code drop} below the eyes, closed in on from both sides. That takes a range that falls as the look goes down,
+     * which holds for the cells the task casts at (three to six blocks out, at pitches from a little above level
+     * downward) and not for the whole bracket: with a long drop the capped flight makes a level look outrange a raised
+     * one. A distance past the farthest cast gives the farthest cast, which {@link #flightClear} then turns down.
      */
     static double castPitch(double distance, double drop) {
         double far = Math.toRadians(-20.0);
@@ -465,11 +469,13 @@ public final class FishTask extends BodyTask {
     /**
      * Whether the hook rides on water. Asked of the water under it and not of the entity's own in-water flag: a
      * floating bobber rises and falls across the surface, and the flag is off on the ticks it rides high, which read
-     * as a hook lying on land.
+     * as a hook lying on land. A hook resting on something (a lily pad over the pool) has water under it too and is
+     * not afloat: the game gives no bite there.
      */
     private static boolean afloat(FishingHook hook) {
+        if (hook.isInWater()) return true;
         BlockPos under = BlockPos.containing(hook.getX(), hook.getY() - 0.2, hook.getZ());
-        return hook.isInWater() || hook.level().getFluidState(under).is(FluidTags.WATER);
+        return !hook.onGround() && hook.level().getFluidState(under).is(FluidTags.WATER);
     }
 
     private TickResult landing(BotPlayer body) {

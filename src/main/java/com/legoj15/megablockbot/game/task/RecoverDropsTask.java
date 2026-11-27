@@ -6,13 +6,8 @@ import com.legoj15.megablockbot.core.task.TickResult;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
-import java.util.UUID;
-import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
-import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.phys.AABB;
 
 /**
@@ -27,9 +22,9 @@ import net.minecraft.world.phys.AABB;
  * <p><b>Where a drop lies now, not where it was recorded.</b> Items roll, fall and float: by the time the body is
  * back, a drop can lie a block or two from where the death record holds it, and many blocks lower when it fell into a
  * cave or sank. At each recorded position the task looks for item entities within {@link #SEARCH_RADIUS} blocks
- * horizontally and down to {@link #SEARCH_DEPTH} below it, and walks to each it finds at the item's own position, as
- * a player walks over an item; a position with nothing within that radius is done at once. An item the body cannot
- * get at is skipped, and so is one the pickup wait ran out on; a drop that has been picked up or despawned (the task
+ * horizontally and down to {@link #SEARCH_DEPTH} below it, and picks each up as every task picks up a drop
+ * ({@link DropPickup}); a position with nothing within that radius is done at once. An item the body cannot get at is
+ * given up, and so is one that lies in reach and is not taken; a drop that has been picked up or despawned (the task
  * cannot tell those apart) is never waited for.
  *
  * <p>No checkpoint: the executor keys checkpoints by node identity, which two recover nodes of different deaths share,
@@ -38,25 +33,17 @@ import net.minecraft.world.phys.AABB;
 final class RecoverDropsTask extends BodyTask {
     /** Items fall and roll, and the pickup range is a block around the body: get this close, not onto the block. */
     private static final int ARRIVAL_RADIUS = 1;
-    /** Ticks to wait for pickup at an item the body has walked to. A dropped item cannot be taken for ~10. */
-    static final int PICKUP_WAIT_TICKS = 40;
     /** How far around a recorded position its drops are looked for, in blocks: items roll and float sideways. */
     private static final double SEARCH_RADIUS = 4.0;
     /** How far below a recorded position its drops are looked for, in blocks: an item can fall far into a cave. */
     private static final int SEARCH_DEPTH = 8;
-    /** An item this close to the body still counts as one it may pick up. */
-    private static final double ITEM_NEAR = 3.0;
 
     private final String dimension;
     private final List<BlockPos> positions = new ArrayList<>();
     private int next;
-    private int waited;
-    private boolean waitingForPickup;
-    /** The item this position's work is on, by entity id; null while the task only walks to the recorded position. */
-    @Nullable
-    private UUID target;
-    /** The items of the position being worked that the body could not get at, or could not pick up in its wait. */
-    private final Set<UUID> skipped = new HashSet<>();
+    /** False while the body walks to the recorded position; true once it looks around it for what lies there. */
+    private boolean arrived;
+    private final DropPickup pickup = new DropPickup();
 
     RecoverDropsTask(NodeSpec leaf) {
         this.dimension = required(leaf, "dimension");
@@ -85,14 +72,12 @@ final class RecoverDropsTask extends BodyTask {
     protected void resumeWork(BotPlayer body) {
         // Whatever the body was doing at a position, it starts that position again: the items may have moved, and
         // what was out of reach may not be any more.
-        skipped.clear();
         walkToNext(body);
     }
 
     private void walkToNext(BotPlayer body) {
-        waitingForPickup = false;
-        waited = 0;
-        target = null;
+        arrived = false;
+        pickup.rest();
         if (next >= positions.size()) return;
         nav(body).goTo(positions.get(next), ARRIVAL_RADIUS);
     }
@@ -103,62 +88,17 @@ final class RecoverDropsTask extends BodyTask {
             release(body);
             return TickResult.COMPLETED;
         }
-        BotNavigator nav = nav(body);
         BlockPos at = positions.get(next);
-        if (waitingForPickup) {
-            waited++;
-            // Picked up, despawned or rolled away: whatever it was, the body is not waiting the wait out for it.
-            if (!itemNear(body)) return nextDrop(body, at);
-            if (waited >= PICKUP_WAIT_TICKS) {
-                // The item had its time and is still there: not one this body can pick up.
-                if (target != null) skipped.add(target);
-                return nextDrop(body, at);
-            }
-            return TickResult.RUNNING;
+        if (!arrived) {
+            // The walk to the record comes first, however far: what lies there cannot be seen before its chunks are
+            // loaded around the body. A record the body cannot get to is looked around for from where the walk ended.
+            if (nav(body).state() == BotNavigator.State.WORKING) return TickResult.RUNNING;
+            arrived = true;
+            pickup.start();
         }
-        switch (nav.state()) {
-            case DONE -> {
-                // Arrived, at the recorded position or at an item: look around from where the body stands.
-                return nextDrop(body, at);
-            }
-            case FAILED, IDLE -> {
-                // What the body headed for cannot be got at: the item is skipped, like one that despawned.
-                if (target != null) skipped.add(target);
-                return nextDrop(body, at);
-            }
-            default -> { }
-        }
-        return TickResult.RUNNING;
-    }
-
-    /**
-     * The next drop of the position being worked, nearest of those found first: walked to at its own position, or
-     * waited for where the body stands when it is already on it. None within the radius: the position is done and the
-     * next one begins.
-     */
-    private TickResult nextDrop(BotPlayer body, BlockPos at) {
-        waitingForPickup = false;
-        waited = 0;
-        ItemEntity nearest = null;
-        for (ItemEntity drop : body.serverLevel().getEntitiesOfClass(ItemEntity.class, searchBox(at), ItemEntity::isAlive)) {
-            if (skipped.contains(drop.getUUID())) continue;
-            if (nearest == null || body.distanceToSqr(drop) < body.distanceToSqr(nearest)) nearest = drop;
-        }
-        if (nearest == null) {
-            next++;
-            walkToNext(body);
-            return TickResult.RUNNING;
-        }
-        target = nearest.getUUID();
-        // A player takes an item that lies in the box a block around them and half a block above and below: only then
-        // is there nothing to walk to, only the pickup to wait for. An item two blocks off is near and is not that.
-        if (body.getBoundingBox().inflate(1.0, 0.5, 1.0).intersects(nearest.getBoundingBox())) {
-            waitingForPickup = true;
-            waited = 0;
-            return TickResult.RUNNING;
-        }
-        // Onto the item's own block: a goal a block wide is met from beside it, or from the edge above it.
-        nav(body).goTo(nearest.blockPosition(), 0);
+        if (pickup.tick(this, body, drop -> true, searchBox(at))) return TickResult.RUNNING;
+        next++;
+        walkToNext(body);
         return TickResult.RUNNING;
     }
 
@@ -169,19 +109,13 @@ final class RecoverDropsTask extends BodyTask {
             pos.getX() + 1 + SEARCH_RADIUS, pos.getY() + 1 + SEARCH_RADIUS, pos.getZ() + 1 + SEARCH_RADIUS);
     }
 
-    /** True while an item entity lies near the body: it may still pick it up. */
-    private static boolean itemNear(BotPlayer body) {
-        AABB box = body.getBoundingBox().inflate(ITEM_NEAR);
-        return !body.serverLevel().getEntitiesOfClass(ItemEntity.class, box, ItemEntity::isAlive).isEmpty();
-    }
-
     @Override
     public boolean waiting() {
-        return waitingForPickup;
+        return pickup.waiting();
     }
 
     @Override
     protected void letGo(BotPlayer body) {
-        waitingForPickup = false;
+        pickup.rest();
     }
 }
