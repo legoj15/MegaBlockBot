@@ -1,6 +1,7 @@
 package com.legoj15.megablockbot.game.bot;
 
 import com.legoj15.megablockbot.core.lang.Intent;
+import com.legoj15.megablockbot.core.plan.Profile;
 import com.legoj15.megablockbot.game.body.BodyManager;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.build.Blueprint;
@@ -38,6 +39,10 @@ final class BotCommands {
             root.then(Commands.literal("status").then(nameArgument().executes(ctx -> run(ctx, new Intent.Status()))));
             root.then(Commands.literal("pause").then(nameArgument().executes(ctx -> run(ctx, new Intent.Pause()))));
             root.then(Commands.literal("resume").then(nameArgument().executes(ctx -> run(ctx, new Intent.Resume()))));
+            root.then(Commands.literal("profile").then(nameArgument()
+                    .then(Commands.literal("strict").executes(ctx -> profile(ctx, Profile.STRICT_SURVIVAL)))
+                    .then(Commands.literal("assisted").executes(ctx -> profile(ctx, Profile.ASSISTED)))
+                    .executes(BotCommands::showProfile)));
             root.then(Commands.literal("blueprint").requires(source -> source.hasPermission(2))
                     .then(Commands.literal("save").then(Commands.argument("name", StringArgumentType.word())
                             .then(Commands.argument("from", BlockPosArgument.blockPos())
@@ -92,6 +97,29 @@ final class BotCommands {
     private static int goal(CommandContext<CommandSourceStack> ctx) {
         return withRuntime(ctx, (body, runtime) -> {
             BotTalk.interpret(body, runtime, StringArgumentType.getString(ctx, "text"), ctx.getSource());
+            return 1;
+        });
+    }
+
+    /**
+     * {@code /aiplayer profile <name> strict|assisted}: the body's world-knowledge profile (design 4.5), saved with
+     * the brain. Whoever may command the body may set it (its owner, or a permission-level-2 source, the gate every
+     * command here goes through); the default stays what it was, strict survival.
+     */
+    private static int profile(CommandContext<CommandSourceStack> ctx, Profile profile) {
+        return withRuntime(ctx, (body, runtime) -> {
+            runtime.setProfile(profile);
+            ctx.getSource().sendSuccess(() -> Component.literal(
+                body.getGameProfile().getName() + "'s profile is now " + profile.name().toLowerCase(java.util.Locale.ROOT)), false);
+            return 1;
+        });
+    }
+
+    /** {@code /aiplayer profile <name>}: what the body's profile is. */
+    private static int showProfile(CommandContext<CommandSourceStack> ctx) {
+        return withRuntime(ctx, (body, runtime) -> {
+            ctx.getSource().sendSuccess(() -> Component.literal(
+                body.getGameProfile().getName() + "'s profile is " + runtime.profile().name().toLowerCase(java.util.Locale.ROOT)), false);
             return 1;
         });
     }

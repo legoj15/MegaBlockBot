@@ -1033,7 +1033,8 @@ abstract class StationTask extends BodyTask {
      * Takes the item into the main hand as a player would: it is selected when it is on the hotbar, otherwise the
      * inventory menu swaps it into the selected hotbar slot. Only carried storage is looked at (see {@link MenuHand}).
      */
-    private static boolean hold(BotPlayer body, Item item) {
+    /** Package-private: the trade task puts a job site down the same way, from the hand. */
+    static boolean hold(BotPlayer body, Item item) {
         var inventory = body.getInventory();
         for (int slot = 0; slot < 9; slot++) {
             if (inventory.getItem(slot).is(item)) {

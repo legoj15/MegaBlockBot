@@ -45,6 +45,8 @@ public final class TaskFeature {
     public static final String LOOK_INSIDE = LookInside.TASK;
     /** The kind of the one leaf of a build goal that gathers nothing ({@code SolverPlanner}, "build"). */
     public static final String BUILD = "build";
+    /** The kind a planner leaf for a {@code Source.Trade} gather binds to ({@code SolverPlanner}, issue 15). */
+    public static final String TRADE = TradeTask.KIND;
 
     private TaskFeature() {}
 
@@ -60,5 +62,6 @@ public final class TaskFeature {
         TaskRegistry.register(WITHDRAW, (leaf, hints) -> new WithdrawTask(leaf));
         TaskRegistry.register(LOOK_INSIDE, (leaf, hints) -> new LookTask(leaf));
         TaskRegistry.register(BUILD, (leaf, hints) -> new BuildTask(leaf));
+        TaskRegistry.register(TRADE, TradeTask::new);
     }
 }

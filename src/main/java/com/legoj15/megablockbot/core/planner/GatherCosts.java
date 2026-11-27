@@ -6,6 +6,7 @@ import com.legoj15.megablockbot.core.ToolTier;
 import com.legoj15.megablockbot.core.acquire.AcquisitionIndex;
 import com.legoj15.megablockbot.core.acquire.Source;
 import com.legoj15.megablockbot.core.plan.Exclusions;
+import com.legoj15.megablockbot.core.snapshot.NotedOffer;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.solver.CostModel;
 import java.util.ArrayList;
@@ -221,10 +222,46 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
         if (source instanceof Source.KillMob kill) return ceilDiv(fightCost(kill), source.yield());
         if (source instanceof Source.Fishing) return ceilDiv(config.fish(), source.yield());
         if (source instanceof Source.Trade trade) {
-            // One trade gives one item; a trade that comes up with chance p is tried 1/p times per success.
-            return saturatingAdd(ceilDiv(config.trade(), trade.chance()), paymentCost(trade));
+            // One trade gives one item; a trade that comes up with chance p is tried 1/p times per success. What a
+            // trade costs is what the body has seen a villager charge for it (a noted offer) where it has seen one,
+            // and the job-site item once, for the villager that has to be made where none of the profession stands.
+            return saturatingAdd(saturatingAdd(ceilDiv(config.trade(), trade.chance()), paymentCost(trade)),
+                jobSiteCost(trade));
         }
         return UNOBTAINABLE;
+    }
+
+    /**
+     * What one use of this trade costs, by item: the charge of the cheapest offer of it the body has noted (an offer
+     * whose result is the traded item), or the sampled charge the index carries when the body has noted none. The
+     * index samples; a real villager's price differs (an enchanted book costs 5 to 64 emeralds), so a noted charge
+     * wins wherever one exists.
+     */
+    public Map<ItemKey, Integer> chargedFor(Source.Trade trade) {
+        List<NotedOffer> seen = new ArrayList<>();
+        for (NotedOffer offer : snapshot.offers()) {
+            if (offer.result().equals(trade.item())) seen.add(offer);
+        }
+        if (seen.isEmpty()) return trade.cost();
+        seen.sort(Comparator.comparingLong(GatherCosts::totalCharge)
+            .thenComparing(offer -> offer.charge().toString()));
+        return seen.get(0).charge();
+    }
+
+    private static long totalCharge(NotedOffer offer) {
+        long total = 0;
+        for (int count : offer.charge().values()) total += Math.max(0, count);
+        return total;
+    }
+
+    /**
+     * The one-time price of the trade's job-site item, the lectern that makes a librarian where none stands. Charged
+     * once per trade's unit price (not per trade: the plan holds one for a whole plan), nothing when the body carries
+     * one already or the trade names no job site.
+     */
+    private long jobSiteCost(Source.Trade trade) {
+        if (paymentPrice == null || trade.jobSite() == null || snapshot.count(trade.jobSite()) > 0) return 0;
+        return paymentPrice.applyAsLong(trade.jobSite());
     }
 
     /**
@@ -274,7 +311,7 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
     private long paymentCost(Source.Trade trade) {
         if (paymentPrice == null) return 0;
         long total = 0;
-        for (Map.Entry<ItemKey, Integer> charge : trade.cost().entrySet()) {
+        for (Map.Entry<ItemKey, Integer> charge : chargedFor(trade).entrySet()) {
             long unit = paymentPrice.applyAsLong(charge.getKey());
             if (unit >= UNOBTAINABLE) return UNOBTAINABLE;
             long count = charge.getValue();

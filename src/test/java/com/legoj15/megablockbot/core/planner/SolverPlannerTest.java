@@ -24,6 +24,7 @@ import com.legoj15.megablockbot.core.plan.PlanOutcome;
 import com.legoj15.megablockbot.core.plan.PlanRequest;
 import com.legoj15.megablockbot.core.plan.Profile;
 import com.legoj15.megablockbot.core.snapshot.ContainerSight;
+import com.legoj15.megablockbot.core.snapshot.NotedOffer;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.megablockbot.core.snapshot.StackFacts;
 import com.legoj15.megablockbot.core.snapshot.StructureReport;
@@ -37,6 +38,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.UUID;
 import java.util.function.BiFunction;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.Test;
@@ -86,6 +88,7 @@ final class SolverPlannerTest {
     private static final ItemKey SHELF = ItemKey.of("shelf");
     private static final ItemKey FISHING_ROD = ItemKey.of("fishing_rod");
     private static final ItemKey SALMON = ItemKey.of("salmon");
+    private static final ItemKey LECTERN = ItemKey.of("lectern");
     private static final Pos CONTAINER = new Pos(16, 64, -4);
 
     // ─── The fixture: a dozen vanilla-like recipes and a small acquisition index ─────────────────
@@ -1036,6 +1039,76 @@ final class SolverPlannerTest {
     }
 
     @Test
+    void aCheckedGoalIsPlannedThroughTheTradeWhoseResultSatisfiesTheCheck() {
+        // Two librarian trades of enchanted books: the plain one is the cheaper (5 emeralds, always up) and the
+        // mending one the dearer (20 emeralds, one offer in ten), and the check, not the price, is what picks the
+        // source, for a plain book does not satisfy it. The plan pays the mending trade's price, holds one lectern
+        // for the profession, and ends in the one trade leaf, whose goal carries the check.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(LECTERN).addItem(EMERALD);
+        builder.addSource(new Source.MineBlock("mine:minecraft:lectern", LECTERN, "minecraft:lectern",
+                null, ToolTier.HAND, false, false, false, 1.0, false, null));
+        builder.addSource(new Source.KillMob("kill:minecraft:witch", EMERALD, "minecraft:witch", false, 1.0, true));
+        builder.addSource(new Source.Trade("trade:minecraft:librarian#enchanted_book", ENCHANTED_BOOK,
+                "minecraft:librarian", 1, Map.of(EMERALD, 20), Map.of("minecraft:mending", 1), 0.1, LECTERN));
+        builder.addSource(new Source.Trade("trade:minecraft:librarian#plain_book", ENCHANTED_BOOK,
+                "minecraft:librarian", 1, Map.of(EMERALD, 5), Map.of(), 1.0, LECTERN));
+        SolverPlanner planner = planner(book(), builder.build());
+
+        Goal.HaveItem goal = new Goal.HaveItem(ENCHANTED_BOOK, 1, ComponentCheck.enchantment("minecraft:mending", 1));
+        Plan plan = planned(planner, request(goal, EMPTY, Exclusions.NONE));
+        List<NodeSpec> trades = leaves(plan).stream().filter(leaf -> leaf.taskKind().equals("trade")).toList();
+        assertEquals(1, trades.size(), leaves(plan).toString());
+        assertEquals("trade:minecraft:librarian#enchanted_book", trades.get(0).source(), leaves(plan).toString());
+        assertEquals(goal, trades.get(0).goal(), "the leaf carries the check");
+        assertEquals(20, gathered(plan, EMERALD, "kill"), "the payment is the satisfying trade's price");
+        assertEquals(1, gathered(plan, LECTERN, "mine"), "one lectern for the profession");
+        Executed executed = assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), ENCHANTED_BOOK, 1);
+        assertEquals(0, executed.stock().getOrDefault(EMERALD, 0), "the payment was spent");
+        assertEquals(1, executed.stock().getOrDefault(LECTERN, 0), "the lectern is held, never drawn");
+    }
+
+    @Test
+    void aNotedOfferThatSatisfiesTheCheckMakesTheTradeAndIsItsPayment() {
+        // The body has noted a librarian's window: a mending book for 12 emeralds. The sampled source carries no
+        // enchantments of its own, so the note is what makes the trade satisfy the check — and the payment is the
+        // note's charge, not the sample's 30: paying the sample would not buy the book the goal asks for.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(EMERALD);
+        builder.addSource(new Source.KillMob("kill:minecraft:witch", EMERALD, "minecraft:witch", false, 1.0, true));
+        builder.addSource(new Source.Trade("trade:minecraft:librarian#enchanted_book", ENCHANTED_BOOK,
+                "minecraft:librarian", 1, Map.of(EMERALD, 30), Map.of(), 1.0));
+        Snapshot.Builder seen = Snapshot.builder().gameTime(0)
+                .dimension("minecraft:overworld").pos(new Pos(0, 64, 0));
+        seen.offer(new NotedOffer(UUID.randomUUID(), new Pos(3, 64, 3), ENCHANTED_BOOK,
+                new StackFacts(1, Map.of("minecraft:mending", 1), "", Map.of()), Map.of(EMERALD, 12), 0));
+        SolverPlanner planner = planner(book(), builder.build());
+
+        Goal.HaveItem goal = new Goal.HaveItem(ENCHANTED_BOOK, 1, ComponentCheck.enchantment("minecraft:mending", 1));
+        Plan plan = planned(planner, request(goal, seen.build(), Exclusions.NONE));
+        NodeSpec trade = leaves(plan).stream().filter(leaf -> leaf.taskKind().equals("trade")).findFirst().orElseThrow();
+        assertEquals("minecraft:emerald=12", trade.params().get("cost"));
+        assertEquals(12, gathered(plan, EMERALD, "kill"), "the payment is the satisfying note's charge");
+        assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), ENCHANTED_BOOK, 1);
+    }
+
+    @Test
+    void aCheckNoTradeSatisfiesIsUnplannableNamingTheCheck() {
+        // The one trade of the item carries mending and the goal asks for fortune: no strategy, no satisfying trade,
+        // and the reason says which check nothing satisfied.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addSource(new Source.Trade("trade:minecraft:librarian#enchanted_book", ENCHANTED_BOOK,
+                "minecraft:librarian", 1, Map.of(EMERALD, 5), Map.of("minecraft:mending", 1), 1.0));
+        SolverPlanner planner = planner(book(), builder.build());
+        Goal.HaveItem goal = new Goal.HaveItem(ENCHANTED_BOOK, 1, ComponentCheck.enchantment("minecraft:fortune", 3));
+
+        Failure failure = unplannable(planner, request(goal, EMPTY, Exclusions.NONE));
+        assertEquals(Failure.Kind.NO_SOURCE, failure.kind(), failure.toString());
+        assertEquals(ENCHANTED_BOOK, ((Failure.NoSource) failure).key());
+        assertTrue(failure.detail().contains("minecraft:fortune"), "the reason names the check: " + failure.detail());
+    }
+
+    @Test
     void aBuildOrCustomGoalNoStrategyPlansIsAnInternalFailureNotAMadeUpSource() {
         Goal.Custom custom = new Goal.Custom("fish_until", Map.of("item", "minecraft:string"));
         assertEquals(Failure.Kind.INTERNAL, unplannable(planner(), request(custom, EMPTY, Exclusions.NONE)).kind());
@@ -1289,9 +1362,71 @@ final class SolverPlannerTest {
 
     // ─── Trades are paid for (item 6) ────────────────────────────────────────────────────────────
 
+    @Test
+    void aTradeWithAJobSiteHoldsTheJobSiteItemBeforeTheLeafOnceAndAtTheEnd() {
+        // Two trades of one profession (a saddle and a lead, both a leatherworker's) name a job site: the lectern is
+        // planned once for both, before the first trade leaf, and never spent — it is what makes the villagers, so it
+        // is held like a rod is, not drawn like a payment.
+        RecipeBook kit = bookWith(recipe("mount_kit_from_saddle_and_lead", MOUNT_KIT, 1, null, one(SADDLE), one(LEAD)));
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(LECTERN).addItem(LEAD).addItem(MOUNT_KIT).addItem(EMERALD);
+        builder.addSource(new Source.MineBlock("mine:minecraft:lectern", LECTERN, "minecraft:lectern",
+                null, ToolTier.HAND, false, false, false, 1.0, false, null));
+        builder.addSource(new Source.KillMob("kill:minecraft:witch", EMERALD, "minecraft:witch", false, 1.0, true));
+        builder.addSource(saddleTrade(Map.of(EMERALD, 6), 1.0, LECTERN));
+        builder.addSource(new Source.Trade("trade:minecraft:leatherworker#lead", LEAD, "minecraft:leatherworker", 1,
+                Map.of(EMERALD, 2), Map.of(), 1.0, LECTERN));
+        SolverPlanner planner = planner(kit, builder.build());
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(MOUNT_KIT, 1), EMPTY, Exclusions.NONE));
+        List<NodeSpec> planLeaves = leaves(plan);
+        int lectern = -1;
+        for (int i = 0; i < planLeaves.size(); i++) {
+            if (LECTERN.id().equals(planLeaves.get(i).params().get("item"))
+                    && planLeaves.get(i).taskKind().equals("mine")) lectern = i;
+        }
+        assertTrue(lectern >= 0, "the plan gathers a lectern: " + planLeaves);
+        int saddleTrade = planLeaves.indexOf(planLeaves.stream()
+                .filter(l -> "trade:minecraft:leatherworker#saddle".equals(l.source())).findFirst().orElseThrow());
+        int leadTrade = planLeaves.indexOf(planLeaves.stream()
+                .filter(l -> "trade:minecraft:leatherworker#lead".equals(l.source())).findFirst().orElseThrow());
+        assertTrue(lectern < saddleTrade && lectern < leadTrade, "the job site comes before both trade leaves");
+        assertEquals(1, gathered(plan, LECTERN, "mine"), "one lectern for both trades of the profession");
+        assertEquals(LECTERN.id(), planLeaves.get(saddleTrade).params().get("jobSite"),
+                "the trade leaf carries its job site");
+        Executed executed = assertRunsToTheGoal(plan, kit, Map.of(), Map.of(), MOUNT_KIT, 1);
+        assertEquals(1, executed.stock().getOrDefault(LECTERN, 0), "the lectern is still held at the end");
+    }
+
+    @Test
+    void aNotedOfferChargingMoreThanTheIndexSampleIsWhatThePaymentPlans() {
+        // The index sampled the saddle at six emeralds; the villager the body opened a window at charges twenty. The
+        // payment planned is the noted charge — a real villager's price, not the sample.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(EMERALD);
+        builder.addSource(new Source.KillMob("kill:minecraft:witch", EMERALD, "minecraft:witch", false, 1.0, true));
+        builder.addSource(saddleTrade(Map.of(EMERALD, 6), 1.0));
+        Snapshot.Builder seen = Snapshot.builder().gameTime(0)
+                .dimension("minecraft:overworld").pos(new Pos(0, 64, 0));
+        seen.offer(new NotedOffer(UUID.randomUUID(), new Pos(3, 64, 3), SADDLE, StackFacts.plain(1),
+                Map.of(EMERALD, 20), 0));
+        SolverPlanner planner = planner(book(), builder.build());
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(SADDLE, 1), seen.build(), Exclusions.NONE));
+        assertEquals(20, gathered(plan, EMERALD, "kill"), "the payment is the noted charge, not the sample");
+        NodeSpec trade = leaves(plan).stream().filter(l -> l.taskKind().equals("trade")).findFirst().orElseThrow();
+        assertEquals("minecraft:emerald=20", trade.params().get("cost"));
+        assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), SADDLE, 1);
+    }
+
     private static Source.Trade saddleTrade(Map<ItemKey, Integer> cost, double chance) {
+        return saddleTrade(cost, chance, null);
+    }
+
+    /** The trade of a villager with a job site: a leatherworker, whose block is the lectern. */
+    private static Source.Trade saddleTrade(Map<ItemKey, Integer> cost, double chance, ItemKey jobSite) {
         return new Source.Trade("trade:minecraft:leatherworker#saddle", SADDLE, "minecraft:leatherworker", 2, cost,
-                Map.of(), chance);
+                Map.of(), chance, jobSite);
     }
 
     @Test

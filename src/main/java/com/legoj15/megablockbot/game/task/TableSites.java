@@ -148,6 +148,16 @@ public final class TableSites {
      */
     static List<Site> sitesFrom(BotPlayer body, ServerLevel level, BlockPos stand, Vec3 eye, boolean here, int limit,
                                 Refusal refusal) {
+        return sitesFrom(body, level, stand, eye, here, limit, refusal, TABLE);
+    }
+
+    /**
+     * As above, for the block the caller names: a job site put down for a villager (a lectern) is placed by the same
+     * rule and taken up again the same way, so it asks the same question of the spot — block safety may let the body
+     * break a block of this kind there again.
+     */
+    static List<Site> sitesFrom(BotPlayer body, ServerLevel level, BlockPos stand, Vec3 eye, boolean here, int limit,
+                                Refusal refusal, BlockState what) {
         List<Site> found = new ArrayList<>();
         // Every block read below, and every ray, stays within this box: none of it may load a chunk.
         if (!level.hasChunksAt(stand.offset(-REACH_SIDEWAYS - 2, -REACH_VERTICAL - 3, -REACH_SIDEWAYS - 2),
@@ -165,12 +175,12 @@ public final class TableSites {
             if (level.getBlockState(under).getCollisionShape(level, under).isEmpty()) continue; // the item would fall away
             // Asked before the entity query and the rays, which cost more: inside a protected area this refuses almost
             // every spot of a wide search, and the refusal is all that is wanted of those.
-            Verdict verdict = safety.mayBreak(body, level, spot, TABLE);
+            Verdict verdict = safety.mayBreak(body, level, spot, what);
             if (!verdict.allowed()) {
                 refusal.note(verdict, spot);
                 continue;
             }
-            if (!unobstructed(body, level, spot, here)) continue;
+            if (!unobstructed(body, level, spot, here, what)) continue;
 
             Site site = faceFor(body, level, spot, eye, reach);
             if (site == null) continue;
@@ -180,12 +190,12 @@ public final class TableSites {
         return found;
     }
 
-    private static boolean unobstructed(BotPlayer body, ServerLevel level, BlockPos spot, boolean here) {
+    private static boolean unobstructed(BotPlayer body, ServerLevel level, BlockPos spot, boolean here, BlockState what) {
         VoxelShape cell = Shapes.block().move(spot.getX(), spot.getY(), spot.getZ());
         // Passing the body skips it (it is a passenger of its own vehicle): everyone else who blocks building counts.
         if (!level.isUnobstructed(body, cell)) return false;
         // The game's own question, which also counts the body where it stands.
-        return !here || level.isUnobstructed(TABLE, spot, CollisionContext.of(body));
+        return !here || level.isUnobstructed(what, spot, CollisionContext.of(body));
     }
 
     /** A face of a neighbour of {@code spot} that the eyes can see and reach, as a click, or null. */

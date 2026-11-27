@@ -7,6 +7,7 @@ import com.legoj15.megablockbot.core.ToolClass;
 import com.legoj15.megablockbot.core.ToolTier;
 import com.legoj15.megablockbot.core.goal.Goal;
 import com.legoj15.megablockbot.core.snapshot.ContainerSight;
+import com.legoj15.megablockbot.core.snapshot.NotedOffer;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.megablockbot.core.snapshot.StackFacts;
 import com.legoj15.megablockbot.core.snapshot.StationSight;
@@ -54,6 +55,12 @@ import net.minecraft.world.level.block.state.BlockState;
 public final class SnapshotCollector {
     /** How far from the body, in blocks, a station is looked for. */
     public static final int STATION_SCAN_RADIUS = 8;
+    /**
+     * How old a noted villager offer may be and still reach the planner: three in-game days. A villager's offers
+     * change when it restocks (twice a day) and are rerolled when it loses its profession, so a note older than a few
+     * days says nothing; a fresh note is the best price the body has.
+     */
+    public static final long OFFER_AGE_TICKS = 3L * 24L * 1000L;
 
     // Stations the bot knows without any recipe naming them: the vanilla workstations. A recipe in the book that names
     // another item as its station adds it (stationBlocks below), which is how a mod's machine becomes visible.
@@ -104,9 +111,30 @@ public final class SnapshotCollector {
         equipment(body, builder);
         stations(level, dimension, at, memory, builder);
         containers(level, dimension, at, memory, builder);
+        offers(level, dimension, memory, builder);
         BodySight.fill(level, dimension, at, memory, builder);
         addGoalFacts(level, dimension, wants, builder);
         return builder.build();
+    }
+
+    // ---- villager offers ---------------------------------------------------------------------------------------
+
+    /**
+     * The offers the body noted in trade windows it opened, as fresh notes of villagers that are still in this
+     * dimension: a note older than {@link #OFFER_AGE_TICKS} or of a villager that is gone is dropped, exactly as a
+     * note of a container that no longer stands is withheld. Nothing is read of the villager itself — a player cannot
+     * see a villager's offers without opening its window, and the note is what the body saw when it did.
+     */
+    private static void offers(ServerLevel level, String dimension, BotMemory memory, Snapshot.Builder builder) {
+        long now = level.getGameTime();
+        for (BotMemory.VillagerOffers noted : memory.notedOffers()) {
+            if (!noted.dimension().equals(dimension)) continue;
+            if (level.getEntity(noted.villager()) == null) continue; // the villager is gone
+            for (NotedOffer offer : noted.offers()) {
+                if (now - offer.gameTime() > OFFER_AGE_TICKS) continue;
+                builder.offer(offer);
+            }
+        }
     }
 
     /**
@@ -166,7 +194,8 @@ public final class SnapshotCollector {
         if (!stack.isEmpty()) builder.equip(slot, ItemKeys.of(stack.getItem()));
     }
 
-    private static StackFacts factsOf(ItemStack stack) {
+    /** The component facts of a stack, as the snapshot reads every carried stack and every noted offer's result. */
+    public static StackFacts factsOf(ItemStack stack) {
         Map<String, Integer> enchantments = new TreeMap<>();
         // A book keeps its enchantments apart from the ones it would apply, and the check does not care which.
         mergeEnchantments(enchantments, stack.getOrDefault(DataComponents.ENCHANTMENTS, ItemEnchantments.EMPTY));

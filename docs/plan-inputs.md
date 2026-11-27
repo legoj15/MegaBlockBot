@@ -96,6 +96,16 @@ container, moves an item or loads a chunk.
   a named one there is still listed as take-able, until the body can see it. A double chest is one sight, at the half with
   the lower position hash and carrying the other half (`ContainerSight.other`), and one note: a note is per inventory.
   `Snapshot.containerAt` answers for either half, so a goal that names the far half finds the same sight.
+- `offers` (issue #15): the villager offers the body has noted in trade windows it opened (`BotMemory.noteOffers`,
+   written by the trade task each time it opens a window), kept as `NotedOffer` — the villager's id and position, the
+  result as an item with its `StackFacts`, what one use charges and when the window was open. Only fresh notes of
+  villagers that are still in the body's dimension are listed: a note older than `SnapshotCollector.OFFER_AGE_TICKS`
+  (three in-game days; a villager restocks twice a day and loses its offers with its profession) or of a villager the
+  level no longer holds is dropped, exactly as a note of a container that no longer stands is withheld. The planner
+  prices and plans the payment of a trade by the cheapest noted charge for the item (`GatherCosts.chargedFor`) in
+  place of the index's sample, and a component-checked item goal is planned through a trade whose result satisfies
+  its check — the source's own enchantments, or a noted offer's facts — paying that offer's charge
+  (`SolverPlanner.checkedPlan`). Saved with the brain, like the containers.
 - `nearbyBlocks` (the sight, `BodySight`): block id to the horizontal distance of the nearest such block, for the blocks
   `AcquisitionIndex.sourceBlocks()` names (every mining or harvesting source's block). A scan reads the chunks that
   are loaded now (`ServerChunkCache.getChunkNow`; a chunk that is not loaded is skipped, never loaded) within
@@ -169,6 +179,22 @@ malformed parts) and installs it as that body's memory, replacing what was there
 back at spawn (`BotRuntime` installs a loaded memory when it first attaches to the body). `StationTask` notes the station it
 places (the craft task's table, the smelt task's furnace, the stonecut task's stonecutter, the smith task's table); the tasks that open a container (`withdraw`, `look_inside`) note what they find in it, and `use chest at` records the
 owner's word. The registry is cleared when the server stops.
+back at spawn (`BotRuntime` installs a loaded memory when it first attaches to the body). `CraftTask` notes the table it
+places; the tasks that open a container (`withdraw`, `look_inside`) note what they find in it, and `use chest at` records the
+owner's word. The trade task notes the offers of every villager whose window it opens (`noteOffers`, one note per
+villager, replaced at each fresh look). The registry is cleared when the server stops.
+
+## Job sites
+
+A `Source.Trade` names its job site (issue #15): the item of the block that gives a villager the trade's profession —
+a lectern for a librarian, read by the index builder from the profession's job-site point of interest
+(`TradeSampler.jobSiteOf`: the predicate a profession is registered with, tested against the point-of-interest
+registry, and the first block it matches whose item exists; null for the wandering trader and the unemployed
+profession). The planner holds it like a rod: planned once per profession in a plan, relied on and never drawn, and
+priced once in the trade's unit cost (`GatherCosts.jobSiteCost`, nothing when the body carries one already). The
+trade leaf carries it as its `jobSite` param, and the trade task puts it down beside an unemployed villager and takes
+it up again until the offer is there. A checked item goal planned through the trade (`SolverPlanner.checkedPlan`,
+see the snapshot's `offers`) holds the job site the same way, and its leaf's goal carries the check.
 
 ## Checks
 

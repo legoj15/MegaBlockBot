@@ -17,6 +17,7 @@ import com.legoj15.megablockbot.core.plan.PlanRequest;
 import com.legoj15.megablockbot.core.plan.Planner;
 import com.legoj15.megablockbot.core.plan.Profile;
 import com.legoj15.megablockbot.core.snapshot.ContainerSight;
+import com.legoj15.megablockbot.core.snapshot.NotedOffer;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.megablockbot.core.snapshot.StackFacts;
 import com.legoj15.megablockbot.core.snapshot.StructureReport;
@@ -79,9 +80,10 @@ import java.util.TreeSet;
  *   <li>{@code fish}: {@code item}, {@code count}, {@code table}. The plan provides a fishing rod first, as it
  *       provides a mining source's tool: planned like any item, kept, never consumed.</li>
  *   <li>{@code trade}: {@code item}, {@code count} (the trades: one item each), {@code profession},
- *       {@code level}, {@code cost} (what one trade charges, {@code item=count,item=count} in id order) and
- *       {@code chance} (the share of offers that are this one). The plan for the payment, cost times count,
- *       comes before the leaf.</li>
+ *       {@code level}, {@code cost} (what one trade charges, {@code item=count,item=count} in id order; the charge of
+ *       an offer the body has noted, where it has noted one), {@code chance} (the share of offers that are this one)
+ *       and {@code jobSite} (the item that gives a villager the profession, or empty). The plan for the payment, cost
+ *       times count, and for the job-site item — held for the whole plan, never drawn — come before the leaf.</li>
  *   <li>craft (the recipe's {@code kind}, {@code craft} for the grid): {@code recipe} (id), {@code times},
  *       {@code station} (the station item or empty) and {@code layout}, the item the solver chose for each slot of
  *       each craft, in the form {@link CraftLayout} documents, so a task follows it instead of re-deciding. A
@@ -390,7 +392,7 @@ public final class SolverPlanner implements Planner {
             }
             try {
                 return switch (goal) {
-                    case Goal.HaveItem g -> g.check() == null ? itemPlan(g.key(), g.count()) : strategiesFor(g);
+                    case Goal.HaveItem g -> g.check() == null ? itemPlan(g.key(), g.count()) : checkedPlan(g);
                     case Goal.HaveToolTier g -> haveToolTier(g);
                     case Goal.Equip g -> equipPlan(g);
                     case Goal.Stockpile g -> stockpilePlan(g);
@@ -822,15 +824,32 @@ public final class SolverPlanner implements Planner {
          * executor verifies when the leaf ends. On a failure the stock may be part way: the caller restores it.
          */
         private Step planSource(ItemKey item, long demand, Source source) {
+            return planSource(item, demand, source, null);
+        }
+
+        /**
+         * As above, for a goal whose component check the trade's result must satisfy: the leaf carries the check, and
+         * the payment is the charge of a noted offer that satisfies it — a real villager's price for exactly that
+         * book — not the cheapest note of the item, which may be another book's price. {@code check} is null for a
+         * goal without one.
+         */
+        private Step planSource(ItemKey item, long demand, Source source, ComponentCheck check) {
             List<NodeSpec> nodes = new ArrayList<>();
             Step tool = prerequisite(source);
             if (tool.failure() != null) return tool;
             nodes.addAll(tool.nodes());
+            Map<ItemKey, Integer> charged = Map.of();
             if (source instanceof Source.Trade trade) {
-                Step payment = payment(item, trade, demand);
+                // The lectern that makes a librarian where none stands: planned and held like a rod is, and paid for
+                // first, since no payment matters without a villager of the profession to pay it to.
+                Step site = jobSite(item, trade);
+                if (site.failure() != null) return site;
+                nodes.addAll(site.nodes());
+                charged = check == null ? costs.chargedFor(trade) : checkedCharge(trade, check);
+                Step payment = payment(item, trade, charged, demand);
                 if (payment.failure() != null) return payment;
                 nodes.addAll(payment.nodes());
-                for (Map.Entry<ItemKey, Integer> charge : trade.cost().entrySet()) {
+                for (Map.Entry<ItemKey, Integer> charge : charged.entrySet()) {
                     removeStock(charge.getKey(), (long) charge.getValue() * demand);
                 }
             }
@@ -839,8 +858,8 @@ public final class SolverPlanner implements Planner {
             if (absolute > Integer.MAX_VALUE) {
                 return Step.fail(internal("the demand for " + item.id() + " exceeds what a goal can count"));
             }
-            nodes.add(NodeSpec.leaf(new Goal.HaveItem(item, (int) absolute), taskKind(source),
-                    gatherParams(source, demand), source.id()));
+            nodes.add(NodeSpec.leaf(new Goal.HaveItem(item, (int) absolute, check), taskKind(source),
+                    gatherParams(source, demand, charged), source.id()));
             return Step.ok(nodes);
         }
 
@@ -946,18 +965,20 @@ public final class SolverPlanner implements Planner {
 
         /**
          * The item plan for what a trade charges, cost times the trades needed, planned like any other goal (brief
-         * P12b item 6). Planning one charged item can eat another's stock, so the check repeats, bounded. A payment
+         * P12b item 6). {@code charged} is what one trade costs — the charge of an offer the body has noted, where it
+         * has noted one, else the index's sample — so a plan made after the body has seen a real villager's price asks
+         * for that price. Planning one charged item can eat another's stock, so the check repeats, bounded. A payment
          * that needs the traded item itself is a cycle and makes the trade unusable.
          */
-        private Step payment(ItemKey item, Source.Trade trade, long trades) {
-            if (trade.cost().isEmpty()) return Step.ok(List.of());
+        private Step payment(ItemKey item, Source.Trade trade, Map<ItemKey, Integer> charged, long trades) {
+            if (charged.isEmpty()) return Step.ok(List.of());
             if (!paying.add(item)) {
                 return Step.fail(new Failure.NoSource(item, trade.id(), "the payment for " + trade.id()
                         + " needs " + item.id() + " itself"));
             }
             try {
                 TreeMap<ItemKey, Long> owed = new TreeMap<>();
-                for (Map.Entry<ItemKey, Integer> charge : trade.cost().entrySet()) {
+                for (Map.Entry<ItemKey, Integer> charge : charged.entrySet()) {
                     long total = (long) charge.getValue() * trades;
                     if (total > Integer.MAX_VALUE) {
                         return Step.fail(internal("the payment for " + trade.id() + " exceeds what a goal can count"));
@@ -983,7 +1004,124 @@ public final class SolverPlanner implements Planner {
             }
         }
 
+        /** Professions whose job-site item is being planned, so a job site only the trade itself sells cannot loop. */
+        private final TreeSet<String> planningJobSite = new TreeSet<>();
+
+        /**
+         * The job-site item of the trade's profession (a lectern for a librarian), planned like the rod of a fishing
+         * source: brought in, kept for the whole plan and relied on, never drawn, and one serves every trade of that
+         * profession in the plan — once one is in the working stock the next plans nothing. It is what makes the trade
+         * possible where no villager of the profession stands; a plan whose job site cannot be had falls back to the
+         * item's other sources, which is the failure returned here.
+         */
+        private Step jobSite(ItemKey item, Source.Trade trade) {
+            ItemKey site = trade.jobSite();
+            if (site == null) return Step.ok(List.of()); // the wandering trader names none
+            if (held(site) >= 1) {
+                relied.merge(site, 1L, (a, b) -> Math.max(a, b));
+                return Step.ok(List.of());
+            }
+            if (!planningJobSite.add(trade.profession())) {
+                return Step.fail(new Failure.NoSource(item, trade.id(), "the job-site " + site.id() + " for "
+                        + trade.profession() + " can only be had from " + trade.id() + " itself: a cycle"));
+            }
+            try {
+                Step step = itemPlan(site, 1);
+                if (step.failure() != null) return step;
+                relied.merge(site, 1L, (a, b) -> Math.max(a, b));
+                return Step.ok(step.nodes().isEmpty() ? List.of()
+                        : List.of(NodeSpec.group(new Goal.HaveItem(site, 1), step.nodes())));
+            } finally {
+                planningJobSite.remove(trade.profession());
+            }
+        }
+
         // ─── Goals that go to strategies ─────────────────────────────────────────────────────────
+
+        /**
+         * The plan for a component-checked item goal (issue #15): the trade whose result satisfies the check — the
+         * source's own enchantments of an enchanted book, or an offer the body has noted in a real window — planned
+         * as any trade is (its payment, its job-site item, one leaf), with the check riding on the leaf's goal the
+         * way the leaf the strategies build by hand carries it. A strategy that undercuts the trade still wins
+         * (design 4.4); a check that no trade's result satisfies and no strategy plans is as unplannable as it was,
+         * with a reason that names the check.
+         */
+        Step checkedPlan(Goal.HaveItem have) {
+            // A component-checked goal the snapshot already satisfies plans nothing (design 3.4: done is the
+            // postcondition on a fresh snapshot, never a task). The planner counts it as held, like any stock the
+            // plan goes on relying on, so a container is not asked to supply what the body already carries.
+            if (checked(have) >= have.count()) {
+                relied.merge(have.key(), (long) have.count(), (a, b) -> Math.max(a, b));
+                return Step.ok(List.of());
+            }
+            State base = mark();
+            Step trade = null;
+            State afterTrade = null;
+            long tradeCost = CostModel.UNOBTAINABLE;
+            Failure tradeFailure = null;
+            for (Source source : costs.ranked(have.key())) {
+                if (!(source instanceof Source.Trade candidate) || !satisfiesCheck(candidate, have.check())) continue;
+                Step planned = planSource(have.key(), have.count(), source, have.check());
+                if (planned.failure() == null) {
+                    // The sources are in cost order, so the first satisfying trade that can be paid for is the cheapest.
+                    trade = planned;
+                    afterTrade = mark();
+                    if (!strategies.isEmpty()) tradeCost = gatherTotal(source, have.count(), false);
+                    break;
+                }
+                if (tradeFailure == null) tradeFailure = planned.failure();
+            }
+            restore(base);
+            Candidate winner = null;
+            for (Strategy strategy : strategies) {
+                Optional<Strategy.Proposal> proposal = strategy.propose(have, this);
+                if (proposal.isPresent() && !proposal.get().nodes().isEmpty()
+                        && (winner == null || better(proposal.get(), strategy.id(), winner))) {
+                    winner = new Candidate(strategy.id(), proposal.get(), mark());
+                }
+                restore(base);
+            }
+            if (winner != null && (trade == null || winner.proposal().cost() < tradeCost)) {
+                restore(winner.state());
+                winner.proposal().notes().forEach(this::note);
+                creditTo(have.key(), have.count());
+                return Step.ok(winner.proposal().nodes());
+            }
+            if (trade != null) {
+                restore(afterTrade);
+                relied.merge(have.key(), (long) have.count(), (a, b) -> Math.max(a, b));
+                return trade;
+            }
+            if (tradeFailure != null) return Step.fail(tradeFailure);
+            return Step.fail(new Failure.NoSource(have.key(), "",
+                    "no strategy applies to " + describe(have) + " and no trade's result satisfies its check;"
+                            + " one of the two is needed for it"));
+        }
+
+        /** Whether one use of this trade hands over a stack that satisfies the check: its sampled enchantments of an
+         *  enchanted book, or an offer the body has noted in a window it opened. */
+        private boolean satisfiesCheck(Source.Trade trade, ComponentCheck check) {
+            if (check.test(new StackFacts(1, trade.enchantments(), "", Map.of()))) return true;
+            for (NotedOffer offer : snapshot.offers()) {
+                if (offer.result().equals(trade.item()) && check.test(offer.facts())) return true;
+            }
+            return false;
+        }
+
+        /**
+         * What one use of the trade charges when the goal's check must be satisfied: the cheapest noted offer whose
+         * result satisfies it, else the index's sample — a note of the item that fails the check is another book's
+         * price, and paying it would not buy the book the goal asks for.
+         */
+        private Map<ItemKey, Integer> checkedCharge(Source.Trade trade, ComponentCheck check) {
+            List<NotedOffer> seen = new ArrayList<>();
+            for (NotedOffer offer : snapshot.offers()) {
+                if (offer.result().equals(trade.item()) && check.test(offer.facts())) seen.add(offer);
+            }
+            if (seen.isEmpty()) return trade.cost();
+            seen.sort(Comparator.comparingLong(SolverPlanner::totalCharge).thenComparing(offer -> offer.charge().toString()));
+            return seen.get(0).charge();
+        }
 
         /** How many units of the goal's item sit in stacks that pass its check (Postconditions' own count). */
         private long checked(Goal.HaveItem have) {
@@ -1202,7 +1340,7 @@ public final class SolverPlanner implements Planner {
         // ─── Gather leaves ───────────────────────────────────────────────────────────────────────
 
         /** What the task for the source's kind needs, as strings (see the class javadoc). */
-        private Map<String, String> gatherParams(Source source, long demand) {
+        private Map<String, String> gatherParams(Source source, long demand, Map<ItemKey, Integer> charged) {
             Map<String, String> params = new TreeMap<>();
             params.put("item", source.item().id());
             params.put("count", Long.toString(demand));
@@ -1229,8 +1367,10 @@ public final class SolverPlanner implements Planner {
             } else if (source instanceof Source.Trade trade) {
                 params.put("profession", trade.profession());
                 params.put("level", Integer.toString(trade.level()));
-                params.put("cost", encodeCost(trade.cost()));
+                params.put("cost", encodeCost(charged));
                 params.put("chance", Double.toString(trade.chance()));
+                // What makes a villager of the profession where none stands; empty for a trade that names none.
+                params.put("jobSite", trade.jobSite() == null ? "" : trade.jobSite().id());
             } else if (source instanceof Source.ChestLoot chest) {
                 params.put("table", chest.table());
             }
@@ -1443,6 +1583,13 @@ public final class SolverPlanner implements Planner {
     private static long satMul(long a, long b) {
         if (a == 0 || b == 0) return 0;
         return a > Long.MAX_VALUE / b ? Long.MAX_VALUE : a * b;
+    }
+
+    /** The whole of what one offer charges, as one number to order offers by. */
+    private static long totalCharge(NotedOffer offer) {
+        long total = 0;
+        for (int count : offer.charge().values()) total += Math.max(0, count);
+        return total;
     }
 
     private static long satAdd(long a, long b) {
@@ -1659,6 +1806,8 @@ public final class SolverPlanner implements Planner {
                     queue.add(FISHING_ROD);
                 } else if (source instanceof Source.Trade trade) {
                     queue.addAll(trade.cost().keySet());
+                    // The job site the trade's plan holds, like the rod a fish source needs.
+                    if (trade.jobSite() != null) queue.add(trade.jobSite());
                 }
             }
         }

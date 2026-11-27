@@ -1,6 +1,11 @@
 package com.legoj15.megablockbot.game.plan;
 
 import com.legoj15.megablockbot.core.ItemKey;
+import com.legoj15.megablockbot.core.Pos;
+import com.legoj15.megablockbot.core.snapshot.NotedOffer;
+import com.legoj15.megablockbot.core.snapshot.StackFacts;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -78,10 +83,24 @@ public final class BotMemory {
 
     private record ContainerKey(String dimension, long pos) {}
 
+    /**
+     * The offers of one villager, as the body saw them the last time it opened that villager's trade window: the note
+     * it made then, replaced each time it opens the window again. Kept whole, with the game time it was made at, so
+     * the collector can drop the stale ones; nothing here says where the villager is now.
+     */
+    public record VillagerOffers(String dimension, UUID villager, BlockPos pos, List<NotedOffer> offers) {
+        public VillagerOffers {
+            pos = pos.immutable();
+            offers = List.copyOf(offers);
+        }
+    }
+
     // Dimension id to BlockPos.asLong() of every block placed there.
     private final Map<String, Set<Long>> placed = new HashMap<>();
     private final Map<ContainerKey, RememberedContainer> containers = new LinkedHashMap<>();
     private final Map<ContainerKey, SupplyContainer> supply = new LinkedHashMap<>();
+    // The villager whose window was open, by its UUID.
+    private final Map<UUID, VillagerOffers> villagerOffers = new LinkedHashMap<>();
     // The last scan of the blocks around the body (BodySight). A cache of the world, so it is never saved.
     private BodySight.Taken sight;
     private int sightScans;
@@ -129,6 +148,16 @@ public final class BotMemory {
         int count = 0;
         for (Set<Long> inDimension : placed.values()) count += inDimension.size();
         return count;
+    }
+
+    /** Every position the body placed a block at in the dimension, sorted so equal memories read alike. */
+    public List<BlockPos> placedIn(String dimension) {
+        Set<Long> inDimension = placed.get(dimension);
+        if (inDimension == null) return List.of();
+        List<BlockPos> positions = new ArrayList<>(inDimension.size());
+        for (long at : inDimension) positions.add(BlockPos.of(at));
+        positions.sort(Comparator.comparingLong(BlockPos::asLong));
+        return positions;
     }
 
     // ---- containers --------------------------------------------------------------------------------------------
@@ -219,6 +248,21 @@ public final class BotMemory {
         return List.copyOf(supply.values());
     }
 
+    // ---- villager offers ---------------------------------------------------------------------------------------
+
+    /**
+     * Records what the body saw in that villager's trade window, replacing what it saw there before. Offers are noted
+     * per villager, not per window: opening the same one again is a fresh look, not a second opinion.
+     */
+    public void noteOffers(String dimension, UUID villager, BlockPos pos, List<NotedOffer> offers) {
+        villagerOffers.put(villager, new VillagerOffers(dimension, villager, pos, offers));
+    }
+
+    /** Everything remembered, in the order it was first noted. */
+    public List<VillagerOffers> notedOffers() {
+        return List.copyOf(villagerOffers.values());
+    }
+
     // ---- the sight ---------------------------------------------------------------------------------------------
 
     /** The scan {@link BodySight} kept for this body, or null when it has taken none. */
@@ -283,7 +327,45 @@ public final class BotMemory {
             }
             tag.put("supply", supplyList);
         }
+        // The same: a body that has never opened a trade window saves what it always did.
+        if (!villagerOffers.isEmpty()) {
+            ListTag offerList = new ListTag();
+            for (VillagerOffers noted : villagerOffers.values()) {
+                CompoundTag one = new CompoundTag();
+                one.putString("dimension", noted.dimension());
+                one.putUUID("villager", noted.villager());
+                one.putLong("pos", noted.pos().asLong());
+                ListTag offers = new ListTag();
+                for (NotedOffer offer : noted.offers()) offers.add(offerTag(offer));
+                one.put("offers", offers);
+                offerList.add(one);
+            }
+            tag.put("villagerOffers", offerList);
+        }
         return tag;
+    }
+
+    /** One offer as a compound: what it hands over, its facts, what it charges, and when the window was open. */
+    private static CompoundTag offerTag(NotedOffer offer) {
+        CompoundTag one = new CompoundTag();
+        one.putString("result", offer.result().id());
+        one.putString("pos", offer.pos().encode());
+        one.putLong("gameTime", offer.gameTime());
+        CompoundTag facts = new CompoundTag();
+        for (Map.Entry<String, Integer> enchantment : new TreeMap<>(offer.facts().enchantments()).entrySet()) {
+            facts.putInt(enchantment.getKey(), enchantment.getValue());
+        }
+        if (!offer.facts().potion().isEmpty()) one.putString("potion", offer.facts().potion());
+        one.put("enchantments", facts);
+        ListTag charge = new ListTag();
+        for (Map.Entry<ItemKey, Integer> entry : new TreeMap<>(offer.charge()).entrySet()) {
+            CompoundTag cost = new CompoundTag();
+            cost.putString("id", entry.getKey().id());
+            cost.putInt("count", entry.getValue());
+            charge.add(cost);
+        }
+        one.put("charge", charge);
+        return one;
     }
 
     /**
@@ -340,13 +422,56 @@ public final class BotMemory {
                     one.getString("block")));
             }
         }
+        if (tag.contains("villagerOffers", Tag.TAG_LIST)) {
+            ListTag list = tag.getList("villagerOffers", Tag.TAG_COMPOUND);
+            for (int i = 0; i < list.size(); i++) {
+                CompoundTag one = list.getCompound(i);
+                if (!one.contains("dimension", Tag.TAG_STRING) || !one.hasUUID("villager")
+                    || !one.contains("pos", Tag.TAG_LONG)) continue;
+                List<NotedOffer> offers = new ArrayList<>();
+                ListTag offerList = one.getList("offers", Tag.TAG_COMPOUND);
+                for (int j = 0; j < offerList.size(); j++) {
+                    NotedOffer offer = offerOf(offerList.getCompound(j), one.getUUID("villager"));
+                    if (offer != null) offers.add(offer);
+                }
+                memory.noteOffers(one.getString("dimension"), one.getUUID("villager"),
+                    BlockPos.of(one.getLong("pos")), offers);
+            }
+        }
         return memory;
+    }
+
+    /** One offer read back under its villager's id; null when the compound does not hold one. */
+    @Nullable
+    private static NotedOffer offerOf(CompoundTag one, UUID villager) {
+        if (!one.contains("result", Tag.TAG_STRING) || !one.contains("pos", Tag.TAG_STRING)) return null;
+        Pos pos;
+        try {
+            pos = Pos.parse(one.getString("pos"));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        Map<String, Integer> enchantments = new HashMap<>();
+        CompoundTag facts = one.getCompound("enchantments");
+        for (String id : facts.getAllKeys()) enchantments.put(id, facts.getInt(id));
+        Map<ItemKey, Integer> charge = new HashMap<>();
+        ListTag chargeList = one.getList("charge", Tag.TAG_COMPOUND);
+        for (int i = 0; i < chargeList.size(); i++) {
+            CompoundTag cost = chargeList.getCompound(i);
+            if (cost.contains("id", Tag.TAG_STRING) && cost.getInt("count") > 0) {
+                charge.put(ItemKey.of(cost.getString("id")), cost.getInt("count"));
+            }
+        }
+        StackFacts stackFacts = new StackFacts(1, enchantments,
+            one.contains("potion", Tag.TAG_STRING) ? one.getString("potion") : "", Map.of());
+        return new NotedOffer(villager, pos, ItemKey.of(one.getString("result")), stackFacts, charge,
+            one.getLong("gameTime"));
     }
 
     /** What the memory holds, for a log line or a failed assertion. */
     @Override
     public String toString() {
         return "BotMemory(" + placedCount() + " placed blocks, " + containers.size() + " containers, " + supply.size()
-            + " supply containers)";
+            + " supply containers, " + villagerOffers.size() + " villagers' offers)";
     }
 }

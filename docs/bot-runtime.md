@@ -578,6 +578,60 @@ Leaf params: `item`, `count`, `block`. The leaf's source id (`harvest:minecraft:
   replan around, not something to stand and wait by. No room is `NoRoom`, as in the mine task.
 - `progress()` as in `kill`, against the block it heads for.
 
+## `trade`
+
+Leaf params: `item`, `count` (the trades: one item each), `profession`, `level`, `cost` (what one trade charges, as
+`item=count,item=count` in id order — the charge of an offer the body has noted, where it has noted one), `chance` and
+`jobSite` (the item of the block that gives a villager the profession, or empty). The plan for the payment comes before
+the leaf, and so does the plan for the job-site item: held for the whole plan, once per profession, and never drawn, as
+a fishing rod is held. A component-checked `HaveItem` (a book of mending) is planned the same way when a trade's result
+satisfies the check — the source's own sampled enchantments of an enchanted book, or an offer the body has noted in a
+real window — with the check riding on the leaf's goal (`SolverPlanner.checkedPlan`), the payment the charge of the
+cheapest noted offer that satisfies it (a note of the item that fails the check is another book's price), and a strategy
+that undercuts the trade still winning as it always did. The leaf's source id rides along in `NoSource`.
+
+- **`TradeTask`** finds a villager (adults within `SEARCH_RADIUS` = 48 blocks, loaded; of the leaf's profession first,
+  nearest first), walks to it, opens its trade window with a use-click (the villager's own rules decide whether one
+  opens; a villager whose window will not open is skipped for a while, never failed) and **notes its offers in
+  `BotMemory`**, saved with the brain — the next plan prices and plans the payment by a noted charge in place of the
+  index's sample, because a real villager's price differs (an enchanted book costs 5 to 64 emeralds). Offers of a
+  villager that is gone, or noted longer ago than `SnapshotCollector.OFFER_AGE_TICKS` (three in-game days), are
+  dropped from the snapshot.
+- **Trading**: at a villager with an offer whose result satisfies the leaf's goal (the goal's component check applied
+  to the result stack through the same facts the snapshot reads — `SnapshotCollector.factsOf`), the task selects the
+  offer the way the client's select-trade packet does (`MerchantMenu.setSelectionHint` then `tryMoveItems`, which moves
+  the payment from the inventory into the payment slots) and takes the result out of the result slot (menu slot 2) by a
+  click through `MenuHand`, once per trade, until the inventory holds the goal's count. What the body cannot pay ends
+  the leaf `MissingInput` naming the first missing item and the count the offer charges; an offer that is out of stock
+  ends it `NoProgress` saying so; no room for the result is the no-room failure.
+- **Rerolling** (a librarian for a book of mending): when no villager within the radius offers the item and the body
+  carries the job-site item, the task puts it down within 3 blocks of an adult villager with no profession (not a
+  nitwit), at a place found the way a crafting table's place is found (`TableSites`, asked with the job-site block),
+  sneaking, and notes it as the body's (so block safety lets the body take it up again). It waits up to
+  `PROFESSION_WAIT_TICKS` (600) ticks for the villager to take the profession — visible on it; the villager scans for a
+  job site every 20-39 ticks at first, backing off to 400, so 600 is past the second scan — then opens the window and
+  notes the offers. Not the wanted one: the site comes up (broken and picked up again), the profession is waited away,
+  and the site goes back down: a new roll, since a villager that has never traded gets new offers each time it takes
+  the job. The loop goes straight back to the next roll with the same villager — it never returns to the search for its
+  own villager (the villager it is rolling keeps its place in the roll until it trades, is lost, or the roll's own
+  bound passes), and a job-site block this body placed that still stands is taken up before a new one is asked for.
+  One INFO line per roll says what the window showed, one says the site going down and one its coming up. Bounded by
+  `MAX_ROLLS` (200) and the kind's own task budget (72000 ticks: a roll takes about 15 seconds and a book of mending
+  about 40 rolls on average); out of rolls is `NoProgress` with the count. Every villager within the radius has been
+  looked at, none offers the item and no job-site item is carried (and none of the body's stands): `MissingInput`
+  naming the job-site item, without exploring first — the missing thing is an item, not a villager further away.
+- Nobody within the radius: in the `ASSISTED` profile the game is asked for the nearest village
+  (`findNearestMapStructure` with the village structure tag, within 256 blocks) and the body walks there; in
+  `STRICT_SURVIVAL` it explores for a bounded number of rounds (`TradeTask.Search`, six rounds of 100 ticks by
+  default, as the mine and kill tasks take their search bounds — a test can ask for a short one through the task's
+  constructor). Then `NoSource` with the leaf's item and source. **The profile is a setting**: `/aiplayer profile
+  <name> strict|assisted` (whoever may command the body), saved with the brain; the default stays strict survival.
+- Other villagers' job sites are never touched (only one the body put down itself is taken up), and a villager is never
+  moved, hurt, cured or bred. On every exit the window is closed and the cursor emptied; a job site put down for a
+  villager that has traded stays where it is (the villager needs it to restock) and stays remembered, and one put down
+  for a villager that never traded is taken up again first.
+- `progress()` says what it is doing: looking for a villager, looking at offers, the roll it is on, paying.
+
 ## Supply containers, `look_inside` and `withdraw`
 
 The owner names the containers a body may take from (design 3.5): `use chest at <x> <y> <z>` (the position in the

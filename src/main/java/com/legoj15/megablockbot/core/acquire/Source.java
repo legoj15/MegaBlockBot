@@ -109,15 +109,26 @@ public sealed interface Source {
      * A villager trade, measured by sampling the profession's offer listings. {@code chance} is the share of samples of
      * the listing that produced this result; it ignores which of a level's listings a given villager rolled.
      * {@code enchantments} is the stored enchantments of an enchanted book (empty for everything else).
+     *
+     * <p>{@code jobSite} is the item of the block that gives a villager this profession (a lectern for a librarian), or
+     * null when the profession names no job site (the wandering trader) or its block has no item. It is what a plan
+     * holds to make one of these villagers where none stands: put it beside an unemployed villager and the villager
+     * takes the profession.
      */
     record Trade(String id, ItemKey item, String profession, int level, Map<ItemKey, Integer> cost,
-                 Map<String, Integer> enchantments, double chance) implements Source {
+                 Map<String, Integer> enchantments, double chance, ItemKey jobSite) implements Source {
         public Trade {
             Objects.requireNonNull(id, "id");
             Objects.requireNonNull(item, "item");
             Objects.requireNonNull(profession, "profession");
             cost = java.util.Collections.unmodifiableMap(new TreeMap<>(cost));
             enchantments = java.util.Collections.unmodifiableMap(new TreeMap<>(enchantments));
+        }
+
+        /** The form without a job site: a wandering trader's trade, or a fixture that is not about rerolling. */
+        public Trade(String id, ItemKey item, String profession, int level, Map<ItemKey, Integer> cost,
+                     Map<String, Integer> enchantments, double chance) {
+            this(id, item, profession, level, cost, enchantments, chance, null);
         }
 
         @Override

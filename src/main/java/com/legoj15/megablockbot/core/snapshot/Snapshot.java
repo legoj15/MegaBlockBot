@@ -25,6 +25,8 @@ import java.util.Map;
  *                    are two entries); a goal's check reads the keys it names
  * @param structures  one report per blueprint a build goal names, keyed by {@code blueprint@x,y,z}
  * @param observations extra facts a strategy declared it needs, keyed by the strategy's own key
+ * @param offers      the villager offers the body has noted in trade windows it opened, fresh ones of villagers that
+ *                    are still in the body's dimension (issue #15)
  * @param nearbyBlocks the sight (design 3.4): block id to the horizontal distance, in blocks, of the nearest block of
  *                    that kind in the loaded surroundings, for the blocks the acquisition index names as a mining or
  *                    harvesting source. A block that is absent was not seen; an empty map means no sight was taken
@@ -45,6 +47,7 @@ public record Snapshot(
         Map<ItemKey, List<StackFacts>> stackFacts,
         Map<String, StructureReport> structures,
         Map<String, Observation> observations,
+        List<NotedOffer> offers,
         Map<String, Integer> nearbyBlocks) {
 
     public Snapshot {
@@ -56,6 +59,7 @@ public record Snapshot(
         stackFacts = Map.copyOf(stackFacts);
         structures = Map.copyOf(structures);
         observations = Map.copyOf(observations);
+        offers = List.copyOf(offers);
         nearbyBlocks = Map.copyOf(nearbyBlocks);
     }
 
@@ -98,6 +102,7 @@ public record Snapshot(
         private final Map<ItemKey, List<StackFacts>> stackFacts = new HashMap<>();
         private final Map<String, StructureReport> structures = new HashMap<>();
         private final Map<String, Observation> observations = new HashMap<>();
+        private final List<NotedOffer> offers = new ArrayList<>();
         private final Map<String, Integer> nearbyBlocks = new HashMap<>();
 
         public Builder gameTime(long t) { gameTime = t; return this; }
@@ -122,6 +127,9 @@ public record Snapshot(
         public Builder structure(String key, StructureReport r) { structures.put(key, r); return this; }
         public Builder observation(String key, Observation o) { observations.put(key, o); return this; }
 
+        /** A villager offer the body noted in a trade window. */
+        public Builder offer(NotedOffer offer) { offers.add(offer); return this; }
+
         /** Records a block kind in the sight at a horizontal distance; the nearer one is kept when called twice. */
         public Builder nearby(String blockId, int distance) {
             nearbyBlocks.merge(blockId, Math.max(0, distance), Math::min);
@@ -132,7 +140,7 @@ public record Snapshot(
             Map<ItemKey, List<StackFacts>> facts = new HashMap<>();
             stackFacts.forEach((k, v) -> facts.put(k, List.copyOf(v)));
             return new Snapshot(gameTime, dimension, pos, health, hunger, foodUnits, items, equipped, bestTools,
-                    stations, containers, facts, structures, observations, nearbyBlocks);
+                    stations, containers, facts, structures, observations, offers, nearbyBlocks);
         }
     }
 }

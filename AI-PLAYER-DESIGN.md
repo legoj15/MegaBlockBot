@@ -879,7 +879,11 @@ Some goals are multi-stage plans no generic planner should invent. They are writ
 and registered with a precondition, an expected yield, and a cost:
 
 - Librarian reroll (enchanted books). Designed here: AIBot has no reroll, lectern or village
-  code, only a single trade with a villager already beside it.
+  code, only a single trade with a villager already beside it. What exists (#15): the `trade` task is the whole
+  thing — it finds a villager, opens its window, notes the offers it saw in the body's memory (which the next plan
+  prices the payment by), pays and takes the result, and when nobody offers the item it puts the job-site block beside
+  an unemployed villager and takes it up again until the offer is there. A trade source names its job site and a plan
+  holds it, so a librarian is made where none stands.
 - Fishing (manual — implemented, issue #16: the `fish` task casts, watches the bobber dip and reels in like a
   player; live on 2026-11-27, two cod in four minutes with a rod at a river). No auto-fisher: the game has no
   fishing without a player holding the rod, so a contraption would only hold the bot's own hand still, which the

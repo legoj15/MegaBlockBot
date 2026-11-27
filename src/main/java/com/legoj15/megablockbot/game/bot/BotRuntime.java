@@ -96,6 +96,14 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
      */
     static final int BUILD_BUDGET_TICKS = 36000;
 
+    /**
+     * The {@code trade} kind's own task budget. A reroll takes about 15 seconds — the villager scans for the job site,
+     * takes the profession, the window is opened, and the site comes up again — and a book of mending takes about 40
+     * rolls on average: 600 ticks a roll makes 24000, and 72000 (one hour of game time, five times the average hunt)
+     * covers the unlucky runs a specific enchanted book out of the whole tradeable tag needs.
+     */
+    static final int TRADE_BUDGET_TICKS = 72_000;
+
     private final GoalExecutor<BotPlayer> executor;
 
     /** The instance of the body this brain last served: replaced on a respawn, which hands the brain to a new one. */
@@ -144,6 +152,11 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     /** The last goal result, as a line; what a status says about an idle bot. */
     @Nullable
     private GoalResult lastResult;
+    /**
+     * The body's world-knowledge profile (design 4.5), set by {@code /aiplayer profile} and saved with the brain. The
+     * default is what it always was: strict survival, a body that knows only what it has seen or explored.
+     */
+    private Profile profile = Profile.STRICT_SURVIVAL;
     /** The command being carried out, so the answer to it also goes to whoever typed it. */
     @Nullable
     private CommandSourceStack feedback;
@@ -161,7 +174,8 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         return new ExecutorConfig(defaults.maxReplansWithoutProgress(), defaults.maxTotalReplans(),
             defaults.totalReplanCeiling(), defaults.maxRepairReplans(), defaults.maxDeathsPerGoal(),
             defaults.deathExclusionRadius(), defaults.hazardExclusionRadius(), defaults.defaultTaskBudgetTicks(),
-            Map.of(RecipeDef.SMELT, SMELT_BUDGET_TICKS, "build", BUILD_BUDGET_TICKS, FishTask.KIND, FISH_TASK_BUDGET_TICKS), defaults.stuckTicks(), defaults.preemptMaxPausedTicks(),
+            Map.of(RecipeDef.SMELT, SMELT_BUDGET_TICKS, "build", BUILD_BUDGET_TICKS, FishTask.KIND, FISH_TASK_BUDGET_TICKS,
+                "trade", TRADE_BUDGET_TICKS), defaults.stuckTicks(), defaults.preemptMaxPausedTicks(),
             defaults.preemptMaxCount(), defaults.preemptWindowTicks(), defaults.planRerunLimit(),
             defaults.planTimeoutTicks());
     }
@@ -398,6 +412,8 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     @Override
     public void save(CompoundTag tag, HolderLookup.Provider registries) {
         tag.putInt("schema", SAVE_SCHEMA);
+        // Absent when it is the default, so a body never given a profile saves what it always did.
+        if (profile != Profile.STRICT_SURVIVAL) tag.putString("profile", profile.name());
         tag.put("executor", NbtForm.toTag(executor.save()));
         if (bodyId != null) tag.put("memory", BotMemory.of(bodyId).save());
         else if (pendingMemory != null) tag.put("memory", pendingMemory.copy());
@@ -419,6 +435,14 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
             throw new IllegalArgumentException("the saved brain has schema " + schema + ", this build reads " + SAVE_SCHEMA);
         }
         if (tag.contains("memory", Tag.TAG_COMPOUND)) pendingMemory = tag.getCompound("memory").copy();
+        // A profile the owner never set is not written at all; a name that is no longer a profile keeps the default.
+        if (tag.contains("profile", Tag.TAG_STRING)) {
+            try {
+                profile = Profile.valueOf(tag.getString("profile"));
+            } catch (IllegalArgumentException e) {
+                profile = Profile.STRICT_SURVIVAL;
+            }
+        }
         // The layer's shelter blocks are given back to it on the first tick, when the body's level can be asked what
         // stands at each position now.
         if (tag.contains("shelterBlocks", Tag.TAG_COMPOUND)) pendingShelterBlocks = tag.getCompound("shelterBlocks").copy();
@@ -537,7 +561,12 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
 
     @Override
     public Profile profile() {
-        return Profile.STRICT_SURVIVAL;
+        return profile;
+    }
+
+    /** Sets the body's profile (the owner's word, saved with the brain); the default stays what it was. */
+    public void setProfile(Profile profile) {
+        this.profile = profile == null ? Profile.STRICT_SURVIVAL : profile;
     }
 
     @Override
