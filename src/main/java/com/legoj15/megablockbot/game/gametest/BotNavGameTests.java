@@ -452,6 +452,11 @@ public final class BotNavGameTests {
             if (run.nav().state() != BotNavigator.State.FAILED) return;
             helper.assertTrue(run.nav().failKind() == BotNavigator.FailKind.EXPLORE_FAILED, "failed as " + run.nav().failKind());
             helper.assertTrue(run.nav().failure() != null && !run.nav().failure().isBlank(), "FAILED without a reason");
+            // The ground the body stands on counts as looked over. Without that the engine's nearest unexplored chunk
+            // is for ever the one the body is in, and an explore in the open walks to its centre and stays there.
+            BlockPos at = run.body().blockPosition();
+            helper.assertTrue(IBaritone.KEY.get(run.body()).getWorldProvider().getCurrentWorld().getCachedWorld()
+                .isCached(at.getX(), at.getZ()), "the chunk the exploring body stands in is not marked as looked over");
             run.pass();
         });
     }

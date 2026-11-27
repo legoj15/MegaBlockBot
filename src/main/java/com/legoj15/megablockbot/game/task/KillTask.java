@@ -100,6 +100,12 @@ public final class KillTask extends BodyTask {
      * into range -- or come into the world -- a moment later.
      */
     private static final int MIN_STEP_TICKS = 20;
+    /**
+     * Ticks between looks for a quarry while an exploring step walks. A second: the body covers about four blocks,
+     * a sixth of the search radius, so a herd the walk passes is seen while it is still near. A look only at the end
+     * of a step would be one in over a hundred blocks of walking.
+     */
+    private static final int LOOK_EVERY_TICKS = 20;
     /** Getting this much closer to a quarry counts as a gain; less is the body swaying about. */
     private static final double CLOSER_BY = 0.5;
     /** The most set-aside quarries a checkpoint keeps. */
@@ -432,7 +438,8 @@ public final class KillTask extends BodyTask {
             if (notTheSource != null) return notTheSource;
             if (stepTicks < MIN_STEP_TICKS) return TickResult.RUNNING;
         } else if (stepTicks < search.stepTicks() && nav.state() == BotNavigator.State.WORKING) {
-            return TickResult.RUNNING;
+            // The walk goes on until the step is over or a look on the way finds a quarry to stop for.
+            if (stepTicks % LOOK_EVERY_TICKS != 0 || findQuarry(body) == null) return TickResult.RUNNING;
         }
         // The step's own command ends with the step, whatever its state. The hunt that follows gives its follow
         // only when nothing of this task's is still working, and an explore left running would walk the body on

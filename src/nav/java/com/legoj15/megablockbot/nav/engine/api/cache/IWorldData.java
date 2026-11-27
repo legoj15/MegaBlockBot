@@ -25,4 +25,8 @@ public interface IWorldData {
    IContainerMemory getContainerMemory();
 
    void addBlockPosToCache(int blockX, int blockZ);
+
+   // MegaBlockBot: upstream never forgot a chunk. The navigator ages what the body has looked over and writes the
+   // set afresh when an explore begins, so a chunk seen long ago is looked at again.
+   void forgetChunks();
 }

@@ -90,6 +90,11 @@ public final class HarvestTask extends BodyTask {
      * radius for the blocks it may not break.
      */
     private static final int SCAN_RADIUS = 32;
+    /**
+     * Blocks an exploring step walks before the body looks again: three quarters of the scan radius, so two looks
+     * overlap and nothing between them goes unseen. The step's ticks are the bound for a body that gets nowhere.
+     */
+    private static final double STEP_BLOCKS = 24.0;
     /** The navigator's goal for a walk to the harvest: within this many blocks of it, well inside the use-block reach. */
     private static final int REACH_RADIUS = 2;
     /** How far from the harvested block the drops of the leaf's item are walked to. */
@@ -142,6 +147,9 @@ public final class HarvestTask extends BodyTask {
     private boolean alreadyDone;
     private Phase phase = Phase.GOING;
     private BlockPos origin;
+    /** Where the body stood when the exploring step it is on began; null before the first. */
+    @Nullable
+    private Vec3 stepFrom;
     private int attempts;
     /** Blocks the task will not head for again, kept for its life and its checkpoint. */
     private final Set<BlockPos> setAside = new HashSet<>();
@@ -508,6 +516,7 @@ public final class HarvestTask extends BodyTask {
         if (++attempts > search.maxAttempts()) return giveUp(body);
         phase = Phase.EXPLORING;
         phaseTicks = 0;
+        stepFrom = body.position();
         nav(body).explore(origin);
         return TickResult.RUNNING;
     }
@@ -522,7 +531,8 @@ public final class HarvestTask extends BodyTask {
             if (notTheSource != null) return notTheSource;
             return giveUp(body);
         }
-        if (phaseTicks < search.stepTicks() && nav.state() == BotNavigator.State.WORKING) return TickResult.RUNNING;
+        boolean walkedAStep = stepFrom != null && body.position().distanceTo(stepFrom) >= STEP_BLOCKS;
+        if (!walkedAStep && phaseTicks < search.stepTicks() && nav.state() == BotNavigator.State.WORKING) return TickResult.RUNNING;
         return findNext(body);
     }
 

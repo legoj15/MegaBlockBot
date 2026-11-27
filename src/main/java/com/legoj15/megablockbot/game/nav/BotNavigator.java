@@ -8,6 +8,7 @@ import com.legoj15.megablockbot.nav.NavRuntime;
 import com.legoj15.megablockbot.nav.engine.Baritone;
 import com.legoj15.megablockbot.nav.engine.api.IBaritone;
 import com.legoj15.megablockbot.nav.engine.api.Settings;
+import com.legoj15.megablockbot.nav.engine.api.cache.IWorldData;
 import com.legoj15.megablockbot.nav.engine.api.pathing.calc.Avoidance;
 import com.legoj15.megablockbot.nav.engine.api.pathing.calc.IPath;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.Goal;
@@ -47,6 +48,7 @@ import net.minecraft.world.Clearable;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -125,6 +127,20 @@ public final class BotNavigator {
      * body working its way along a roof.
      */
     static final int SURFACE_TICKS = 60;
+    /**
+     * How long a chunk the body has looked over stays out of an explore: ten minutes of game time. Long enough that a
+     * search of many steps does not walk back over its own ground; short enough that a search for something else, or
+     * for animals that have wandered in since, comes back to it.
+     */
+    private static final long SEEN_CHUNK_TICKS = 12_000;
+    /**
+     * Chunks each way around the body that count as looked over while it explores. One: the tasks that explore look
+     * about 24 blocks around the body, and the body's chunk with its eight neighbours is at least 16 blocks each way.
+     * The engine heads for the centre of the nearest chunk that is not marked, so this is also what makes an explore
+     * move at all: with nothing marked it walks to the centre of the chunk it stands in and stays there (the engine
+     * this was ported from had the marking done by a tracker outside it, which was not part of the port).
+     */
+    private static final int SEEN_CHUNK_RADIUS = 1;
     /** Ticks between a scan that found nothing and the second look (see {@link #lookAgain}). */
     static final int LOOK_AGAIN_TICKS = 10;
     /** How far up and around from the body the navigator looks for a place to get its head out of the water. */
@@ -226,6 +242,13 @@ public final class BotNavigator {
     private Object issuer;
     /** Times the engine has been ticked for this body, whatever drove it; a test reads this to tell a double tick. */
     private long engineTicks;
+    /** Chunks the body has looked over while exploring, by chunk key, with the game time it last did. */
+    private final Map<Long, Long> seenChunks = new HashMap<>();
+    /** The dimension {@link #seenChunks} is about: the keys mean nothing in another. */
+    private String seenDimension = "";
+    /** The chunk the body stood in when its surroundings were last marked; null before the first marking of an explore. */
+    @Nullable
+    private ChunkPos seenFrom;
 
     private BotNavigator(BotPlayer body) {
         this.body = body;
@@ -436,17 +459,49 @@ public final class BotNavigator {
 
     /** Walks outward from {@code origin} over chunks not seen yet, at any height, until stopped. */
     public void explore(BlockPos origin) {
-        configureExplore(begin(Kind.EXPLORE), -1).getExploreProcess().explore(origin.getX(), origin.getZ());
+        startExplore(-1).getExploreProcess().explore(origin.getX(), origin.getZ());
     }
 
     /** As {@link #explore}, but keeps to the height {@code y} where the terrain allows (underground ore searches). */
     public void exploreAtY(BlockPos origin, int y) {
-        configureExplore(begin(Kind.EXPLORE), y).getExploreProcess().explore(origin.getX(), origin.getZ());
+        startExplore(y).getExploreProcess().explore(origin.getX(), origin.getZ());
     }
 
-    private static Baritone configureExplore(Baritone e, int maintainY) {
+    /**
+     * Begins an explore with the engine told which chunks the body has looked over lately (see
+     * {@link #SEEN_CHUNK_TICKS}) and the ones around it now, so the first place it heads for is ground it has not seen.
+     */
+    private Baritone startExplore(int maintainY) {
+        Baritone e = begin(Kind.EXPLORE);
         e.settings().exploreMaintainY.set(maintainY);
+        long now = body.level().getGameTime();
+        String here = body.level().dimension().location().toString();
+        if (!here.equals(seenDimension)) {
+            seenChunks.clear();
+            seenDimension = here;
+        }
+        seenChunks.values().removeIf(seen -> now - seen > SEEN_CHUNK_TICKS);
+        IWorldData seen = e.getWorldProvider().getCurrentWorld();
+        seen.forgetChunks();
+        for (long key : seenChunks.keySet()) seen.addBlockPosToCache(ChunkPos.getX(key) << 4, ChunkPos.getZ(key) << 4);
+        seenFrom = null;
+        noteSeenChunks(e);
         return e;
+    }
+
+    /** Marks the chunks around the body as looked over, once for each chunk it steps into while it explores. */
+    private void noteSeenChunks(Baritone e) {
+        ChunkPos at = body.chunkPosition();
+        if (at.equals(seenFrom)) return;
+        seenFrom = at;
+        long now = body.level().getGameTime();
+        IWorldData seen = e.getWorldProvider().getCurrentWorld();
+        for (int dx = -SEEN_CHUNK_RADIUS; dx <= SEEN_CHUNK_RADIUS; dx++) {
+            for (int dz = -SEEN_CHUNK_RADIUS; dz <= SEEN_CHUNK_RADIUS; dz++) {
+                seenChunks.put(ChunkPos.asLong(at.x + dx, at.z + dz), now);
+                seen.addBlockPosToCache((at.x + dx) << 4, (at.z + dz) << 4);
+            }
+        }
     }
 
     /**
@@ -616,6 +671,7 @@ public final class BotNavigator {
                 if (!engine.getFollowProcess().isActive()) fail(FailKind.TARGET_GONE, reason("target gone"));
             }
             case EXPLORE -> {
+                noteSeenChunks(engine);
                 if (!engine.getExploreProcess().isActive()) {
                     // The process also ends when it has nothing left to explore, which is a success. It records a
                     // failure reason only when its search for a path failed.

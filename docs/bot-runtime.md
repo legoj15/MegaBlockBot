@@ -350,6 +350,14 @@ says anything about the source, so neither has the executor exclude one
 (`MoveAndMineGameTests.aBodyDespawnedWhileExploringDoesNotFailNoSource`). The rule is one method,
 `BodyTask.exploreFailure`, and every task that explores for a source asks it: `mine`, `fish`, `kill` and `harvest`.
 
+What makes an explore move: the engine heads for the centre of the nearest chunk that is not marked as looked over, and
+`BotNavigator` does the marking (the engine this was ported from left it to a tracker outside it, which the port did not
+bring; until 2026-11-27 nothing marked anything, so every explore walked to the centre of the chunk it began in and stood
+there). While an explore runs, the body's chunk and its eight neighbours are marked each time it steps into a new chunk;
+the marks last ten minutes of game time (`SEEN_CHUNK_TICKS`) and are written into the engine afresh when an explore
+begins, so a later search comes back over old ground. A walk now passes things a look only at the end of a round would
+miss: the kill task looks for a quarry every second while it walks, and the harvest task ends a round after 24 blocks.
+
 Blocks the body would have to stand in or under water to break are held back while its air is not full, and the wait
 for that air is part of the mine command: the navigator keeps the command's owner (a pause, an abort, a release of the
 task stops the body), and holds jump through the body's input — what a player does to rise in a water column and float

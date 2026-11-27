@@ -86,6 +86,11 @@ public class WorldData implements IWorldData {
       addChunkPosToCache(chunkX, chunkZ);
    }
 
+   @Override
+   public void forgetChunks() {
+      this.localChunkCache.clear();
+   }
+
    public void addChunkPosToCache(int chunkX, int chunkZ) {
       long key = ChunkPos.asLong(chunkX, chunkZ);
       this.localChunkCache.add(key);
