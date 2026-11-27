@@ -937,7 +937,7 @@ class GoalExecutorTest {
         tick(); // the task fails and its checkpoint is stored; the retry is granted
         @SuppressWarnings("unchecked")
         Map<String, Object> checkpoints = (Map<String, Object>) exec.save().get("checkpoints");
-        assertTrue(checkpoints.containsKey("mine|" + diamond.id()));
+        assertTrue(checkpoints.containsKey("mine|" + diamond.id() + "|mine:ore"));
         tick(); // the fresh task for the same node gets the checkpoint as hints
         assertEquals(Map.of("shaft", "10,5,10"), host.taskHints.get(1));
     }
@@ -955,9 +955,26 @@ class GoalExecutorTest {
         tick(); // adopted: the same node identity, so the checkpoint survives
         @SuppressWarnings("unchecked")
         Map<String, Object> checkpoints = (Map<String, Object>) exec.save().get("checkpoints");
-        assertEquals(Map.of("mine|" + diamond.id(), Map.of("shaft", "10,5,10")), checkpoints);
+        assertEquals(Map.of("mine|" + diamond.id() + "|mine:ore", Map.of("shaft", "10,5,10")), checkpoints);
         tick(); // the new node with the same identity starts from the checkpoint
         assertEquals(Map.of("shaft", "10,5,10"), host.taskHints.get(1));
+    }
+
+    @Test
+    void aCheckpointIsNotHandedToANodeThatGathersTheSameItemFromAnotherSource() {
+        // What a search of one source found (how far it looked, how often) says nothing about another source of the
+        // same item: a hunt for cows that ran dry must not make the hunt for horses give up before its first look.
+        Fakes.FakeTask task = Fakes.FakeTask.failing(new Failure.MissingInput(diamond, 1, ""));
+        task.checkpoint = Map.of("attempts", "13");
+        host.tasks.add(task);
+        host.tasks.add(new Fakes.FakeTask());
+        host.offerPlan(diamondLeaf("mine:ore"));
+        host.offerPlan(diamondLeaf("mine:deepslate_ore")); // the replan gathers it another way
+        exec.submit(haveDiamond);
+        ticks(4); // adopt, start, fail, replan
+        tick(); // adopted
+        tick(); // the node of the other source starts
+        assertEquals(Map.of(), host.taskHints.get(1));
     }
 
     // --- Save and load -----------------------------------------------------------------------
@@ -1027,13 +1044,13 @@ class GoalExecutorTest {
         saved.put("goal", SaveCodec.encodeGoal(haveDiamond));
         saved.put("tree", List.of());
         Map<String, Object> checkpoints = new java.util.HashMap<>();
-        checkpoints.put("mine|" + diamond.id(), Map.of("shaft", "10,5,10"));
+        checkpoints.put("mine|" + diamond.id() + "|mine:ore", Map.of("shaft", "10,5,10"));
         checkpoints.put("other", Map.of("shaft", 5)); // not a string map
         saved.put("checkpoints", checkpoints);
         exec.load(saved, BODY);
         @SuppressWarnings("unchecked")
         Map<String, Object> kept = (Map<String, Object>) exec.save().get("checkpoints");
-        assertTrue(kept.containsKey("mine|" + diamond.id()));
+        assertTrue(kept.containsKey("mine|" + diamond.id() + "|mine:ore"));
         assertFalse(kept.containsKey("other"));
         assertFalse(host.logs.isEmpty());
     }
@@ -1430,9 +1447,9 @@ class GoalExecutorTest {
         task.checkpoint = Map.of("shaft", "10,5,10");
         host.tasks.add(task);
         runToActive(diamondLeaf("mine:ore"));
-        assertEquals(Map.of("mine|" + diamond.id(), Map.of("shaft", "10,5,10")), exec.save().get("checkpoints"));
+        assertEquals(Map.of("mine|" + diamond.id() + "|mine:ore", Map.of("shaft", "10,5,10")), exec.save().get("checkpoints"));
         task.checkpoint = Map.of("shaft", "10,4,10"); // the task moved on: the next save sees it
-        assertEquals(Map.of("mine|" + diamond.id(), Map.of("shaft", "10,4,10")), exec.save().get("checkpoints"));
+        assertEquals(Map.of("mine|" + diamond.id() + "|mine:ore", Map.of("shaft", "10,4,10")), exec.save().get("checkpoints"));
     }
 
     @Test
@@ -1992,7 +2009,7 @@ class GoalExecutorTest {
         host.tasks.add(task);
         host.tasks.add(new Fakes.FakeTask());
         adopt(haveDiamond, diamondLeaf("mine:ore")); // the task is live and has not ticked yet
-        Map<String, Map<String, String>> clean = Map.of("mine|" + diamond.id(), Map.of("shaft", "10,5,10"));
+        Map<String, Map<String, String>> clean = Map.of("mine|" + diamond.id() + "|mine:ore", Map.of("shaft", "10,5,10"));
         assertEquals(clean, exec.save().get("checkpoints")); // at save
         assertFalse(host.logs.isEmpty());
         host.logs.clear();

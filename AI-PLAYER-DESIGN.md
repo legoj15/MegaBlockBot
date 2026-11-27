@@ -571,7 +571,8 @@ goal that keeps dying.
 
 The checkpoint map holds the few facts a task kind declares worth keeping across a restart,
 as hints for where to look (a mine shaft's position and the Y it reached, a village found, a
-librarian already rerolled). Checkpoints are keyed by node identity (task kind plus target); a
+librarian already rerolled). Checkpoints are keyed by node identity (task kind plus target, plus the source a gather takes it
+from: a checkpoint is the record of one search, and says nothing about another source); a
 replan carries a checkpoint over to a new node with the same identity and drops the rest. Each
 task kind owns and validates its keys; a task restarting from
 a checkpoint still re-checks the world (Task rules above). Not stored: other task internals,

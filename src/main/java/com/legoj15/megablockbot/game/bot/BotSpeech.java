@@ -152,6 +152,23 @@ public final class BotSpeech {
         return seconds / 3600 + "h " + seconds % 3600 / 60 + "m";
     }
 
+    /**
+     * The whole plan on one line, for the server log: every leaf in order with its task kind, its goal and the source
+     * it gathers from, {@code 1 kill (get 3 leather) [kill:minecraft:cow]; 2 craft (get 1 book); ...}. Empty when the
+     * view holds no leaf. A live run is read from the log afterwards, and the status line only ever shows one step.
+     */
+    public static String plan(ExecutorView view) {
+        StringBuilder text = new StringBuilder();
+        int index = 0;
+        for (ExecutorView.NodeView node : view.nodes()) {
+            if (node.taskKind() == null) continue;
+            if (text.length() > 0) text.append("; ");
+            text.append(++index).append(' ').append(node.taskKind()).append(" (").append(goal(node.goal())).append(')');
+            if (node.source() != null && !node.source().isEmpty()) text.append(" [").append(node.source()).append(']');
+        }
+        return text.toString();
+    }
+
     /** The step the bot is on, as its place among the plan's leaves: {@code Step 3 of 5: craft (get 4 stick).} */
     private static String step(ExecutorView view) {
         List<ExecutorView.NodeView> leaves = new ArrayList<>();

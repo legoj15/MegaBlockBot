@@ -336,12 +336,25 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
             if (tidyTick(current)) return;
         }
         executor.tick(current, hold);
+        if (planMayHaveChanged) {
+            // A task was created this tick: the plan it belongs to is logged once, when it is not the one logged last.
+            planMayHaveChanged = false;
+            String plan = BotSpeech.plan(executor.view());
+            if (!plan.isEmpty() && !plan.equals(loggedPlan)) {
+                loggedPlan = plan;
+                MegaBlockBot.LOGGER.info("{} plan: {}", current.getGameProfile().getName(), plan);
+            }
+        }
         // A task that has ended may have left the body walking: its movement input is reset once, the tick it ends. A
         // hold a command put on a body with no goal is never touched, because no task was ever active for it.
         boolean active = currentTask != null && (currentTask.state() == TaskState.RUNNING || currentTask.state() == TaskState.PAUSED);
         if (taskWasActive && !active) current.input().reset();
         taskWasActive = active;
     }
+
+    /** Set when a task is created; the plan is then compared with the one logged last (see {@link #think}). */
+    private boolean planMayHaveChanged;
+    private String loggedPlan = "";
 
     /** True while the leftover-station task has the body this tick. */
     private boolean tidyTick(BotPlayer current) {
@@ -502,6 +515,7 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         // The registry answers a kind nobody registered with a task that fails at once, naming the kind.
         Task<BotPlayer> task = TaskRegistry.create(leaf, hints);
         currentTask = task;
+        planMayHaveChanged = true;
         String identity = NodeIdentity.of(leaf);
         if (!identity.equals(stepIdentity) && body != null) {
             stepIdentity = identity;
