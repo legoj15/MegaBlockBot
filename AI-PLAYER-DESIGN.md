@@ -307,6 +307,18 @@ Decided in #8 (`game.reflex`, `docs/reflexes.md`, `ReflexGameTests` and `ReflexR
 - A mob that hurts the body is never ignored: a chase given up on goes on the ignore list unless the mob has hurt the body in
   the last 100 ticks, and one that keeps hurting it from where it cannot be reached is retreated from, to the nearest spot out
   of its sight, never stood in front of.
+- A threat that attacks from range is run from at first sight when the body cannot answer it (issue 29): a `RangedAttackMob`
+  holding a projectile weapon (a bow, a crossbow, a trident) or one of the kinds that shoot with nothing in their hands (a
+  named list in `ReflexConstants`), whose target is the body or that stands within its reach of it, and no shield carried —
+  health is not asked, and with a shield the behaviour is what it always was. Such a retreat goes far enough to lose the mob:
+  past its own follow range (the `FOLLOW_RANGE` attribute, the largest among the threats, plus a margin), with the hidden-spot
+  search kept as the first stop when one is on the way. Where the threats stood becomes a **danger zone** in `BotMemory`
+  (dimension, centre, radius, the game time it lapses and a short reason), as where the body falls when a mob kills it; zones
+  are saved with the brain, lapse (12000 ticks) and are never merged. While one lives the navigator prices its cells high
+  through the engine's `Avoidance` (a cost, never a wall), the mine command's target selection and the kill, harvest and fish
+  tasks skip candidates inside it, and the recover node skips a death position inside it; the executor notes one where the body
+  stands when a hold has lasted past the preemption limit, and replans instead of giving the goal up (the budgets still end
+  it). The reflex layer itself is not held back by zones: a retreat may cross one, and a fight it must have is had.
 - Attacks go through `Player.attack`, **before** `swing` (`ServerPlayer.swing` resets the attack cooldown, so a swing first makes
   every hit a weak one); a shield is lowered for the swing, since a player cannot swing with it up. A creeper is never
   approached: the body keeps or opens the gap from one that is a threat. **The exception is a body that is cornered, with no spot
@@ -454,7 +466,7 @@ renaming a message silently changes behaviour.)
 | `HAZARD` | kind (lava, fall, drowning…) | replan avoiding it; the reflex layer handles the immediate danger |
 | `TIMED_OUT`, `NO_PROGRESS` | budget used | retry once; then replan |
 | `DIED` | drop positions, death time | abort the active task, if any; its node returns to PENDING; replan from the respawned inventory; if the drops can still be reached before they despawn (§3.1), a "recover drops" node goes in front of the new tree, otherwise the death record is dropped |
-| `PREEMPT_STALLED` | reflex cause | the reflex layer held the goal paused past its limit (see Preemption); give up the goal at once (the reflex layer still owns the body, so no replan can run) |
+| `PREEMPT_STALLED` | reflex cause | the reflex layer held the goal paused past its limit (see Preemption); the body's position is noted to the host as a danger zone and the goal is replanned as a failed step is, so the new plan takes another target; the goal gives up with this failure only when the replan budgets are spent |
 | `NO_PLACE` | what, radius | the body looked within `radius` blocks for somewhere to do `what` (put a crafting table down, stand to work) and found nowhere, and nothing a planner can change would alter that (the planner does not see where a block fits): give up the goal at once, with this failure as the result's reason; no retry, no replan |
 | `NO_ROOM` | item key | the inventory cannot take what the step produces — a craft whose result does not fit, a mine step with no free slot and no stack of the item with room (no block is broken for a drop that would be lost): a replan would plan the same step into the same full inventory, so give up the goal at once, with this failure as the result's reason; no retry, no replan (#26) |
 | `INTERNAL` | exception | a bug: give up on the goal; report to the owner and the server log |

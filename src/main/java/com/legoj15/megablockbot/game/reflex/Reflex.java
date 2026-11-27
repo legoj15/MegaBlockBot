@@ -34,6 +34,14 @@ interface Reflex {
     /** Why this reflex holds the body, one line, for {@code ReflexHold#cause} and the status. Meaningful while it holds it. */
     String cause();
 
+    /**
+     * Whether what this reflex is doing with the body is walking it away from the thing it holds it for (the mob
+     * reflex's retreat). A typed answer, so a test or a status need not read the cause's text.
+     */
+    default boolean retreating() {
+        return false;
+    }
+
     /** What the hold that has just ended came to ("killed 2, one got away"), for the log line that ends it. Empty when there is nothing to say. */
     default String outcome() {
         return "";

@@ -491,10 +491,13 @@ public final class MineTask extends BodyTask {
      * ever known: {@code NoSource} too, saying how far it looked.
      */
     private TickResult giveUp(BotPlayer body) {
+        // Read before the release, which stops the navigator and would otherwise be asked for a claim of its own.
+        int zoned = nav(body).zoneWithheld();
         release(body);
         if (setAside.isEmpty()) {
             String detail = String.format(Locale.ROOT, "found no %s to get %s from: looked about %d blocks around %s (explored %d blocks in %d attempts)",
                 blockLabel, itemKey.id(), (int) Math.ceil(lookedBlocks), origin.toShortString(), (int) exploredBlocks, attempts);
+            if (zoned > 0) detail += "; " + zoned + " block(s) stood inside a danger zone this body keeps out of";
             MegaBlockBot.LOGGER.info("{}: gave up mining {}: {}", body.getGameProfile().getName(), blockLabel, detail);
             return TickResult.failed(new Failure.NoSource(itemKey, sourceId, detail));
         }
@@ -510,6 +513,7 @@ public final class MineTask extends BodyTask {
                 + " %d stalled round(s) of %d ticks; explored %d blocks in %d attempts around %s and found no other",
             setAside.size(), blockLabel, where, search.targetStallTicks(), stalledRounds, search.noGainTicks(), (int) exploredBlocks, attempts,
             origin.toShortString());
+        if (zoned > 0) detail += "; " + zoned + " block(s) stood inside a danger zone this body keeps out of";
         MegaBlockBot.LOGGER.info("{}: gave up mining {}: {}", body.getGameProfile().getName(), blockLabel, detail);
         return TickResult.failed(new Failure.NoSource(itemKey, sourceId, detail));
     }

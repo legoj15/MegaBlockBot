@@ -84,6 +84,28 @@ public final class BotMemory {
     private record ContainerKey(String dimension, long pos) {}
 
     /**
+     * Somewhere the body was driven off or killed (issue 29): a centre (where the threats stood, or where the body
+     * fell), a radius and the game time it lapses, with a short reason. While it lives the body's plans, tasks and
+     * walks keep out of it, and the navigator prices its cells high so a path goes round. Overlapping zones are kept
+     * as they are, never merged; one that has lapsed says nothing.
+     */
+    public record DangerZone(String dimension, BlockPos centre, double radius, long lapsesAt, String reason) {
+        public DangerZone {
+            centre = centre.immutable();
+        }
+
+        /** Whether the zone still counts at {@code now}. */
+        public boolean live(long now) {
+            return now < lapsesAt;
+        }
+
+        /** Whether a position of this dimension lies inside the zone (a sphere, as the pathfinder prices it). */
+        public boolean covers(String in, BlockPos at) {
+            return dimension.equals(in) && Math.sqrt(at.distSqr(centre)) <= radius;
+        }
+    }
+
+    /**
      * The offers of one villager, as the body saw them the last time it opened that villager's trade window: the note
      * it made then, replaced each time it opens the window again. Kept whole, with the game time it was made at, so
      * the collector can drop the stale ones; nothing here says where the villager is now.
@@ -104,6 +126,8 @@ public final class BotMemory {
     // The last scan of the blocks around the body (BodySight). A cache of the world, so it is never saved.
     private BodySight.Taken sight;
     private int sightScans;
+    /** Where the body was driven off or killed, in the order noted. */
+    private final List<DangerZone> dangerZones = new ArrayList<>();
 
     public static BotMemory of(UUID body) {
         return BY_BODY.computeIfAbsent(body, id -> new BotMemory());
@@ -263,6 +287,55 @@ public final class BotMemory {
         return List.copyOf(villagerOffers.values());
     }
 
+    // ---- danger zones ------------------------------------------------------------------------------------------
+
+    /**
+     * Records somewhere the body should keep out of for a while (issue 29). A zone that already covers the centre is
+     * replaced, so the same place noted twice is one zone with the later lapse time; overlapping ones are both kept.
+     */
+    public void noteDangerZone(String dimension, BlockPos centre, double radius, long lapsesAt, String reason) {
+        DangerZone zone = new DangerZone(dimension, centre, radius, lapsesAt, reason);
+        dangerZones.removeIf(old -> old.covers(dimension, centre));
+        dangerZones.add(zone);
+    }
+
+    /** Every zone that still counts at {@code now}, in the order noted; the ones that have lapsed are dropped. */
+    public List<DangerZone> liveDangerZones(long now) {
+        dangerZones.removeIf(zone -> !zone.live(now));
+        return List.copyOf(dangerZones);
+    }
+
+    /** Whether a live zone of this dimension covers the position. */
+    public boolean inDangerZone(String dimension, BlockPos at, long now) {
+        for (DangerZone zone : liveDangerZones(now)) {
+            if (zone.covers(dimension, at)) return true;
+        }
+        return false;
+    }
+
+    /** The zones remembered, lapsed ones included: for a status line. */
+    public List<DangerZone> dangerZones() {
+        return List.copyOf(dangerZones);
+    }
+
+    /**
+     * The live zones as a phrase for a status line (issue 29), empty when there is none: where each stands, how wide
+     * it is, how long it still counts and why it was written. Twenty ticks a second, as every other duration in a
+     * status is said.
+     */
+    public String liveZonePhrase(long now) {
+        List<DangerZone> zones = liveDangerZones(now);
+        if (zones.isEmpty()) return "";
+        StringBuilder text = new StringBuilder();
+        for (DangerZone zone : zones) {
+            if (text.length() > 0) text.append(", ");
+            text.append(zone.centre().toShortString()).append(" radius ").append((int) Math.ceil(zone.radius()))
+                .append(", ").append(Math.max(0, zone.lapsesAt() - now) / 20).append("s left (")
+                .append(zone.reason()).append(')');
+        }
+        return text.toString();
+    }
+
     // ---- the sight ---------------------------------------------------------------------------------------------
 
     /** The scan {@link BodySight} kept for this body, or null when it has taken none. */
@@ -341,6 +414,21 @@ public final class BotMemory {
                 offerList.add(one);
             }
             tag.put("villagerOffers", offerList);
+        }
+        // Danger zones are saved with the brain like everything else the body knows about the world, and dropped by
+        // the readers when they lapse (issue 29). Absent when there is none.
+        if (!dangerZones.isEmpty()) {
+            ListTag zoneList = new ListTag();
+            for (DangerZone zone : dangerZones) {
+                CompoundTag one = new CompoundTag();
+                one.putString("dimension", zone.dimension());
+                one.putLong("centre", zone.centre().asLong());
+                one.putDouble("radius", zone.radius());
+                one.putLong("lapsesAt", zone.lapsesAt());
+                one.putString("reason", zone.reason());
+                zoneList.add(one);
+            }
+            tag.put("dangerZones", zoneList);
         }
         return tag;
     }
@@ -438,6 +526,17 @@ public final class BotMemory {
                     BlockPos.of(one.getLong("pos")), offers);
             }
         }
+        if (tag.contains("dangerZones", Tag.TAG_LIST)) {
+            ListTag list = tag.getList("dangerZones", Tag.TAG_COMPOUND);
+            for (int i = 0; i < list.size(); i++) {
+                CompoundTag one = list.getCompound(i);
+                if (!one.contains("dimension", Tag.TAG_STRING) || !one.contains("centre", Tag.TAG_LONG)
+                    || !one.contains("reason", Tag.TAG_STRING)) continue;
+                memory.dangerZones.add(new DangerZone(one.getString("dimension"), BlockPos.of(one.getLong("centre")),
+                    one.contains("radius", Tag.TAG_DOUBLE) ? one.getDouble("radius") : 0.0, one.getLong("lapsesAt"),
+                    one.getString("reason")));
+            }
+        }
         return memory;
     }
 
@@ -472,6 +571,7 @@ public final class BotMemory {
     @Override
     public String toString() {
         return "BotMemory(" + placedCount() + " placed blocks, " + containers.size() + " containers, " + supply.size()
-            + " supply containers, " + villagerOffers.size() + " villagers' offers)";
+            + " supply containers, " + villagerOffers.size() + " villagers' offers, " + dangerZones.size()
+            + " danger zones)";
     }
 }

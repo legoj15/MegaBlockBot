@@ -87,6 +87,9 @@ public final class GoalExecutor<B> {
     /** The task kind of the executor-inserted Reach node for an UNKNOWN evaluation. */
     static final String REACH_KIND = "reach";
 
+    /** The reason the executor notes a danger zone for (issue 29): what the host's note is worded as. */
+    static final String HELD_TOO_LONG = "held too long by mobs here";
+
     /** Why a plan is in flight. Only plan-caused causes count against the budgets. */
     private enum PlanCause { INITIAL, NORMAL, REPAIR, RESTART, DEATH }
 
@@ -1074,15 +1077,25 @@ public final class GoalExecutor<B> {
         }
     }
 
-    /** The gate has been shut past a limit: the node fails PREEMPT_STALLED and the goal gives up at once. */
+    /**
+     * The gate has been shut past a limit (issue 29): the step being worked is ended and the goal replanned, as a
+     * failed step is, with where the body stands noted to the host as a danger zone -- that is what makes the new plan
+     * differ, the step it was on taking another target. The replan counts against the budgets like any other, and the
+     * hold counts start again; only when those budgets are spent does the goal end {@code PREEMPT_STALLED}, which the
+     * replan's own wall reports (the reflex layer still owns the body, so no step of the new plan can run yet).
+     */
     private void stallPreempted(B body) {
         ExecNode<B> active = findActive();
+        Failure failure = new Failure.PreemptStalled(preemption.cause(), "held past the preemption limit");
         if (active != null) {
             retireTask(body, active, "preempt stalled");
             active.state = NodeState.FAILED;
         }
-        // The reflex layer still owns the body: give up at once, no replan can run.
-        giveUp(body, new Failure.PreemptStalled(preemption.cause(), "held past the preemption limit"));
+        host.noteDangerZone(body, HELD_TOO_LONG);
+        // The counts start again as a death starts them: what is being measured from here is the new plan's holds.
+        preemption.resetForGoal();
+        clearTicket(); // a plan still in flight was for the tree this hold has just ended
+        replan(body, PlanCause.NORMAL, failure);
     }
 
     private void releaseHold(B body) {

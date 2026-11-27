@@ -7,10 +7,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.NeutralMob;
 import net.minecraft.world.entity.monster.Creeper;
 import net.minecraft.world.entity.monster.Enemy;
+import net.minecraft.world.entity.monster.RangedAttackMob;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.phys.AABB;
 
 /**
@@ -46,6 +51,37 @@ final class Threats {
         if (!(mob instanceof Enemy)) return false;
         if (mob instanceof NeutralMob && mob.getTarget() != body) return false;
         return !mob.isAlliedTo(body);
+    }
+
+    /**
+     * Whether this mob hurts things from a distance (issue 29): a {@code RangedAttackMob} holding a projectile weapon,
+     * or one of the kinds that shoot with nothing in their hands. Such a mob is run from the moment it is a threat
+     * when the body cannot answer it, not only once it has already been hurt.
+     */
+    static boolean attacksFromRange(Mob mob) {
+        if (ReflexConstants.RANGED_WITHOUT_A_WEAPON.contains(mob.getType())) return true;
+        if (!(mob instanceof RangedAttackMob)) return false;
+        ItemStack held = mob.getMainHandItem();
+        return held.is(Items.BOW) || held.is(Items.CROSSBOW) || held.is(Items.TRIDENT);
+    }
+
+    /**
+     * How far this mob follows what it is after: its {@code FOLLOW_RANGE} attribute, or the usual one for a hostile
+     * mob when it has none. What a retreat from it must clear, and what a danger zone around it is wide as.
+     */
+    static double followRange(Mob mob) {
+        AttributeInstance range = mob.getAttribute(Attributes.FOLLOW_RANGE);
+        return range == null ? ReflexConstants.DEFAULT_FOLLOW_RANGE : range.getValue();
+    }
+
+    /**
+     * How far a retreat must go to lose these mobs, and how wide a danger zone around where they stand is: the
+     * largest follow range among them plus the margin.
+     */
+    static double retreatDistance(List<Threat> threats) {
+        double widest = ReflexConstants.DEFAULT_FOLLOW_RANGE;
+        for (Threat threat : threats) widest = Math.max(widest, followRange(threat.mob()));
+        return widest + ReflexConstants.FOLLOW_RANGE_MARGIN;
     }
 
     private static Threat ordinary(Mob mob, double distance, boolean targets) {

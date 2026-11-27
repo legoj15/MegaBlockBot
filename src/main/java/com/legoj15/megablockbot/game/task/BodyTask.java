@@ -7,6 +7,7 @@ import com.legoj15.megablockbot.core.task.Failure;
 import com.legoj15.megablockbot.core.task.TickResult;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
+import com.legoj15.megablockbot.game.plan.BotMemory;
 import java.util.Map;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
@@ -116,6 +117,16 @@ abstract class BodyTask extends AbstractTask<BotPlayer> {
     /** A registry id, or null when it is not one. */
     protected static ResourceLocation idOf(String text) {
         return ResourceLocation.tryParse(text.trim());
+    }
+
+    /**
+     * Whether a live danger zone of this body's memory covers the position (issue 29): somewhere the body was driven
+     * off or killed, which its tasks do not pick targets or drop positions in. The zone lapses, and the position with
+     * it becomes a candidate again; nothing is set aside for ever.
+     */
+    protected static boolean inDangerZone(BotPlayer body, BlockPos pos) {
+        BotMemory memory = BotMemory.peek(body.getUUID());
+        return memory != null && memory.inDangerZone(dimensionOf(body), pos, body.level().getGameTime());
     }
 
     /**

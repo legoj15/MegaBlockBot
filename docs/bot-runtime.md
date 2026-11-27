@@ -363,6 +363,31 @@ same dive. While the navigator waits, the task's own no-gain clock stands still
 (`MoveAndMineGameTests.aBodyInTheWaterGetsItsHeadOutWithoutLeavingTheMineCommand`,
 `aBodyWithNoWayUpGivesUpTheWetTargets`, `abortingAMineWhileItBringsTheBodyUpForAirStopsTheBody`).
 
+### Danger zones (issue 29)
+
+The body remembers where it was driven off or killed: `BotMemory` keeps danger zones — dimension, centre (where the
+threats stood, or where the body fell), radius, the game time it lapses and a short reason. One is written by the reflex
+layer when a hold runs from a shooter the body cannot answer or from a mob far stronger than a player, and when a body
+dies to a mob (radius: the threats' follow range plus a margin; lapses after 12000 ticks, half a Minecraft day); the
+executor writes one where the body stands when the reflex layer has held it past the preemption limit (reason "held too
+long by mobs here", through `ExecutorHost.noteDangerZone`). Zones are saved with the brain and dropped when they lapse;
+overlapping ones are kept as they are. While one lives:
+
+- The navigator prices its cells through the engine's own `Avoidance` (a coefficient of 4 on every cell of the sphere),
+  so a path goes round a zone when there is a way round and through it when there is not — a cost, never a wall: a goal
+  inside a zone that the owner asked for by position is still walked to. Exploring is priced the same way, so a search
+  passes over a zone's chunks while others are left.
+- The mine command's target selection withholds the blocks inside one, as it withholds wet ones, but without the
+  fallback: when only zoned blocks are known the command ends with nothing to mine and the task explores. Nothing is set
+  aside for it, so the blocks come back the moment the zone lapses. A step that ends for want of a source because of a
+  zone says so in its failure's detail (how many blocks stood inside one).
+- The `kill`, `harvest` and `fish` tasks skip candidates inside one the same way (a quarry, a grown block, a place to
+  stand and cast), and their `NoSource` detail says how many were left for it.
+- The recover node skips a death position inside one, with a log line, and completes as it does for a position it cannot
+  reach.
+- `status()` (where the reflex line is) lists the live ones: centre, radius, seconds left, reason.
+- The reflex layer itself is not held back by them: a retreat may cross one, and a fight it must have is had.
+
 ## `recover_drops`
 
 The node the executor puts in front of the new tree after a death (`RecoverDropsTask`): walk to each place the death's items
@@ -371,8 +396,9 @@ for item entities within a named radius (4 blocks) horizontally and down to a na
 each up through `DropPickup`, the one walk to dropped items (see `kill`); a position with nothing within that radius is done
 at once. The walk to the record comes first, however far: what lies there cannot be seen before its chunks are loaded
 around the body. An item the body cannot get at is given up, and so is one that lies in reach and is not taken; a drop that
-has been picked up or despawned is never waited for. The task never fails the goal: the node is best-effort, always
-completing.
+has been picked up or despawned is never waited for. A position inside a live danger zone is skipped with a log line
+(issue 29: the zone is what the body was killed there for, and it is not walked back into for a dropped stack), exactly as
+one the body cannot reach is. The task never fails the goal: the node is best-effort, always completing.
 
 ## `build`
 

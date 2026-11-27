@@ -29,11 +29,14 @@ final class RetreatSpots {
 
     /**
      * The best spot, or null when there is none. {@code bad} holds spots the navigator has already failed to reach.
-     * Spots the body can see in a straight line are strongly preferred: they are nearly always walkable, while one the
-     * other side of a wall or a river is a path search that ends in "no path" some seconds later.
+     * {@code distance} is how far out the spot is looked for: the step back from melee asks for
+     * {@link ReflexConstants#RETREAT_DISTANCE}, a retreat from a threat that attacks from range for enough to lose it
+     * ({@link Threats#retreatDistance}). Spots the body can see in a straight line are strongly preferred:
+     * they are nearly always walkable, while one the other side of a wall or a river is a path search that ends in
+     * "no path" some seconds later.
      */
     @Nullable
-    static BlockPos pick(ReflexContext ctx, List<Threat> threats, List<BlockPos> bad) {
+    static BlockPos pick(ReflexContext ctx, List<Threat> threats, List<BlockPos> bad, int distance) {
         BotPlayer body = ctx.body;
         Vec3 here = body.position();
         double hereMin = minDistance(here, threats);
@@ -41,7 +44,7 @@ final class RetreatSpots {
         double bestScore = Double.NEGATIVE_INFINITY;
         int by = body.blockPosition().getY();
         for (int ring = 0; ring < 2; ring++) {
-            double radius = ring == 0 ? ReflexConstants.RETREAT_DISTANCE : ReflexConstants.RETREAT_DISTANCE * 0.6;
+            double radius = ring == 0 ? distance : distance * 0.6;
             for (int i = 0; i < ANGLES; i++) {
                 double angle = Math.PI * 2.0 * i / ANGLES;
                 int x = (int) Math.floor(here.x + Math.cos(angle) * radius);

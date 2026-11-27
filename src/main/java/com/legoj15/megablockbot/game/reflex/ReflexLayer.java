@@ -5,6 +5,7 @@ import com.legoj15.megablockbot.core.exec.ReflexHold;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
 import com.legoj15.megablockbot.game.nav.BreakFilter;
+import com.legoj15.megablockbot.game.plan.BotMemory;
 import com.legoj15.megablockbot.game.reflex.ReflexConstants.NightPolicy;
 import com.legoj15.megablockbot.game.task.BreakRules;
 import java.util.HashMap;
@@ -209,11 +210,14 @@ public final class ReflexLayer {
         return new ReflexHold(true, lastCause);
     }
 
-    /** One line for the owner: what the layer is doing and why, or "calm". */
+    /** One line for the owner: what the layer is doing and why, or "calm", and the danger zones the body keeps out of. */
     public String status() {
         String doing = holder == null ? "calm" : holder.name() + ": " + holder.cause() + " (held " + heldTicks + " ticks)";
-        return String.format(Locale.ROOT, "%s; health %.1f/%.0f, food %d%s; night policy %s", doing, body.getHealth(), body.getMaxHealth(),
-            body.getFoodData().getFoodLevel(), note.isEmpty() ? "" : ", " + note, nightPolicy);
+        BotMemory memory = BotMemory.peek(body.getUUID());
+        String zones = memory == null ? "" : memory.liveZonePhrase(body.level().getGameTime());
+        return String.format(Locale.ROOT, "%s; health %.1f/%.0f, food %d%s; night policy %s%s", doing, body.getHealth(), body.getMaxHealth(),
+            body.getFoodData().getFoodLevel(), note.isEmpty() ? "" : ", " + note, nightPolicy,
+            zones.isEmpty() ? "" : "; danger zones: " + zones);
     }
 
     /** Lets go of the body now, whatever holds it: what the dev command does when it takes the dev brain away. */
@@ -252,6 +256,14 @@ public final class ReflexLayer {
     /** How many shelter blocks this layer has recorded as standing (placed by the body, not yet taken down). */
     public int recordedShelterBlocks() {
         return shelter.size();
+    }
+
+    /**
+     * Whether the reflex that holds the body is walking it away from what it holds it for (the mob reflex's retreat),
+     * as a type rather than a cause's text: what a test or a status asks.
+     */
+    public boolean retreating() {
+        return holder != null && holder.retreating();
     }
 
     /**
@@ -306,9 +318,31 @@ public final class ReflexLayer {
      * died, at once, and its state with it -- not on the replacement's first tick, which is a tick the executor already
      * counts as held (issue 29). The navigator, kept per UUID across respawns, is stopped on the dying instance, which
      * is the one its command still follows.
+     *
+     * <p>A death to a mob also writes a danger zone around where the body fell (issue 29): the task that resumes and
+     * the recover node after it must not walk the body, or its drops, straight back into what killed it.
      */
     public void bodyDied(BotPlayer dead) {
+        noteDeathZone(dead);
         dropHold("the body died", dead);
+    }
+
+    /**
+     * Where the body fell becomes a danger zone while a mob's reach still covers it, centred on the death position and
+     * as wide as the killer's follow range plus the margin. Nothing is written when no mob killed it (a fall, the void:
+     * the place is no more dangerous than it was), and a throw here must not stop the death's own path.
+     */
+    private static void noteDeathZone(BotPlayer dead) {
+        LivingEntity killer = dead.getKillCredit() != null ? dead.getKillCredit() : dead.getLastHurtByMob();
+        if (!(killer instanceof Mob mob)) return;
+        try {
+            double radius = Threats.followRange(mob) + ReflexConstants.FOLLOW_RANGE_MARGIN;
+            BotMemory.of(dead.getUUID()).noteDangerZone(dead.level().dimension().location().toString(), dead.blockPosition(),
+                radius, dead.level().getGameTime() + ReflexConstants.DANGER_ZONE_TICKS,
+                "died to a " + mob.getType().getDescription().getString().toLowerCase(Locale.ROOT) + " here");
+        } catch (RuntimeException e) {
+            MegaBlockBot.LOGGER.warn("reflex {}: could not note the danger zone of its death", dead.getGameProfile().getName(), e);
+        }
     }
 
     public NightPolicy nightPolicy() {

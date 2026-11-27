@@ -695,28 +695,53 @@ class GoalExecutorTest {
         assertEquals(NodeState.ACTIVE, node(0).state());
     }
 
+    /**
+     * Held past the paused-tick limit (issue 29): the step is ended and the goal replanned as a failed step is, with
+     * the host told where the body stands so the new plan can keep away from it. Given up only when the replan budget
+     * is spent, and with the preemption failure the replan was made for.
+     */
     @Test
-    void pastThePausedTickLimitTheGoalGivesUpPreemptStalledStillHeld() {
-        config = with(c -> c.preemptMaxPausedTicks = 3);
+    void heldPastTheLimitIsReplannedWithTheHostToldAndGivenUpOnlyAfterTheReplanBudget() {
+        config = with(c -> {
+            c.preemptMaxPausedTicks = 3;
+            c.maxTotalReplans = 1;
+        });
         rebuild();
         host.tasks.add(new Fakes.FakeTask());
         runToActive(diamondLeaf("mine:ore"));
         for (int i = 0; i < 5; i++) exec.tick(BODY, new ReflexHold(true, "spawner"));
+        assertEquals(2, host.planRequests.size()); // the initial plan and the replan the limit caused
+        assertEquals(1, host.dangerZones.size()); // the host was told, once for this passing of the limit
+        assertTrue(taskOf(0).calls.stream().anyMatch(c -> c.startsWith("abort")));
+        assertTrue(exec.active(), "the goal was given up on the first passing of the limit");
+        assertTrue(host.published.isEmpty());
+        // The hold counts start again with the new plan; the second passing finds the replan budget spent.
+        for (int i = 0; i < 5; i++) exec.tick(BODY, new ReflexHold(true, "spawner"));
         assertEquals(GoalResult.Status.FAILED, host.published.get(0).status());
         assertEquals(Failure.Kind.PREEMPT_STALLED, host.published.get(0).failure().kind());
-        assertTrue(taskOf(0).calls.stream().anyMatch(c -> c.startsWith("abort")));
+        assertEquals(2, host.dangerZones.size());
         assertFalse(exec.active());
     }
 
     @Test
-    void repeatedPreemptionsWithinTheWindowGiveUp() {
-        config = with(c -> c.preemptMaxCount = 1);
+    void repeatedPreemptionsWithinTheWindowReplanRatherThanGiveUpAtOnce() {
+        config = with(c -> {
+            c.preemptMaxCount = 1;
+            c.maxTotalReplans = 1;
+        });
         rebuild();
         host.tasks.add(new Fakes.FakeTask());
         runToActive(diamondLeaf("mine:ore"));
         exec.tick(BODY, new ReflexHold(true, "mob"));  // preemption 1
         exec.tick(BODY, ReflexHold.NONE);
-        exec.tick(BODY, new ReflexHold(true, "mob"));  // preemption 2 within the window
+        exec.tick(BODY, new ReflexHold(true, "mob"));  // preemption 2 within the window: past the count limit
+        assertEquals(2, host.planRequests.size());
+        assertEquals(1, host.dangerZones.size());
+        assertTrue(exec.active());
+        exec.tick(BODY, ReflexHold.NONE);              // the gate opens
+        exec.tick(BODY, new ReflexHold(true, "mob"));  // preemption 3
+        exec.tick(BODY, ReflexHold.NONE);
+        exec.tick(BODY, new ReflexHold(true, "mob"));  // preemption 4, within the window: past the count limit again
         exec.tick(BODY, new ReflexHold(true, "mob"));
         assertEquals(GoalResult.Status.FAILED, host.published.get(0).status());
         assertEquals(Failure.Kind.PREEMPT_STALLED, host.published.get(0).failure().kind());
@@ -737,9 +762,10 @@ class GoalExecutorTest {
         for (int i = 0; i < 6; i++) exec.tick(BODY, new ReflexHold(true, "mobs: fleeing from pillager"));
         assertTrue(exec.active(), "the goal was given up for the holds that led to the death");
         assertTrue(host.published.isEmpty());
+        assertTrue(host.dangerZones.isEmpty(), "the limit passed, though a death started the count again");
     }
 
-    /** The same holds without the death do: the count is per goal, and nothing reset it. */
+    /** The same holds without the death do pass the limit: the count is per goal, and nothing reset it. */
     @Test
     void theSameHoldsWithoutADeathDoAddUpToThePreemptionLimit() {
         config = with(c -> c.preemptMaxPausedTicks = 10);
@@ -749,8 +775,9 @@ class GoalExecutorTest {
         for (int i = 0; i < 6; i++) exec.tick(BODY, new ReflexHold(true, "mobs: cornered, fighting pillager"));
         exec.onRespawn(); // a respawn with no death told: the executor heard nothing that starts the count again
         for (int i = 0; i < 6; i++) exec.tick(BODY, new ReflexHold(true, "mobs: fleeing from pillager"));
-        assertEquals(GoalResult.Status.FAILED, host.published.get(0).status());
-        assertEquals(Failure.Kind.PREEMPT_STALLED, host.published.get(0).failure().kind());
+        assertFalse(host.dangerZones.isEmpty(), "twelve held ticks never passed the preemption limit");
+        assertTrue(exec.active(), "the goal was given up rather than replanned");
+        assertTrue(host.published.isEmpty());
     }
 
     // --- Budgets and watchdog ----------------------------------------------------------------

@@ -141,6 +141,8 @@ public final class KillTask extends BodyTask {
     /** Quarries the task will not go after again (it could not get at them), kept for its life and its checkpoint. */
     private final Set<UUID> setAside = new HashSet<>();
     private int attempts;
+    /** How many quarries the last look left alone for standing inside a live danger zone (issue 29). */
+    private int zonedQuarries;
     @Nullable
     private Mob quarry;
     /** The serial of the command this task gave last, or -1: how it tells its own command's fate from anybody else's. */
@@ -459,6 +461,9 @@ public final class KillTask extends BodyTask {
                 entityLabel, itemKey.id(), (int) SEARCH_RADIUS, attempts)
             : String.format(Locale.ROOT, "found %d %s(s) and could not get at any of them in %d attempts",
                 setAside.size(), entityLabel, attempts);
+        if (zonedQuarries > 0) {
+            detail += "; " + zonedQuarries + " of them stood inside a danger zone this body keeps out of";
+        }
         MegaBlockBot.LOGGER.info("{}: gave up hunting {}: {}", body.getGameProfile().getName(), entityLabel, detail);
         return TickResult.failed(new Failure.NoSource(itemKey, sourceId, detail));
     }
@@ -470,7 +475,8 @@ public final class KillTask extends BodyTask {
     /**
      * The nearest mob of the leaf's type the body may fight, or null. What is never fought: a mob with a custom name
      * (a name tag is somebody's mark, and it keeps the mob from despawning), a tamed or leashed animal (somebody's
-     * pet), or a baby (it drops nothing). Anything set aside is skipped.
+     * pet), or a baby (it drops nothing). Anything set aside is skipped, and so is a mob that stands inside a live
+     * danger zone (issue 29): where the body was driven off or killed is not walked back into for a kill.
      */
     @Nullable
     private Mob findQuarry(BotPlayer body) {
@@ -479,14 +485,20 @@ public final class KillTask extends BodyTask {
         AABB box = new AABB(at, at).inflate(SEARCH_RADIUS);
         Mob nearest = null;
         double nearestDistance = Double.MAX_VALUE;
+        int zoned = 0;
         for (Mob mob : level.getEntitiesOfClass(Mob.class, box, candidate -> candidate.getType() == type)) {
             if (!eligible(mob)) continue;
+            if (inDangerZone(body, mob.blockPosition())) {
+                zoned++;
+                continue;
+            }
             double distance = mob.distanceToSqr(body);
             if (distance < nearestDistance) {
                 nearestDistance = distance;
                 nearest = mob;
             }
         }
+        zonedQuarries = zoned;
         return nearest;
     }
 

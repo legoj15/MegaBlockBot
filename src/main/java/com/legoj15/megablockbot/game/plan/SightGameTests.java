@@ -251,8 +251,12 @@ public final class SightGameTests {
         }
     }
 
-    /** A kept scan is good for {@link BodySight#MAX_AGE_TICKS} ticks, a body that stands still included. */
-    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 300)
+    /**
+     * A kept scan is good for {@link BodySight#MAX_AGE_TICKS} ticks, a body that stands still included. In a batch of
+     * its own: the test failed in full runs and never alone, and what its neighbours do within sight of the body is
+     * the only thing a full run adds.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 300, batch = "sight_age")
     public static void aScanKeptForTooLongIsTakenAgain(GameTestHelper helper) {
         needsIndex(helper);
         BotPlayer body = spawn(helper, "age");

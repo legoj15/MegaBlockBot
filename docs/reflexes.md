@@ -91,6 +91,27 @@ What the layer does with the body:
    the moment the creeper is hidden hands the body back to a task that walks it into sight again, which is what made nine holds
    in half a minute in the first night run. A threat that is dead or gone gets the short quiet. One creeper that is retreated from
    is one hold.
+   - **A threat that attacks from range is run from at first sight, when the body cannot answer it** (issue 29). "Attacks
+     from range": a `RangedAttackMob` holding a projectile weapon (a bow, a crossbow, a trident) or one of the kinds
+     that shoot with nothing in their hands (blaze, ghast, shulker, witch, breeze, guardian; `RANGED_WITHOUT_A_WEAPON`).
+     "Cannot answer it": no shield carried — with one, behaviour is what it always was, because a shield is how the
+     layer already faces a shooter. Health is not asked: this is the case at 20.0, which the live runs walked into at
+     (an unarmed body at full health walked at a pillager's crossbow until it was shot down, 87 seconds from first
+     sight to death). The cause line says so ("running from a pillager with a crossbow: no shield").
+   - **How far: past the mob's own follow range.** A retreat from such a threat goes far enough to lose the mob: the
+     largest `FOLLOW_RANGE` among the threats run from plus a margin (8) — about 40 blocks for a pillager, whose
+     follow range is 32 and whose crossbow reaches well past the old 14. The hidden-spot search stays the first stop
+     when one exists nearby; the far spot is the destination, and arriving there with nothing after the body ends the
+     hold after the retreat's quiet period rather than counting toward "cornered". A far spot that cannot be found or
+     walked to falls back to the nearest spot there is, as any retreat's, and the fourteen-block retreat stays for what
+     it is good for: stepping back from melee.
+   - **Danger zones are remembered** (issue 29): where the threats stood when a hold ran from a shooter the body cannot
+     answer or from a mob far stronger than a player, and where the body fell when a mob killed it, become a zone in
+     `BotMemory` — the dimension, the centre, the radius (the threats' follow range plus the same margin), the game
+     time it lapses (12000 ticks, half a Minecraft day) and a short reason. Zones are saved with the brain, dropped
+     when they lapse, and overlapping ones are kept as they are. The body's plans, tasks and walks keep out of a live
+     zone (see `docs/bot-runtime.md`); **the reflex layer itself is not held back by them** — a retreat may cross one,
+     and a fight it must have is had. `status()` lists the live ones (centre, radius, seconds left, reason).
    - **A mob that hurts the body is never ignored.** A chase that gets no closer for 100 ticks puts the mob on the ignore list
      for 600, unless the mob has hurt the body in the last 100 ticks: then the chase is given up on after 40, the mob is marked
      out of reach and **stays a threat**, and a mob that hurt the body (by whatever route it got on the ignore list) comes off
@@ -189,6 +210,9 @@ and a refused one is asked again after 6000 ticks at the soonest (`REFUSED_RETRY
 when it has come 0.6 blocks nearer in 6 ticks (`CLOSING_MIN_BLOCKS`, `CLOSING_WINDOW_TICKS`), a hold that retreated lasts 100
 ticks past the last sight of a threat (`RETREAT_QUIET_TICKS`), and a shelter block that could not be taken down is asked
 about again after 400 ticks, doubling on each failure up to a day (`TAKEDOWN_RETRY_TICKS`, `TAKEDOWN_MAX_WAIT_TICKS`).
+Issue 29: the kinds that shoot with no weapon at all (`RANGED_WITHOUT_A_WEAPON`), the usual follow range stood in for a
+mob without the attribute (32, `DEFAULT_FOLLOW_RANGE`), the margin a retreat or a zone clears beyond it (8,
+`FOLLOW_RANGE_MARGIN`), and how long a danger zone counts (12000 ticks, `DANGER_ZONE_TICKS`).
 
 
 ## Differences from the design text, and decisions
@@ -228,7 +252,14 @@ hold at dusk with nothing to build with, a body that dies in a hold able to brea
 the hazard reflex stopping the navigator, a shooter that cannot be reached being hidden from, and a despawned body's layer
 dropped by the sweep. Round four's additions (issue 29): a hold that ends in the very tick its body's death is reported, and shelter
 blocks that survive a save and a load into a fresh layer for the same body (the one that still stands is taken down, the
-one that was replaced by air is not among them).
+one that was replaced by air is not among them). Issue 29's additions: an unarmed body at full health runs from a pillager
+that sees it (the first held tick is a retreat, read as the layer's own `retreating()`, and the gap opens), the same body with a
+shield does not (behaviour unchanged), the retreat writes a danger zone around where the pillager stood into the body's
+memory (this dimension, not yet lapsed), a mine command with two known blocks takes the one outside a zone written at
+set-up and leaves the one inside standing, and a recover node whose death position lies inside a zone completes without the
+body's distance to the position ever falling. What those arena tests cannot show: the full distance of the far retreat
+(the pillager's follow range plus the margin, about forty blocks, against a GameTest's chunk or two of loaded ground — the
+host's live run shows it), and a zone lapsing (12000 ticks, which no GameTest waits for).
 `ReflexRuntimeGameTests` (default-brain bodies, a mob arriving mid-goal; on every tick of every test the navigator's engine has
 not been ticked more often than the game): a craft finishing satisfied after a fight, a mining goal getting its blocks after a
 hold, a hold while the runtime's leftover-table step runs, a retreat that begins on the tick the hold does staying on (the

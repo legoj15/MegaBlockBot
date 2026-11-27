@@ -85,6 +85,14 @@ final class Hands {
         return isShield(offhand) && !body.getCooldowns().isOnCooldown(offhand.getItem());
     }
 
+    /**
+     * Whether the body has a shield to answer a shooter with: one already in the off hand (where a fight moves it), or
+     * one anywhere in the main inventory. The question a retreat from a ranged mob asks (issue 29).
+     */
+    static boolean carriesShield(BotPlayer body) {
+        return isShield(body.getOffhandItem()) || findShield(body) >= 0;
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Food
     // ---------------------------------------------------------------------------------------------------------

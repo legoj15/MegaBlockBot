@@ -145,6 +145,8 @@ public final class HarvestTask extends BodyTask {
     private int attempts;
     /** Blocks the task will not head for again, kept for its life and its checkpoint. */
     private final Set<BlockPos> setAside = new HashSet<>();
+    /** How many grown blocks the last scan left alone for standing inside a live danger zone (issue 29). */
+    private int zonedBlocks;
     /** Kinds with no rule for ripeness, read by the fallback as grown in a non-default state; reported once each. */
     private final Set<String> assumedGrown = new HashSet<>();
     @Nullable
@@ -536,6 +538,7 @@ public final class HarvestTask extends BodyTask {
                 blockLabel, itemKey.id(), SCAN_RADIUS, attempts)
             : String.format(Locale.ROOT, "found %d ripe %s block(s) and could not get at any of them in %d attempts",
                 setAside.size(), blockLabel, attempts);
+        if (zonedBlocks > 0) detail += "; " + zonedBlocks + " of them stood inside a danger zone this body keeps out of";
         if (!assumedGrown.isEmpty()) detail += "; read as ripe by its state, with no rule of its own: " + String.join(", ", assumedGrown);
         MegaBlockBot.LOGGER.info("{}: gave up harvesting {}: {}", body.getGameProfile().getName(), blockLabel, detail);
         return TickResult.failed(new Failure.NoSource(itemKey, sourceId, detail));
@@ -547,8 +550,10 @@ public final class HarvestTask extends BodyTask {
 
     /**
      * Scans the loaded chunks around the body for the nearest grown block of the kind the rules allow, and goes to it.
-     * None allowed and some forbidden: {@code Protected} naming the nearest, for the executor to exclude it. None at
-     * all: a step of exploring, and past the search's bound {@code NoSource}.
+     * A block inside a live danger zone is not a candidate (issue 29): the body does not go back to where it was driven
+     * off or killed for a harvest, and the block is not set aside, so it comes back when the zone lapses. None allowed
+     * and some forbidden: {@code Protected} naming the nearest, for the executor to exclude it. None at all: a step of
+     * exploring, and past the search's bound {@code NoSource}.
      */
     private TickResult findNext(BotPlayer body) {
         unpreserve(body); // whatever block the last harvest owed the world, this task is done with it
@@ -562,6 +567,7 @@ public final class HarvestTask extends BodyTask {
         double nearestDistance = Double.MAX_VALUE;
         BlockPos forbidden = null;
         double forbiddenDistance = Double.MAX_VALUE;
+        int zoned = 0;
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
         for (int chunkX = (center.getX() - r) >> 4; chunkX <= (center.getX() + r) >> 4; chunkX++) {
             for (int chunkZ = (center.getZ() - r) >> 4; chunkZ <= (center.getZ() + r) >> 4; chunkZ++) {
@@ -582,6 +588,10 @@ public final class HarvestTask extends BodyTask {
                             BlockPos here = cursor.immutable();
                             if (!grown(level, here, state)) continue;
                             if (setAside.contains(here)) continue;
+                            if (inDangerZone(body, here)) {
+                                zoned++;
+                                continue;
+                            }
                             double away = here.distSqr(center);
                             if (mayBreak(rules, level, here, state)) {
                                 if (away < nearestDistance) {
@@ -597,6 +607,7 @@ public final class HarvestTask extends BodyTask {
                 }
             }
         }
+        zonedBlocks = zoned;
         if (nearest != null) return goTo(body, nearest);
         if (forbidden != null) {
             release(body);

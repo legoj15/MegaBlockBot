@@ -2,6 +2,10 @@ package com.legoj15.megablockbot.game.gametest;
 
 import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.core.exec.ReflexHold;
+import com.legoj15.megablockbot.core.goal.Goal;
+import com.legoj15.megablockbot.core.plan.NodeSpec;
+import com.legoj15.megablockbot.core.task.Task;
+import com.legoj15.megablockbot.core.task.TaskState;
 import com.legoj15.megablockbot.game.body.BodyException;
 import com.legoj15.megablockbot.game.body.BodyManager;
 import com.legoj15.megablockbot.game.body.BotBrain;
@@ -9,17 +13,23 @@ import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.body.DeathRecord;
 import com.legoj15.megablockbot.game.bot.ReflexSources;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
+import com.legoj15.megablockbot.game.plan.BotMemory;
 import com.legoj15.megablockbot.game.reflex.ReflexConstants;
 import com.legoj15.megablockbot.game.reflex.ReflexLayer;
 import com.legoj15.megablockbot.game.safety.BlockSafety;
+import com.legoj15.megablockbot.game.task.RecoverDropsTask;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
@@ -34,11 +44,13 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.monster.Creeper;
+import net.minecraft.world.entity.monster.Pillager;
 import net.minecraft.world.entity.monster.Skeleton;
 import net.minecraft.world.entity.monster.Zombie;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.component.ChargedProjectiles;
 import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -1185,6 +1197,222 @@ public final class ReflexGameTests {
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // Issue 29: a shooter at first sight, and the danger zones it leaves behind
+    // ---------------------------------------------------------------------------------------------------------
+
+    /**
+     * An unarmed body at full health and a pillager that sees it across open ground: on the first held tick the layer
+     * is walking the body away from the pillager, not fighting it (issue 29 -- the live runs walked an unarmed body at
+     * a crossbow until it was shot down). The pillager is penned by the geometry the test builds (a fence ring it can
+     * see and shoot over, a block and a half high, which no mob walks over) and made persistent, and its brain is left
+     * on: nothing here switches it off. The navigator is warmed up with a short walk first, as the creeper tests do
+     * (its first path in a JVM takes about a second and a half, which is a cost of the test and not of the layer), and
+     * the shooter appears only once the ground the retreat needs is loaded.
+     * What the arena can show is the retreat beginning and the gap opening. The distance the retreat asks for is the
+     * pillager's own follow range plus a margin (about forty blocks), and a GameTest loads about a chunk around the
+     * body, so the far spot falls back to the nearest spot there is and the full distance is not shown here: the
+     * host's live run is what shows it. Each of these three has a batch of its own, like the open-ground creeper runs.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600, batch = "reflex_shooter")
+    public static void runsFromAShooterAtFirstSightWithNoShield(GameTestHelper helper) {
+        pen(helper, 0);
+        Run run = Run.start(helper, "shoot", new Vec3(6.5, 0.0, 8.5), 600);
+        run.setDayTime(1000L);
+        run.watch.walkTo(helper.absolutePos(new BlockPos(4, 0, 8)));
+        Pillager[] pillager = {null};
+        double[] start = {0.0};
+        int[] heldAt = {-1};
+        run.each(560, () -> {
+            BotPlayer body = run.body();
+            helper.assertTrue(body.getHealth() > 0.0F, "the body died; " + run.watch.summary());
+            if (pillager[0] == null) {
+                // The retreat needs ground to run over: wait until the land west of the body is loaded.
+                if (!run.watch.arrived || (run.ticks < 150
+                    && !helper.getLevel().isLoaded(BlockPos.containing(body.position().add(-16.0, 0.0, 0.0))))) return;
+                run.watch.walkTo(null);
+                pillager[0] = run.shooter(new Vec3(12.5, 0.0, 12.5));
+                return;
+            }
+            helper.assertTrue(pillager[0].isAlive(), "the pillager died, so nothing was tested; " + run.watch.summary());
+            if (run.watch.holdsStarted == 0) return;
+            if (heldAt[0] < 0) {
+                heldAt[0] = run.ticks;
+                start[0] = body.distanceTo(pillager[0]);
+                helper.assertTrue(run.layer().holderName().equals("mobs"), "the first hold is the '"
+                    + run.layer().holderName() + "' reflex's, not the mob reflex's");
+                helper.assertTrue(run.layer().retreating(), "the first held tick is not a retreat: " + run.layer().status());
+            }
+            // Ticks a body takes to be clearly on its way: a sprint covers about ten blocks in forty.
+            if (run.ticks - heldAt[0] < 40) return;
+            double now = body.distanceTo(pillager[0]);
+            helper.assertTrue(now > start[0], "after 40 ticks of the hold the body is " + String.format(Locale.ROOT, "%.1f", now)
+                + " blocks from the pillager, no further than the " + String.format(Locale.ROOT, "%.1f", start[0])
+                + " it started at; " + run.watch.summary());
+            MegaBlockBot.LOGGER.info("Reflex GameTest shooter: ran from a pillager, the gap went from {} to {} blocks, {}",
+                String.format(Locale.ROOT, "%.1f", start[0]), String.format(Locale.ROOT, "%.1f", now), run.watch.summary());
+            run.pass();
+        });
+    }
+
+    /**
+     * The same with a shield in the pack: the layer does not run at first sight, because a shield is an answer to a
+     * shooter, and issue 29 leaves that behaviour as it was. The body has no weapon, so what it does instead is walk
+     * at the pillager to fight it with its fists, which is why the test measures only that no retreat is under way.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600, batch = "reflex_shooter_shield")
+    public static void doesNotRunFromAShooterItCarriesAShieldAgainst(GameTestHelper helper) {
+        pen(helper, 0);
+        Run run = Run.start(helper, "shld", new Vec3(6.5, 0.0, 8.5), 600);
+        run.setDayTime(1000L);
+        run.body().getInventory().setItem(21, new ItemStack(Items.SHIELD));
+        run.watch.walkTo(helper.absolutePos(new BlockPos(4, 0, 8)));
+        Pillager[] pillager = {null};
+        int[] heldAt = {-1};
+        run.each(560, () -> {
+            BotPlayer body = run.body();
+            helper.assertTrue(body.getHealth() > 0.0F, "the body died; " + run.watch.summary());
+            if (pillager[0] == null) {
+                if (!run.watch.arrived || run.ticks < 60) return;
+                run.watch.walkTo(null);
+                pillager[0] = run.shooter(new Vec3(12.5, 0.0, 12.5));
+                return;
+            }
+            if (run.watch.holdsStarted == 0) return;
+            if (heldAt[0] < 0) heldAt[0] = run.ticks;
+            helper.assertTrue(!run.layer().retreating(), "the body ran from a shooter it carries a shield against; "
+                + run.layer().status());
+            if (run.ticks - heldAt[0] < 60) return;
+            MegaBlockBot.LOGGER.info("Reflex GameTest shooter with a shield: no retreat in 60 ticks, the body {} blocks from the pillager, {}",
+                String.format(Locale.ROOT, "%.1f", body.distanceTo(pillager[0])), run.watch.summary());
+            run.pass();
+        });
+    }
+
+    /**
+     * After a retreat from a shooter, the body's memory holds a danger zone around where the shooter stood, in this
+     * dimension and not yet lapsed (issue 29): it is what keeps the goal that resumes from walking the body straight
+     * back there.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600, batch = "reflex_shooter_zone")
+    public static void aRetreatFromAShooterNotesADangerZoneWhereItStood(GameTestHelper helper) {
+        pen(helper, 0);
+        Run run = Run.start(helper, "zone", new Vec3(6.5, 0.0, 8.5), 600);
+        run.setDayTime(1000L);
+        run.watch.walkTo(helper.absolutePos(new BlockPos(4, 0, 8)));
+        Pillager[] pillager = {null};
+        run.each(560, () -> {
+            if (pillager[0] == null) {
+                if (!run.watch.arrived || (run.ticks < 150
+                    && !helper.getLevel().isLoaded(BlockPos.containing(run.body().position().add(-16.0, 0.0, 0.0))))) return;
+                run.watch.walkTo(null);
+                pillager[0] = run.shooter(new Vec3(12.5, 0.0, 12.5));
+                return;
+            }
+            if (!run.layer().retreating()) return; // the retreat has been picked, which is when the zone is written
+            BotMemory memory = BotMemory.peek(run.id());
+            List<BotMemory.DangerZone> zones = memory == null ? List.of()
+                : memory.liveDangerZones(helper.getLevel().getGameTime());
+            helper.assertTrue(zones.size() == 1, zones.size() + " danger zones are remembered, not the one");
+            BotMemory.DangerZone zone = zones.get(0);
+            helper.assertTrue(zone.dimension().equals(helper.getLevel().dimension().location().toString()),
+                "the zone is in " + zone.dimension() + ", not this dimension");
+            helper.assertTrue(zone.centre().distSqr(pillager[0].blockPosition()) <= 4, "the zone is centred at " + zone.centre()
+                + ", not where the pillager stood (" + pillager[0].blockPosition() + ")");
+            helper.assertTrue(zone.live(helper.getLevel().getGameTime()), "the zone has already lapsed");
+            MegaBlockBot.LOGGER.info("Reflex GameTest danger zone: {} blocks wide around {}, because {}",
+                String.format(Locale.ROOT, "%.1f", zone.radius()), zone.centre().toShortString(), zone.reason());
+            run.pass();
+        });
+    }
+
+    /**
+     * A mine command with two blocks of the kind known, one inside a danger zone written into the memory at set-up and
+     * one outside: the one outside is taken and the one inside stands (issue 29). The one inside is the nearer of the
+     * two, so a command that did not keep out of the zone would take it first. The block is not set aside for ever --
+     * it comes back when the zone lapses -- but that takes the zone's 12000 ticks, which no GameTest waits for. A batch
+     * of its own, like every test that breaks blocks through the navigator: the break rules are global state.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 500, batch = "reflex_zone_mine")
+    public static void aMineCommandSkipsTheBlockInsideADangerZone(GameTestHelper helper) {
+        room(helper, true);
+        BlockPos inside = new BlockPos(6, FLOOR_Y + 1, 8);
+        BlockPos outside = new BlockPos(13, FLOOR_Y + 1, 8);
+        helper.setBlock(inside, Blocks.HAY_BLOCK);
+        helper.setBlock(outside, Blocks.HAY_BLOCK);
+        Run run = Run.start(helper, "zmine", new Vec3(2.5, FLOOR_Y + 1, 8.5), 500);
+        // Set-up: a zone that covers the one block and nothing the body stands in, alive for well past the test.
+        BotMemory.of(run.id()).noteDangerZone(helper.getLevel().dimension().location().toString(), helper.absolutePos(inside),
+            2.5, helper.getLevel().getGameTime() + 20_000L, "a test's zone");
+        run.watch.mine(Blocks.HAY_BLOCK, Items.HAY_BLOCK);
+        run.each(460, () -> {
+            if (!run.watch.mined) {
+                helper.assertTrue(run.watch.mineFailure.isEmpty(), "the mine command failed: " + run.watch.mineFailure);
+                return;
+            }
+            helper.assertTrue(!helper.getBlockState(outside).is(Blocks.HAY_BLOCK), "the block outside the zone was not taken");
+            helper.assertTrue(helper.getBlockState(inside).is(Blocks.HAY_BLOCK), "the block inside the zone was taken");
+            helper.assertTrue(run.body().getInventory().countItem(Items.HAY_BLOCK) >= 1, "the command ended with no hay block held");
+            MegaBlockBot.LOGGER.info("Reflex GameTest danger zone: mined the block outside it and left the one inside standing");
+            run.pass();
+        });
+    }
+
+    /**
+     * A recover node whose one death position lies inside a live danger zone: it completes without the body having
+     * walked toward the position -- its distance to the position never falls (issue 29: after the live runs, the
+     * respawned body was sent straight back to where the pillager killed it for one dropped stack).
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 200, batch = "reflex_zone_mine")
+    public static void aRecoverNodeSkipsADeathPositionInsideADangerZone(GameTestHelper helper) {
+        room(helper, true);
+        BlockPos death = new BlockPos(12, FLOOR_Y + 1, 8);
+        Run run = Run.start(helper, "zrec", new Vec3(2.5, FLOOR_Y + 1, 8.5), 200);
+        BotMemory.of(run.id()).noteDangerZone(helper.getLevel().dimension().location().toString(), helper.absolutePos(death),
+            4.0, helper.getLevel().getGameTime() + 20_000L, "a test's zone");
+        BlockPos absolute = helper.absolutePos(death);
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("dimension", helper.getLevel().dimension().location().toString());
+        params.put("drops", absolute.getX() + "," + absolute.getY() + "," + absolute.getZ());
+        RecoverDropsTask task = new RecoverDropsTask(new NodeSpec(new Goal.Custom("recover_drops", params),
+            "recover_drops", params, "", true, List.of()));
+        run.watch.work(task);
+        Vec3 at = Vec3.atCenterOf(absolute);
+        double[] start = {Double.MAX_VALUE};
+        double[] closest = {Double.MAX_VALUE};
+        run.each(160, () -> {
+            BotPlayer body = run.body();
+            double now = body.position().distanceTo(at);
+            if (start[0] == Double.MAX_VALUE) start[0] = now;
+            closest[0] = Math.min(closest[0], now);
+            if (task.state() != TaskState.COMPLETED) {
+                // PENDING on the first look: the brain starts the task on its own next tick.
+                helper.assertTrue(task.state() == TaskState.RUNNING || task.state() == TaskState.PENDING,
+                    "the recover task is " + task.state());
+                return;
+            }
+            helper.assertTrue(closest[0] >= start[0] - 0.5, "the body walked toward the death position: it came within "
+                + String.format(Locale.ROOT, "%.1f", closest[0]) + " blocks of it, having started at "
+                + String.format(Locale.ROOT, "%.1f", start[0]));
+            run.pass();
+        });
+    }
+
+    /**
+     * A pen a shooter is held in by geometry alone: a ring of fences an eye sees over and shoots over (a fence is a
+     * block and a half high) and no mob walks over. Its brain stays on; only the fences hold it.
+     */
+    private static void pen(GameTestHelper helper, int y) {
+        for (int i = 11; i <= 14; i++) {
+            helper.setBlock(i, y, 11, Blocks.OAK_FENCE);
+            helper.setBlock(i, y, 14, Blocks.OAK_FENCE);
+        }
+        for (int z = 12; z <= 13; z++) {
+            helper.setBlock(11, y, z, Blocks.OAK_FENCE);
+            helper.setBlock(14, y, z, Blocks.OAK_FENCE);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // Terrain and measuring
     // ---------------------------------------------------------------------------------------------------------
 
@@ -1290,6 +1518,9 @@ public final class ReflexGameTests {
         private Item mineItem;
         boolean mined;
         String mineFailure = "";
+        /** A leaf's task the test built, ticked by the stand-in as the executor would tick it. */
+        @Nullable
+        private Task<BotPlayer> job;
 
         void walkTo(BlockPos goal) {
             walkGoal = goal;
@@ -1299,6 +1530,11 @@ public final class ReflexGameTests {
         void mine(Block block, Item item) {
             mineBlock = block;
             mineItem = item;
+        }
+
+        /** The stand-in brain runs this task of a leaf instead of its own walk or mine (what drives one task a test builds). */
+        void work(Task<BotPlayer> task) {
+            job = task;
         }
 
         @Override
@@ -1326,6 +1562,16 @@ public final class ReflexGameTests {
         }
 
         private void standIn(BotPlayer body, BotNavigator nav) {
+            if (job != null) {
+                // What the executor does with a leaf's task: start it once, tick it, and let its own navigator commands
+                // run (the brain ticks the engine, the task only asks it to move).
+                if (job.state() == TaskState.PENDING) job.start(body);
+                if (job.state() == TaskState.RUNNING) {
+                    job.tick(body);
+                    nav.tick(body);
+                }
+                return;
+            }
             if (walkGoal != null && !arrived) {
                 if (nav.state() == BotNavigator.State.DONE) {
                     arrived = true;
@@ -1464,6 +1710,22 @@ public final class ReflexGameTests {
             place(skeleton, relative);
             skeleton.setTarget(body());
             return skeleton;
+        }
+
+        /**
+         * A pillager with a loaded crossbow in its hand, its brain on and persistent, put after the body and told to
+         * be after it (a pillager picks the body as its target on its own; this starts the hold at once). Where it has
+         * to stay put the test pens it with fences, never by switching its brain off.
+         */
+        Pillager shooter(Vec3 relative) {
+            ServerLevel level = helper.getLevel();
+            Pillager pillager = EntityType.PILLAGER.create(level);
+            ItemStack crossbow = new ItemStack(Items.CROSSBOW);
+            crossbow.set(DataComponents.CHARGED_PROJECTILES, ChargedProjectiles.of(new ItemStack(Items.ARROW)));
+            pillager.setItemSlot(EquipmentSlot.MAINHAND, crossbow);
+            place(pillager, relative);
+            pillager.setTarget(body());
+            return pillager;
         }
 
         void place(Mob mob, Vec3 relative) {

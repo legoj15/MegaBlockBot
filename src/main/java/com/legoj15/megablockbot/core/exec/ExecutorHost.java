@@ -50,6 +50,13 @@ public interface ExecutorHost<B> {
 
     Profile profile();
 
+    /**
+     * The reflex layer held the body past the preemption limit (issue 29): somewhere around where the body stands is
+     * somewhere its plan should keep out of, which only the host can know how to note (the core holds no Minecraft
+     * type). Called with the body the executor was last ticked with; the default does nothing.
+     */
+    default void noteDangerZone(B body, String reason) {}
+
     /** error may be null. */
     void log(String message, Throwable error);
 }

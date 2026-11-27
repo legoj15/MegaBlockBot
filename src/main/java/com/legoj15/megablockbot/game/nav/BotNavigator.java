@@ -3,10 +3,12 @@ package com.legoj15.megablockbot.game.nav;
 import com.legoj15.megablockbot.game.body.BodyInput;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.build.Blueprint;
+import com.legoj15.megablockbot.game.plan.BotMemory;
 import com.legoj15.megablockbot.nav.NavRuntime;
 import com.legoj15.megablockbot.nav.engine.Baritone;
 import com.legoj15.megablockbot.nav.engine.api.IBaritone;
 import com.legoj15.megablockbot.nav.engine.api.Settings;
+import com.legoj15.megablockbot.nav.engine.api.pathing.calc.Avoidance;
 import com.legoj15.megablockbot.nav.engine.api.pathing.calc.IPath;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.Goal;
 import com.legoj15.megablockbot.nav.engine.api.pathing.goals.GoalBlock;
@@ -132,6 +134,13 @@ public final class BotNavigator {
     /** Path cost per point of fall damage: about one second of walking per half heart, so a long fall is a last resort. */
     private static final double FALL_DAMAGE_PENALTY = 20.0;
     /**
+     * What a cell inside a live danger zone costs, as a multiple of its usual cost (issue 29): high enough that a path
+     * goes round a zone when there is a way round, and only a cost, never a wall, so a goal inside a zone that the
+     * owner asked for by position is still walked to. Four makes crossing a zone of any width dearer than the way
+     * round it, while a whole world of zones (which cannot happen: they lapse) would still be crossable.
+     */
+    private static final double DANGER_ZONE_COST = 4.0;
+    /**
      * What the engine may bridge and pillar with (design 2.2's survival defaults): the stone and dirt a body in a cave
      * has to spare. A build command empties this for its own command, so nothing it does places a block the blueprint
      * does not name (see {@link #build}).
@@ -183,6 +192,15 @@ public final class BotNavigator {
     private volatile boolean airWithheld;
     /** The blocks the policy is holding back for air: what a give-up on them sets aside. */
     private volatile List<BlockPos> withheldForAir = List.of();
+    /**
+     * The body's live danger zones ({@code BotMemory}, issue 29), as the engine prices them and as the target policy
+     * withholds blocks for. A snapshot taken on the server thread, because the engine's search pool reads it.
+     */
+    private volatile List<BotMemory.DangerZone> dangerZones = List.of();
+    /** The dimension the snapshot's zones are read against, as the running command's body is in. */
+    private volatile String dimension = "";
+    /** How many known blocks the last target choice held back for standing inside a danger zone (issue 29). */
+    private volatile int zoneWithheld;
     /** Set by the target policy once it lets a block under water through, so that the air falling on the way does not stop it. */
     private volatile boolean wetCommitted;
     /** The blueprint the running build command places, and where its anchor is. */
@@ -561,6 +579,7 @@ public final class BotNavigator {
      */
     public void tick(BotPlayer current) {
         follow(current);
+        refreshDangerZones();
         if (state != State.WORKING || engine == null) return;
         if (!ownsBody(engine)) {
             fail(FailKind.BODY_LOST, body.isRemoved() ? "body removed" : "body changed dimension or was replaced");
@@ -708,6 +727,7 @@ public final class BotNavigator {
     /** Cancels what runs, makes sure the engine is this body's own, and marks the new command as working. */
     private Baritone begin(Kind newKind) {
         Baritone e = engine();
+        refreshDangerZones();
         if (kind == Kind.MINE) keepWhatTheEngineGaveUpOn(e.getMineProcess());
         cancelEngine(e);
         e.clearLastFailure();
@@ -798,7 +818,47 @@ public final class BotNavigator {
         s.maxFallHeightNoWater.set(fallLimit(body.getHealth()));
         s.acceptableThrowawayItems.set(new ArrayList<>(THROWAWAY));
         s.blocksToAvoidBreaking.set(new ArrayList<>(avoidBreaking()));
+        // Danger zones (issue 29): the engine's own avoidance prices a zone's cells high, so a walk goes round one when
+        // there is a way round and through it when there is not. The finder runs on the search pool, so it reads the
+        // snapshot {@link #dangerZones} keeps, never the memory.
+        s.avoidance.set(true);
+        e.getEntityContext().setAvoidanceFinder(this::avoidedAreas);
         applyBreakFilter(e);
+    }
+
+    /** The body's live danger zones as the engine prices them ({@link Avoidance}); called from the search pool. */
+    private List<Avoidance> avoidedAreas() {
+        List<Avoidance> out = new ArrayList<>(dangerZones.size());
+        for (BotMemory.DangerZone zone : dangerZones) {
+            out.add(new Avoidance(zone.centre(), DANGER_ZONE_COST, (int) Math.ceil(zone.radius())));
+        }
+        return out;
+    }
+
+    /**
+     * Reads the body's live danger zones into the snapshot the search pool and the target policy read, and drops the
+     * ones that have lapsed from the memory while it is there. Server thread.
+     */
+    private void refreshDangerZones() {
+        BotMemory memory = BotMemory.peek(body.getUUID());
+        dangerZones = memory == null ? List.of() : List.copyOf(memory.liveDangerZones(body.level().getGameTime()));
+        dimension = body.level().dimension().location().toString();
+    }
+
+    /** Whether a position stands inside one of the body's live danger zones; any thread, over the snapshot. */
+    private boolean inADangerZone(BlockPos at) {
+        for (BotMemory.DangerZone zone : dangerZones) {
+            if (zone.covers(dimension, at)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * How many blocks the running mine command's last choice of targets held back because they stand inside a live
+     * danger zone (issue 29). Not set aside: when the zone lapses they are targets again.
+     */
+    public int zoneWithheld() {
+        return zoneWithheld;
     }
 
     private void applyBreakFilter(Baritone e) {
@@ -1117,18 +1177,28 @@ public final class BotNavigator {
 
     /**
      * The mine process's choice among the blocks it knows (asked every tick and on every rescan, on any thread): none
-     * that are set aside; dry ones before any the body would take standing in or under water; and those only when the
-     * body's air is full, or when it has already started for one (the air falls on the way there).
+     * that are set aside; none that stand inside a live danger zone (issue 29); dry ones before any the body would take
+     * standing in or under water; and those only when the body's air is full, or when it has already started for one
+     * (the air falls on the way there).
      */
     private List<BlockPos> selectTargets(List<BlockPos> candidates, Function<BlockPos, BlockState> blocks) {
         Set<BlockPos> aside = setAside;
         List<BlockPos> open = new ArrayList<>(candidates.size());
         List<BlockPos> dry = new ArrayList<>(candidates.size());
+        int inZones = 0;
         for (BlockPos candidate : candidates) {
             if (aside.contains(plain(candidate))) continue;
+            // A block inside a live danger zone is not headed for (issue 29), and unlike a wet one it is not taken when
+            // nothing else is known: the command then ends with nothing to mine and the task explores elsewhere. It is
+            // never set aside for it, so the block comes back the moment the zone lapses.
+            if (inADangerZone(candidate)) {
+                inZones++;
+                continue;
+            }
             open.add(candidate);
             if (!wet(candidate, blocks)) dry.add(candidate);
         }
+        zoneWithheld = inZones;
         if (!dry.isEmpty()) {
             wetCommitted = false;
             airWithheld = false;

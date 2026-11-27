@@ -2,6 +2,7 @@ package com.legoj15.megablockbot.game.reflex;
 
 import com.legoj15.megablockbot.game.task.Weapons;
 import java.util.List;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.Items;
 
@@ -41,6 +42,38 @@ public final class ReflexConstants {
 
     /** A hostile this close, in sight, is a threat whoever it is after (a zombie that has not picked a target yet). */
     public static final double MELEE_TRIGGER = 3.5;
+
+    /**
+     * The kinds that shoot at a player without holding anything (issue 29): a body with no shield is run from them at
+     * first sight, the way it is run from a held bow, crossbow or trident.
+     * <ul>
+     *   <li>Blaze: small fireballs from its own rods.</li>
+     *   <li>Ghast: fireballs, from far outside any melee range.</li>
+     *   <li>Shulker: the shell's bullets home in on the body.</li>
+     *   <li>Witch: splash potions thrown from a distance.</li>
+     *   <li>Breeze: wind charges, fired while it keeps away itself.</li>
+     *   <li>Guardian: the eye beam, which reaches well past an arm.</li>
+     * </ul>
+     */
+    public static final List<EntityType<?>> RANGED_WITHOUT_A_WEAPON = List.of(
+        EntityType.BLAZE, EntityType.GHAST, EntityType.SHULKER, EntityType.WITCH, EntityType.BREEZE, EntityType.GUARDIAN);
+    /**
+     * Most hostile mobs' follow range (a zombie's, a skeleton's, a pillager's): what a mob without the attribute is
+     * taken to have, when a retreat or a danger zone is sized by how far the mob follows.
+     */
+    public static final double DEFAULT_FOLLOW_RANGE = 32.0;
+    /**
+     * How much further than a mob's follow range a retreat from it goes, and how much wider a danger zone around it
+     * is: a mob that has lost sight keeps looking along the body's last-seen direction and wanders within its follow
+     * range for a while, so the body clears that and a little more.
+     */
+    public static final double FOLLOW_RANGE_MARGIN = 8.0;
+    /**
+     * How long a danger zone counts (issue 29): 12000 ticks, half a Minecraft day, ten minutes of play. Long enough
+     * that the body does not walk back into the same outpost the minute its goal resumes, short enough that a place
+     * is not lost to it for a whole session.
+     */
+    public static final long DANGER_ZONE_TICKS = 12_000L;
 
     /** A swing is made once the attack cooldown has recovered this far (AIBot: 0.95, same). */
     public static final float ATTACK_READY = 0.95F;
@@ -93,7 +126,11 @@ public final class ReflexConstants {
     /** A hostile with this much health or more (a warden, a wither, a ravager) is never fought: the body retreats from it. */
     public static final float OUTCLASSED_MAX_HEALTH = 60.0F;
 
-    /** How far away a retreat spot is looked for, how close counts as arrived, and how long a spot is kept. */
+    /**
+     * How far away a retreat spot is looked for, how close counts as arrived, and how long a spot is kept. The
+     * fourteen blocks are the step back from melee; a retreat from a threat that attacks from range asks for more,
+     * {@link #retreatDistance}, because a shooter follows further than that and shoots further still.
+     */
     public static final int RETREAT_DISTANCE = 14;
     public static final int RETREAT_ARRIVE_RADIUS = 2;
     public static final int RETREAT_REPICK_TICKS = 60;

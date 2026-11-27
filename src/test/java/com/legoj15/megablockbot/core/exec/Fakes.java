@@ -46,6 +46,8 @@ final class Fakes {
         final List<Failure.Died> recoverChecks = new ArrayList<>();
 
         final List<GoalResult> published = new ArrayList<>();
+        /** The reasons the executor noted a danger zone for, in order (issue 29). */
+        final List<String> dangerZones = new ArrayList<>();
         final List<String> logs = new ArrayList<>();
         /** The throwables handed to {@code log}, to check that a stack trace was not dropped. */
         final List<Throwable> loggedErrors = new ArrayList<>();
@@ -106,6 +108,11 @@ final class Fakes {
         public void log(String message, Throwable error) {
             logs.add(message);
             if (error != null) loggedErrors.add(error);
+        }
+
+        @Override
+        public void noteDangerZone(Object body, String reason) {
+            dangerZones.add(reason);
         }
 
         /** Queues a plan that adopts immediately, for the current input fingerprint. */

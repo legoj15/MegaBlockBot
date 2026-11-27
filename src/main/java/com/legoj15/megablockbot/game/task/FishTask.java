@@ -157,6 +157,8 @@ public final class FishTask extends BodyTask {
     private BlockPos origin;
     private int attempts;
     private double exploredBlocks;
+    /** How many places the last look left alone for standing inside a live danger zone (issue 29). */
+    private int zonedSpots;
     private Vec3 stepFrom = Vec3.ZERO;
     private int stepTicks;
     /** Stands that did not work out (the navigator could not get there, or every cast at them was bad). */
@@ -517,6 +519,7 @@ public final class FishTask extends BodyTask {
         String detail = String.format(Locale.ROOT,
             "found no water to fish %s from: looked about %d blocks around %s (explored %d blocks in %d attempts)",
             itemKey.id(), search.scanRadius(), origin.toShortString(), (int) exploredBlocks, attempts);
+        if (zonedSpots > 0) detail += "; " + zonedSpots + " place(s) to stand or cast stood inside a danger zone this body keeps out of";
         MegaBlockBot.LOGGER.info("{}: gave up fishing for {}: {}", body.getGameProfile().getName(), itemKey.id(), detail);
         return TickResult.failed(new Failure.NoSource(itemKey, sourceId, detail));
     }
@@ -571,7 +574,9 @@ public final class FishTask extends BodyTask {
 
     /**
      * The nearest place the body can fish from: a standable block on the bank of the nearest water the chunks around
-     * the body hold, with the water cells that stand can cast into. Loaded chunks only: a read never loads one.
+     * the body hold, with the water cells that stand can cast into. Water or stand inside a live danger zone is not a
+     * candidate (issue 29): the body does not fish where it was driven off or killed, and the place comes back when
+     * the zone lapses. Loaded chunks only: a read never loads one.
      */
     @Nullable
     private Spot findSpot(BotPlayer body) {
@@ -579,11 +584,22 @@ public final class FishTask extends BodyTask {
         BlockPos centre = body.blockPosition();
         List<BlockPos> water = waterSources(level, centre, search.scanRadius(),
             centre.getY() - WATER_SCAN_DEPTH, Math.min(level.getMaxBuildHeight() - 2, centre.getY() + WATER_SCAN_RISE));
+        int zoned = 0;
         for (BlockPos cell : water) {
+            if (inDangerZone(body, cell)) {
+                zoned++;
+                continue;
+            }
             BlockPos stand = standFor(level, centre, cell);
             if (stand == null) continue;
+            if (inDangerZone(body, stand)) {
+                zoned++;
+                continue;
+            }
+            zonedSpots = zoned;
             return new Spot(stand, waterFor(level, stand));
         }
+        zonedSpots = zoned;
         return null;
     }
 

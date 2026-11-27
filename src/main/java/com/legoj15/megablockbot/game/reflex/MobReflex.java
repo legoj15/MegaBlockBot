@@ -2,6 +2,7 @@ package com.legoj15.megablockbot.game.reflex;
 
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
+import com.legoj15.megablockbot.game.plan.BotMemory;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -53,6 +54,14 @@ final class MobReflex implements Reflex {
     private boolean retreated;
     /** The retreat in progress is to a spot the mobs cannot see, from a shooter that cannot be reached. */
     private boolean hiding;
+    /** The retreat in progress must lose the mob it runs from, not step back from it: its destination is far off. */
+    private boolean runningFar;
+    /** The retreat's first stop out of the threats' sight has been looked for (whether or not there was one). */
+    private boolean hiddenStopTried;
+    /** The leg under way is that first stop, not the retreat's destination. */
+    private boolean hiddenLeg;
+    /** Where the threats this hold ran from stood is already a danger zone in the body's memory. */
+    private boolean zoneNoted;
     private long retreatPickedAt;
     private int arrivals;
     private long corneredUntil;
@@ -68,6 +77,11 @@ final class MobReflex implements Reflex {
     @Override
     public String cause() {
         return cause;
+    }
+
+    @Override
+    public boolean retreating() {
+        return retreating;
     }
 
     @Override
@@ -117,6 +131,10 @@ final class MobReflex implements Reflex {
         retreating = false;
         retreated = false;
         hiding = false;
+        runningFar = false;
+        hiddenStopTried = false;
+        hiddenLeg = false;
+        zoneNoted = false;
         arrivals = 0;
         corneredUntil = 0;
         retreatSpot = null;
@@ -137,31 +155,44 @@ final class MobReflex implements Reflex {
         Threat blow = null;
         Threat strong = null;
         Threat shooter = null;
+        Threat unanswered = null;
         int attackers = 0;
+        boolean shield = Hands.carriesShield(body);
         for (Threat threat : threats) {
             if (threat.aboutToBlow() && blow == null) blow = threat;
             if (threat.mob().getMaxHealth() >= ReflexConstants.OUTCLASSED_MAX_HEALTH && strong == null) strong = threat;
             if (shooter == null && keepsHurtingFromAfar(ctx, threat)) shooter = threat;
+            // A threat that attacks from range and has the body in its sights or its reach is run from at once when
+            // the body has no shield to answer it with (issue 29): health is not asked, and the first sight is the
+            // moment, not the first wound. With a shield the behaviour is what it always was.
+            if (unanswered == null && !shield && Threats.attacksFromRange(threat.mob())
+                && (threat.targetsBody() || threat.distance() <= ReflexConstants.MELEE_TRIGGER)) unanswered = threat;
             if (threat.targetsBody() || threat.distance() <= ReflexConstants.MELEE_TRIGGER) attackers++;
         }
         boolean lowHealth = body.getHealth() <= ReflexConstants.RETREAT_HEALTH;
         boolean tooMany = attackers > ReflexConstants.MAX_ATTACKERS;
         boolean unarmedAndOutnumbered = Hands.bestWeapon(body) < 0
             && (attackers > ReflexConstants.FIST_MAX_ATTACKERS || body.getHealth() < ReflexConstants.FIST_MIN_HEALTH);
-        boolean outmatched = lowHealth || tooMany || blow != null || strong != null || unarmedAndOutnumbered || shooter != null;
-        boolean hide = shooter != null;
+        boolean outmatched = lowHealth || tooMany || blow != null || strong != null || unarmedAndOutnumbered || shooter != null
+            || unanswered != null;
+        boolean hide = shooter != null || unanswered != null;
+        // Only a threat the body cannot answer (rule 1) sends it far enough to lose the mob; a mob far stronger than a
+        // player is stepped back from as ever, and both are what a danger zone is written for.
+        boolean far = unanswered != null;
 
         // A fuse is burning close by and there is a shield: face the creeper with it up rather than run from the blast.
         if (blow != null && blow.fusing() && blow.distance() <= ReflexConstants.CREEPER_BRACE_RANGE && brace(ctx, blow)) return;
 
         if (outmatched && ctx.time >= corneredUntil) {
             String why = blow != null ? "a creeper about to explode" : strong != null ? "a mob far stronger than a player"
+                : unanswered != null ? describe(unanswered.mob()) + " with " + describeHeld(unanswered.mob()) + ": no shield"
                 : lowHealth ? "health " + String.format(Locale.ROOT, "%.1f", body.getHealth()) : tooMany ? attackers + " attackers"
                 : shooter != null ? describe(shooter.mob()) + " that it cannot reach keeps hurting it" : "no weapon";
-            if (retreat(ctx, threats, why, hide)) return;
+            if (retreat(ctx, threats, why, hide, far, unanswered != null ? unanswered : strong)) return;
         } else if (!outmatched) {
             retreating = false;
             hiding = false;
+            runningFar = false;
             arrivals = 0;
         }
         fight(ctx, threats);
@@ -351,14 +382,22 @@ final class MobReflex implements Reflex {
 
     /**
      * Walks away from the threats. Returns false when there is nowhere to go, which makes the body stand and fight.
-     * {@code hide} runs to a spot the threats cannot see rather than just far from them (a shooter that cannot be reached).
+     * {@code hide} runs to a spot the threats cannot see rather than just far from them (a shooter that cannot be
+     * reached, or one the body has no shield against). {@code far} is a retreat that must lose the mob it runs from
+     * rather than step back from it: the spot it looks for is past the mobs' own follow range. {@code runFrom} is the
+     * threat the retreat is for when it is one worth remembering (a shooter the body cannot answer, a mob far stronger
+     * than a player): where it stood becomes a danger zone ({@code BotMemory}, issue 29), so the body's plans do not
+     * walk it straight back.
      */
-    private boolean retreat(ReflexContext ctx, List<Threat> threats, String why, boolean hide) {
+    private boolean retreat(ReflexContext ctx, List<Threat> threats, String why, boolean hide, boolean far, Threat runFrom) {
         BotPlayer body = ctx.body;
         BotNavigator nav = ctx.nav;
-        if (hide != hiding) {
+        int distance = far ? (int) Math.ceil(Threats.retreatDistance(threats)) : ReflexConstants.RETREAT_DISTANCE;
+        if (hide != hiding || far != runningFar) {
             // The reason for running changed: the spot picked for the old one is no good for this one.
             hiding = hide;
+            runningFar = far;
+            hiddenStopTried = false;
             retreating = false;
             nav.stop();
         }
@@ -374,9 +413,18 @@ final class MobReflex implements Reflex {
                     }
                 }
                 case DONE -> {
-                    // Arrived, and still something is after the body: run again, a few times, then make a stand.
+                    // Arrived, and still something is after the body: run again, a few times, then make a stand. The
+                    // first stop out of the threats' sight is not a catch (it is the stop this retreat wanted), and
+                    // neither is an arrival with nothing after the body any more: that one ends the hold after the
+                    // retreat's quiet period instead.
                     retreating = false;
-                    if (++arrivals >= ReflexConstants.RETREAT_MAX_ARRIVALS) {
+                    if (hiddenLeg) {
+                        hiddenLeg = false;
+                    } else if (far) {
+                        // A run from a shooter the body cannot answer is never turned into a stand: a live run
+                        // counted its arrivals, called itself cornered with a pillager still behind it and fought
+                        // a crossbow with its fists until it died. It runs again, from where the shooter is now.
+                    } else if (stillAfterTheBody(threats) && ++arrivals >= ReflexConstants.RETREAT_MAX_ARRIVALS) {
                         corner(ctx, "caught up with " + arrivals + " times");
                         return false;
                     }
@@ -385,24 +433,50 @@ final class MobReflex implements Reflex {
             }
         }
         if (!retreating || ctx.time - retreatPickedAt >= ReflexConstants.RETREAT_REPICK_TICKS) {
-            BlockPos spot = hide ? RetreatSpots.pickHidden(ctx, threats, badSpots) : null;
-            // A hide that finds nowhere to hide runs to a far spot as any retreat does, and arrives as one does.
-            boolean hiddenSpot = spot != null;
-            if (spot == null) spot = RetreatSpots.pick(ctx, threats, badSpots);
+            BlockPos spot = null;
+            if (hide && !hiddenStopTried) {
+                // Out of their sight is the first stop of a far retreat, when one is near enough to be on the way.
+                spot = RetreatSpots.pickHidden(ctx, threats, badSpots);
+                hiddenStopTried = true;
+                hiddenLeg = spot != null;
+            }
+            if (spot == null) {
+                hiddenLeg = false;
+                spot = RetreatSpots.pick(ctx, threats, badSpots, distance);
+                // A far spot need not exist where the body is (a walled yard, an island): the nearest spot there is,
+                // as any retreat's.
+                if (spot == null && distance != ReflexConstants.RETREAT_DISTANCE) {
+                    spot = RetreatSpots.pick(ctx, threats, badSpots, ReflexConstants.RETREAT_DISTANCE);
+                }
+            }
             if (spot == null) {
                 corner(ctx, "no spot to run to");
                 return false;
             }
             // A far spot is arrived at when near it; a hiding place only when the body stands in it (a step short may be in sight).
-            ctx.goTo(spot, hiddenSpot ? 0 : ReflexConstants.RETREAT_ARRIVE_RADIUS);
+            ctx.goTo(spot, hiddenLeg ? 0 : ReflexConstants.RETREAT_ARRIVE_RADIUS);
             retreating = true;
             retreatSpot = spot;
             retreatPickedAt = ctx.time;
+            if (runFrom != null && !zoneNoted) {
+                zoneNoted = true;
+                BotMemory.of(body.getUUID()).noteDangerZone(ctx.level.dimension().location().toString(),
+                    runFrom.mob().blockPosition(), Threats.retreatDistance(threats),
+                    ctx.time + ReflexConstants.DANGER_ZONE_TICKS, why);
+            }
         }
         lowerShield(body);
         retreated = true;
         cause = "retreating from " + describe(threats.get(0).mob()) + " (" + why + ")";
         return true;
+    }
+
+    /** Whether any threat still has the body as its target, or stands inside an arm's reach of it. */
+    private static boolean stillAfterTheBody(List<Threat> threats) {
+        for (Threat threat : threats) {
+            if (threat.targetsBody() || threat.distance() <= ReflexConstants.MELEE_TRIGGER) return true;
+        }
+        return false;
     }
 
     private void corner(ReflexContext ctx, String why) {
@@ -454,5 +528,11 @@ final class MobReflex implements Reflex {
 
     private static String describe(Mob mob) {
         return mob.getType().getDescription().getString().toLowerCase(Locale.ROOT);
+    }
+
+    /** What the mob holds, for the cause line of a retreat from a shooter: "a crossbow", "nothing in its hands". */
+    private static String describeHeld(Mob mob) {
+        ItemStack held = mob.getMainHandItem();
+        return held.isEmpty() ? "nothing in its hands" : held.getHoverName().getString().toLowerCase(Locale.ROOT);
     }
 }

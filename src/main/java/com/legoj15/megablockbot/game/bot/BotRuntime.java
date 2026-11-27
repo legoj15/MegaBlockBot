@@ -28,6 +28,7 @@ import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.body.DeathRecord;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
 import com.legoj15.megablockbot.game.plan.BotMemory;
+import com.legoj15.megablockbot.game.reflex.ReflexConstants;
 import com.legoj15.megablockbot.game.plan.SnapshotCollector;
 import com.legoj15.megablockbot.game.task.CraftTask;
 import com.legoj15.megablockbot.game.task.FishTask;
@@ -234,7 +235,13 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
                 MegaBlockBot.LOGGER.warn("A task could not say what it is doing", e);
             }
         }
-        return BotSpeech.status(view, lastResult == null ? null : BotSpeech.result(lastResult), onStep, progress);
+        String text = BotSpeech.status(view, lastResult == null ? null : BotSpeech.result(lastResult), onStep, progress);
+        // The live danger zones beside the reflex line: they are why a plan goes round a place (issue 29).
+        if (body != null) {
+            String zones = BotMemory.of(body.getUUID()).liveZonePhrase(body.level().getGameTime());
+            if (!zones.isEmpty()) text = text + " Danger zones: " + zones + '.';
+        }
+        return text;
     }
 
     /** True while a goal is running or paused. */
@@ -562,6 +569,23 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     @Override
     public Profile profile() {
         return profile;
+    }
+
+    /**
+     * The executor was held past its preemption limit (issue 29): where the body stands becomes a danger zone in its
+     * memory, as wide as a hostile mob's reach, so the replan the executor makes of it takes another target instead of
+     * walking the body back into the same hold.
+     */
+    @Override
+    public void noteDangerZone(BotPlayer current, String reason) {
+        if (current == null) return;
+        double radius = ReflexConstants.DEFAULT_FOLLOW_RANGE + ReflexConstants.FOLLOW_RANGE_MARGIN;
+        long now = current.level().getGameTime();
+        BotMemory.of(current.getUUID()).noteDangerZone(current.level().dimension().location().toString(),
+            current.blockPosition(), radius, now + ReflexConstants.DANGER_ZONE_TICKS, reason);
+        MegaBlockBot.LOGGER.info("{}: {} (a danger zone {} blocks wide is noted around {} for {} ticks)",
+            current.getGameProfile().getName(), reason, (int) radius, current.blockPosition().toShortString(),
+            ReflexConstants.DANGER_ZONE_TICKS);
     }
 
     /** Sets the body's profile (the owner's word, saved with the brain); the default stays what it was. */

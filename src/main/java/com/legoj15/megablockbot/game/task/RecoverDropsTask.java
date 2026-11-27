@@ -1,5 +1,6 @@
 package com.legoj15.megablockbot.game.task;
 
+import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.plan.NodeSpec;
 import com.legoj15.megablockbot.core.task.TickResult;
@@ -16,8 +17,10 @@ import net.minecraft.world.phys.AABB;
  *
  * <p>Parameters (written by the executor): {@code dimension} and {@code drops}, the positions as
  * {@code x,y,z} joined with {@code ;}. A position whose drops cannot be got at is skipped and so is every position in
- * another dimension (dimension travel is not built). It never fails the goal: the node is best-effort, a death's items
- * are recovered if they can be and the plan goes on without them if not, so this task always completes.
+ * another dimension (dimension travel is not built), and every position inside a live danger zone (issue 29): the zone
+ * is what the body was driven off or killed there for, and it is not walked back into for a stack that lies where the
+ * killer still stands. It never fails the goal: the node is best-effort, a death's items are recovered if they can be
+ * and the plan goes on without them if not, so this task always completes.
  *
  * <p><b>Where a drop lies now, not where it was recorded.</b> Items roll, fall and float: by the time the body is
  * back, a drop can lie a block or two from where the death record holds it, and many blocks lower when it fell into a
@@ -30,7 +33,7 @@ import net.minecraft.world.phys.AABB;
  * <p>No checkpoint: the executor keys checkpoints by node identity, which two recover nodes of different deaths share,
  * and a restarted recovery that finds the places already emptied just walks on.
  */
-final class RecoverDropsTask extends BodyTask {
+public final class RecoverDropsTask extends BodyTask {
     /** Items fall and roll, and the pickup range is a block around the body: get this close, not onto the block. */
     private static final int ARRIVAL_RADIUS = 1;
     /** How far around a recorded position its drops are looked for, in blocks: items roll and float sideways. */
@@ -45,7 +48,8 @@ final class RecoverDropsTask extends BodyTask {
     private boolean arrived;
     private final DropPickup pickup = new DropPickup();
 
-    RecoverDropsTask(NodeSpec leaf) {
+    /** Public for the one GameTest that drives a recover node on its own ({@code ReflexGameTests}). */
+    public RecoverDropsTask(NodeSpec leaf) {
         this.dimension = required(leaf, "dimension");
         String drops = leaf.params().getOrDefault("drops", "");
         for (String text : drops.split(";")) {
@@ -65,6 +69,7 @@ final class RecoverDropsTask extends BodyTask {
             next = positions.size();
             return;
         }
+        skipZoned(body);
         walkToNext(body);
     }
 
@@ -72,7 +77,24 @@ final class RecoverDropsTask extends BodyTask {
     protected void resumeWork(BotPlayer body) {
         // Whatever the body was doing at a position, it starts that position again: the items may have moved, and
         // what was out of reach may not be any more.
+        skipZoned(body);
         walkToNext(body);
+    }
+
+    /**
+     * Drops the recorded positions that lie inside a live danger zone (issue 29): the body does not walk back to where
+     * it was killed for what it dropped there, and the position is skipped exactly as one it cannot reach is. The line
+     * is logged because the task itself says nothing: it completes either way.
+     */
+    private void skipZoned(BotPlayer body) {
+        for (int i = next; i < positions.size(); i++) {
+            BlockPos at = positions.get(i);
+            if (!inDangerZone(body, at)) continue;
+            MegaBlockBot.LOGGER.info("{}: skipping the drops at {}; they lie inside a danger zone this body keeps out of",
+                body.getGameProfile().getName(), at.toShortString());
+            positions.remove(i);
+            i--;
+        }
     }
 
     private void walkToNext(BotPlayer body) {
