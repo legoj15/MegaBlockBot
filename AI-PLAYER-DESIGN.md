@@ -237,7 +237,9 @@ chat ──► Language layer (LLM, tool calls) ──► typed Goal
   tells its owner if they are online, and the refusal above keeps it from being spawned beside
   that player for as long as the server knows them (a level 2 source can still spawn it while they
   are offline, and it gives way again at their next join; while they are online `spawn` refuses
-  the name as taken). `realPlayerJoiningTakesTheNameOfABody` joins a fake player through
+  the name as taken). Left as it is: in chat the player's "joined" line shows before the body's
+  "left" line, because the loader's login hook runs after vanilla has announced the join.
+  `realPlayerJoiningTakesTheNameOfABody` joins a fake player through
   `placeNewPlayer`.
 - Chunk loading: keeps a ticket around itself only while it has an active goal. A logged-in body
   loads chunks like any player (view distance 6), so the manager despawns a body whose brain does

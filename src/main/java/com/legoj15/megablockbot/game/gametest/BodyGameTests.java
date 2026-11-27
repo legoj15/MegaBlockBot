@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.function.Supplier;
 import javax.annotation.Nullable;
@@ -387,6 +388,84 @@ public final class BodyGameTests {
             helper.assertTrue(kept != null && kept.stayLoaded(), "the body with a goal was not recorded as wanting to stay loaded after it gave up: " + kept);
             helper.assertTrue(dropped != null && !dropped.stayLoaded(), "the body with no goal was recorded as wanting to stay loaded: " + dropped);
             goal.pass();
+        });
+    }
+
+    /**
+     * A respawn that fails halfway (the replacement is built, {@code restoreFrom} has copied the brain onto it, and
+     * then vanilla or a mod's event handler throws before the replacement is listed) must not cost the body its
+     * brain: the manager retries on a later tick, and the body that then stands under the name must carry the same
+     * brain, while the one that died has let go of it. The first restore of this body is made to throw after the copy
+     * ({@code failRestoresOf}), which nothing vanilla does on demand.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
+    public static void brainIsNotLostToARespawnThatThrowsHalfway(GameTestHelper helper) {
+        floor(helper);
+        Supplier<BotBrain> factory = CounterBrain::new;
+        Rig rig = Rig.spawn(helper, "halfway", new Vec3(8.5, FLOOR_TOP, 8.5), 0.0F, 100, factory);
+        BotPlayer[] died = new BotPlayer[1];
+        CounterBrain[] brain = new CounterBrain[1];
+        int[] tick = {0};
+        rig.onEachTick(() -> {
+            int t = ++tick[0];
+            if (t == 3) {
+                BotPlayer body = rig.body();
+                died[0] = body;
+                brain[0] = (CounterBrain) body.brain();
+                brain[0].value = 42; // a goal in progress
+                rig.manager().failRestoresOf(rig.id(), 1);
+                body.hurt(helper.getLevel().damageSources().genericKill(), 1000.0F);
+                helper.assertTrue(body.isDeadOrDying(), "setup: a lethal damage source did not kill it");
+                return;
+            }
+            if (t <= 3) return;
+            BotPlayer now = rig.body();
+            if (now == died[0]) {
+                helper.assertTrue(t < 20, "still the dead body " + (t - 3) + " ticks after dying: the respawn was never retried");
+                return;
+            }
+            helper.assertTrue(now.brain() == brain[0], "the body that stands after the retry has brain " + now.brain()
+                + ", not the one whose goal was in progress");
+            helper.assertTrue(((CounterBrain) now.brain()).value == 42, "the brain lost its state across the failed respawn");
+            helper.assertTrue(died[0].brain() == BotBrain.NONE, "the body that died still holds the brain");
+            rig.pass();
+        });
+    }
+
+    /**
+     * The same throw on every attempt, until the manager gives up after {@code MAX_RESPAWN_FAILURES} and despawns the
+     * body: the give-up logout must save the brain the body had, so a goal in progress comes back with it. Where
+     * {@code bodyThatGaveUpRespawningStillComesBackWithTheServer} models the give-up with failures that do not throw,
+     * this one uses the real halfway kind.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
+    public static void brainIsNotLostToRespawnsThatThrowUntilTheGiveUp(GameTestHelper helper) {
+        floor(helper);
+        Supplier<BotBrain> factory = CounterBrain::new;
+        Rig rig = Rig.spawn(helper, "thrown", new Vec3(8.5, FLOOR_TOP, 8.5), 0.0F, 100, factory);
+        Vec3[] where = new Vec3[1];
+        int[] tick = {0};
+        rig.onEachTick(() -> {
+            int t = ++tick[0];
+            if (t == 3) {
+                BotPlayer body = rig.body();
+                ((CounterBrain) body.brain()).value = 42; // a goal in progress
+                where[0] = body.position();
+                rig.manager().failRestoresOf(rig.id(), BodyConstants.MAX_RESPAWN_FAILURES);
+                body.hurt(helper.getLevel().damageSources().genericKill(), 1000.0F);
+                helper.assertTrue(body.isDeadOrDying(), "setup: a lethal damage source did not kill it");
+                return;
+            }
+            if (t <= 3) return;
+            if (rig.isLoggedIn()) {
+                helper.assertTrue(t < 20, "still logged in " + (t - 3) + " ticks after dying: the respawns were not given up on");
+                return;
+            }
+            BotPlayer back = rig.respawn(where[0]);
+            helper.assertTrue(back.brain() instanceof CounterBrain, "the body came back with brain " + back.brain());
+            int value = ((CounterBrain) back.brain()).value;
+            helper.assertTrue(value == 42, "the goal in progress was lost to the failed respawns: the brain came back with " + value);
+            rig.pass();
         });
     }
 
@@ -792,6 +871,82 @@ public final class BodyGameTests {
     }
 
     /**
+     * A body spawned under a real player's name (an operator may) must not take the name's place in the profile
+     * cache: {@code placeNewPlayer} writes the body's own profile under the name, and from then on the name means the
+     * body, which defeats the refusal above (the player reads as nobody while they are offline) and every other
+     * by-name lookup of that player finds the body instead. The manager puts the player's profile back once the body
+     * is placed. The GameTest server has no cache of its own, so the test supplies one and, with it, plays the
+     * server's part: what {@code placeNewPlayer} writes into it once the body is placed.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 40)
+    public static void aBodyNeverTakesARealPlayersPlaceInTheProfileCache(GameTestHelper helper) {
+        floor(helper);
+        ServerLevel level = helper.getLevel();
+        MinecraftServer server = level.getServer();
+        ServerPlayer owner = playerInArena(helper, "gt_placer");
+        Rig rig = Rig.named(helper, "placed", 40);
+        helper.runAfterDelay(2, rig.guard(() -> {
+            Path cacheFile = null;
+            try {
+                cacheFile = Files.createTempFile("megablockbot-gametest-usercache", ".json");
+                GameProfileCache cache = new GameProfileCache((names, callback) -> {}, cacheFile.toFile());
+                UUID playerId = UUID.randomUUID();
+                cache.add(new GameProfile(playerId, rig.name())); // the player, as the server knows them
+                // The server's part, played whenever the cache is asked for: once the body stands under the name,
+                // the body's own profile is what the cache holds under it, as placeNewPlayer's write leaves a cache
+                // the server has. Written once; the restore under test, if it runs, has already put the player's
+                // back by the next asking.
+                boolean[] bodyPlaced = {false};
+                boolean[] written = {false};
+                Supplier<GameProfileCache> supplied = () -> {
+                    if (rig.isLoggedIn()) bodyPlaced[0] = true;
+                    if (bodyPlaced[0] && !written[0]) {
+                        written[0] = true;
+                        cache.add(new GameProfile(BodyManager.uuidFor(rig.name()), rig.name()));
+                    }
+                    return cache;
+                };
+                rig.manager().useProfileCache(supplied);
+                try {
+                    helper.assertTrue(run(server, source(server, level, 2, owner, new Feedback()), "aiplayer spawn " + rig.name()) == 1 && rig.isLoggedIn(),
+                        "an operator-level source was refused the name of a player the server knows");
+                    supplied.get(); // what the cache holds now that the body is placed
+                    GameProfileCache.GameProfileInfo underName = cache.profilesByName.get(rig.name().toLowerCase(Locale.ROOT));
+                    helper.assertTrue(underName != null && playerId.equals(underName.getProfile().getId()),
+                        "with the body placed, the profile cache maps the name to "
+                            + (underName == null ? "nobody" : underName.getProfile().getId()) + ", not the player's " + playerId);
+                    rig.manager().despawn(rig.body());
+                    underName = cache.profilesByName.get(rig.name().toLowerCase(Locale.ROOT));
+                    helper.assertTrue(underName != null && playerId.equals(underName.getProfile().getId()),
+                        "after the despawn, the profile cache maps the name to "
+                            + (underName == null ? "nobody" : underName.getProfile().getId()) + ", not the player's " + playerId);
+                    boolean refused = false;
+                    try {
+                        rig.manager().checkMaySpawn(source(server, level, 0, owner), rig.name());
+                    } catch (BodyException e) {
+                        refused = true;
+                    }
+                    helper.assertTrue(refused, "an owner without operator permission was allowed the name of a player the server knows");
+                    rig.pass();
+                } finally {
+                    rig.manager().useProfileCache(null);
+                }
+            } catch (IOException e) {
+                throw new IllegalStateException(e);
+            } finally {
+                rig.manager().useProfileCache(null);
+                if (cacheFile != null) {
+                    try {
+                        Files.deleteIfExists(cacheFile);
+                    } catch (IOException ignored) {
+                        // A leftover file in the temp directory is harmless.
+                    }
+                }
+            }
+        }));
+    }
+
+    /**
      * Vanilla lets the newest login win a duplicate (it disconnects the older session of the same profile), and a real
      * player must never be shut out of their own name; a body has its own UUID, so vanilla's rule never meets it. The body
      * gives way instead: it is logged out with its record kept, its owner is told, and nothing but the joining player
@@ -1173,6 +1328,7 @@ public final class BodyGameTests {
         void cleanup() {
             for (Rig companion : companions) companion.cleanup();
             manager.failRespawnsOf(id, false);
+            manager.failRestoresOf(id, 0);
             BotPlayer current = manager.get(id);
             if (current != null) manager.despawn(current);
             try {

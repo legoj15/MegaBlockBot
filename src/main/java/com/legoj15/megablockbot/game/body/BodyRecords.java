@@ -25,8 +25,9 @@ import net.minecraft.world.level.saveddata.SavedData;
  * <p>Schema-versioned. A record that does not decode is skipped and logged; it never fails the whole file. A file
  * written under a schema this build does not know is not read and never overwritten: the record set is read-only
  * for the session (see {@link #setDirty(boolean)}), so an older build cannot destroy what a newer one wrote. A file
- * with no schema tag at all is one of those: schema 1 is the only form this mod has written, and it always has the
- * tag, so there is no older form for the tag to be missing from, and what lacks it was not written by this mod.
+ * with no schema tag at all (or one that is not a number) is one of those: schema 1 is the only form this mod has
+ * written, and it always has the tag, so there is no older form for the tag to be missing from, and what lacks it
+ * was not written by this mod.
  */
 final class BodyRecords extends SavedData {
     static final String ID = "megablockbot_bodies";
@@ -74,9 +75,11 @@ final class BodyRecords extends SavedData {
     private final Map<UUID, Entry> entries = new LinkedHashMap<>();
     // Set when the file on disk has a schema this build does not know; then nothing is ever written back.
     private boolean readOnly;
-    // The schema the file said, or null when it said none (no tag, or one that is not a number).
+    // The schema the file said, or null when it said none; a tag that is present but is not a number is told apart
+    // from no tag at all, since something wrote the file either way and the log should not call it tagless.
     @Nullable
     private Integer foundSchema;
+    private boolean schemaTagNotANumber;
     private boolean reported;
 
     BodyRecords() {}
@@ -87,7 +90,8 @@ final class BodyRecords extends SavedData {
             // Here and not in load(): the file's name is known here, and the storage loads it once per session.
             records.reported = true;
             Path file = server.getWorldPath(LevelResource.ROOT).resolve("data").resolve(ID + ".dat").normalize();
-            String found = records.foundSchema == null ? "no schema tag" : "schema " + records.foundSchema;
+            String found = records.schemaTagNotANumber ? "a schema tag that is not a number"
+                : records.foundSchema == null ? "no schema tag" : "schema " + records.foundSchema;
             MegaBlockBot.LOGGER.error("Body record file {} has {}, but this build reads schema {}. It is left untouched: "
                 + "no bodies are restored from it and nothing is written back for the rest of this session", file, found, SCHEMA);
         }
@@ -96,8 +100,13 @@ final class BodyRecords extends SavedData {
 
     private static BodyRecords load(CompoundTag tag, HolderLookup.Provider registries) {
         BodyRecords records = new BodyRecords();
-        // getInt answers 0 for a missing tag, which would read as "schema 0" in the log: ask whether there is one.
-        Integer schema = tag.contains("schema", Tag.TAG_ANY_NUMERIC) ? tag.getInt("schema") : null;
+        // getInt answers 0 for a missing tag, which would read as "schema 0" in the log: ask whether there is one,
+        // and whether it is a number at all.
+        Integer schema = null;
+        if (tag.contains("schema")) {
+            if (tag.contains("schema", Tag.TAG_ANY_NUMERIC)) schema = tag.getInt("schema");
+            else records.schemaTagNotANumber = true;
+        }
         if (schema == null || schema != SCHEMA) {
             // Reading a schema we do not know as if it were ours could misread it, and saving our own over it would
             // destroy it: start empty and keep the file as it is.

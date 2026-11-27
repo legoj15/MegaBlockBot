@@ -37,7 +37,7 @@ public final class BodyListener extends ServerGamePacketListenerImpl {
      * and let the connection report the disconnect back; this connection has neither, so the logout is done directly,
      * through the same {@code onDisconnect} a real player's connection ends in. That is what saves the body. Except in
      * the server's final stop, where the manager asks for the body to stay listed
-     * ({@link BodyManager#leavesLoggedInAtShutdown}).
+     * ({@link BodyManager#keepLoggedInAtShutdown}).
      */
     @Override
     public void disconnect(DisconnectionDetails details) {
@@ -46,7 +46,7 @@ public final class BodyListener extends ServerGamePacketListenerImpl {
                 if (player.hasDisconnected()) return;
                 // Asked without creating one: a manager made here for a server that has stopped would never be dropped.
                 BodyManager manager = BodyManager.existing(server);
-                if (player instanceof BotPlayer body && manager != null && manager.leavesLoggedInAtShutdown(body)) return;
+                if (player instanceof BotPlayer body && manager != null && manager.keepLoggedInAtShutdown(body)) return;
                 onDisconnect(details);
             });
         }

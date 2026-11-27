@@ -251,7 +251,16 @@ public class BotPlayer extends ServerPlayer
         return connection.player != this;
     }
 
-    /** The new instance inherits the old one's owner and brain; the brain hears about it on the new body's first tick. */
+    /**
+     * The new instance inherits the old one's owner and brain; the brain hears about it on the new body's first tick.
+     * The brain is copied, not taken: {@code PlayerList.respawn} runs this before it lists the replacement, so a
+     * throw in between (vanilla's, or a mod's event handler) discards the replacement together with the brain, had it
+     * been taken here: the manager's next attempt would copy {@link BotBrain#NONE}, and after
+     * {@link BodyConstants#MAX_RESPAWN_FAILURES} the give-up logout would save an empty one. The body that died holds
+     * the brain until the manager sees the replacement listed ({@code BodyManager.processRespawns}), which is also
+     * why the one brain is never ticked or saved through both meanwhile: a dead body's own tick and the record
+     * refresh skip it, and a replacement that was never listed is ticked and logged out by nobody.
+     */
     @Override
     public void restoreFrom(ServerPlayer old, boolean keepEverything) {
         super.restoreFrom(old, keepEverything);
@@ -260,8 +269,11 @@ public class BotPlayer extends ServerPlayer
             ownerName = previous.ownerName;
             brainFactory = previous.brainFactory;
             brain = previous.brain;
-            previous.brain = BotBrain.NONE;
             respawnNoticePending = true;
+            // Where a respawn stands when it fails halfway: the replacement is built and not yet listed. A test can
+            // make the next few restores of this body throw here (BodyManager.failRestoresOf); nothing in vanilla
+            // fails on demand.
+            BodyManager.of(getServer()).afterRestoreCopy(previous);
         }
     }
 

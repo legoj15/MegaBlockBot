@@ -65,6 +65,9 @@ public final class BodyManager {
     private BooleanSupplier serverStopped;
     // Bodies whose respawn a test makes fail without a throw (vanilla gives no way to), by UUID.
     private final Set<UUID> respawnsFailing = new HashSet<>();
+    // Bodies whose next so many restores a test makes throw after the copy (the halfway of a failed respawn: the
+    // replacement is built, restoreFrom has run, the listing has not), by UUID, with what is left of the count.
+    private final Map<UUID, Integer> restoresFailing = new HashMap<>();
     @Nullable
     private BodyRecords records;
     private long ticks;
@@ -146,10 +149,20 @@ public final class BodyManager {
      * makes a profile up). Spawning a body puts it in the cache too, under the body's own UUID; that is not a player.
      */
     private boolean isKnownPlayerName(String name) {
+        return knownPlayerProfile(name) != null;
+    }
+
+    /**
+     * The profile of the player the cache holds under {@code name}, or null when it holds none or holds the body's
+     * own. Asked of the cache's contents for the reason {@link #isKnownPlayerName} gives; {@code spawn} keeps this to
+     * put the name back the way it found it.
+     */
+    @Nullable
+    private GameProfile knownPlayerProfile(String name) {
         GameProfileCache cache = profileCache.get();
-        if (cache == null) return false;
+        if (cache == null) return null;
         GameProfileCache.GameProfileInfo info = cache.profilesByName.get(name.toLowerCase(Locale.ROOT));
-        return info != null && !info.getProfile().getId().equals(uuidFor(name));
+        return info != null && !info.getProfile().getId().equals(uuidFor(name)) ? info.getProfile() : null;
     }
 
     /**
@@ -170,7 +183,7 @@ public final class BodyManager {
     }
 
     /**
-     * Where the manager reads whether the server is in its final stop (see {@link #leavesLoggedInAtShutdown}); null
+     * Where the manager reads whether the server is in its final stop (see {@link #keepLoggedInAtShutdown}); null
      * restores the server's own answer. A test hook, used like {@link #useHardcore}.
      */
     public void useServerStopped(@Nullable BooleanSupplier stopped) {
@@ -185,6 +198,27 @@ public final class BodyManager {
     public void failRespawnsOf(UUID id, boolean fail) {
         if (fail) respawnsFailing.add(id);
         else respawnsFailing.remove(id);
+    }
+
+    /**
+     * Makes the next {@code times} restores of the body with this UUID throw after the brain has been copied onto
+     * the replacement, which is where a throw from vanilla or a mod's event handler leaves a respawn halfway; the
+     * manager then retries it and finally gives up on it. A test hook in the style of {@link #failRespawnsOf}; a
+     * {@code times} of zero stops it.
+     */
+    public void failRestoresOf(UUID id, int times) {
+        if (times > 0) restoresFailing.put(id, times);
+        else restoresFailing.remove(id);
+    }
+
+    /** At the end of every restore between two bodies of one id; throws while a test has armed {@link #failRestoresOf}. */
+    void afterRestoreCopy(BotPlayer previous) {
+        Integer armed = restoresFailing.get(previous.getUUID());
+        if (armed == null) return;
+        if (armed <= 1) restoresFailing.remove(previous.getUUID());
+        else restoresFailing.put(previous.getUUID(), armed - 1);
+        throw new IllegalStateException("test hook: the restore of body " + previous.getGameProfile().getName()
+            + " fails halfway (after the copy, before the listing)");
     }
 
     /** What the body record says about one body, for tests and for whatever reports it. */
@@ -277,6 +311,10 @@ public final class BodyManager {
         }
 
         UUID id = uuidFor(name);
+        // The name may be a real player's (an operator is not held back from spawning a body under it), and
+        // placeNewPlayer is about to put the body's own profile into the cache under that name; the player's is put
+        // back once the body is placed, below, so the name keeps meaning them.
+        GameProfile playersProfile = knownPlayerProfile(name);
         boolean hasSavedData = hasSavedData(id);
         GameProfile profile = new GameProfile(id, name);
         BotPlayer body = new BotPlayer(server, level, profile, clientInformation(),
@@ -292,6 +330,10 @@ public final class BodyManager {
         if (!hasSavedData && body.level() != level) {
             body.teleportTo(level, pos.x, pos.y, pos.z, yaw, 0.0F);
         }
+        // The body is placed, so the cache now holds its profile under the name; the player's goes back over it. The
+        // supplier is asked for again rather than the cache held from above, so the write lands in the cache as it
+        // stands now that the body is placed (the supplier answers for the server's cache, or a test's stand-in).
+        if (playersProfile != null) profileCache.get().add(playersProfile);
 
         idleTicks.remove(id);
         records().put(entryFor(body, body.brain().wantsToStayLoaded(), false));
@@ -320,8 +362,9 @@ public final class BodyManager {
      * Logs the body out and records it as not wanting to stay loaded: whoever despawns a body does not want it back
      * at the next server start, whatever its goal says, unless {@code keepsGoal}: the server's own decision to take a
      * body out (its respawn kept failing) is not its owner's, and a body with a goal then still comes back with the
-     * server. What it wanted is read from the brain and from the record, since a respawn that failed halfway has
-     * already moved the brain to a replacement that never came. {@code died} marks the record as that of a body that
+     * server. What it wanted is read from the brain and from the record, so a want the brain has since dropped is
+     * not lost (the brain itself is still the body's even after a respawn that failed halfway; it is copied, not
+     * taken). {@code died} marks the record as that of a body that
      * died in a hardcore world, which is never spawned again; a body found dead in one is marked whoever asked, since
      * a despawn in the tick it died in comes before the end-of-tick respawn that would have retired it.
      */
@@ -444,21 +487,21 @@ public final class BodyManager {
     }
 
     /**
-     * A body's disconnect arrives; true when it is not to be carried out because the server is in its final stop.
-     * That is how a crash reaches the bodies: the stopping hook above never ran, so {@code PlayerList.removeAll} meets
-     * them, and each disconnect that removed its body at once made the walk jump over the entry after it, a real
-     * player's perhaps. In its stop the server has already saved every player ({@code saveAll} comes first), and the
-     * bodies go with the process like a real player whose channel has not closed yet, still listed. What a logout would
-     * have brought up to date in the record is done here instead, since the level save that follows writes the file.
-     * {@code isStopped} is set before {@code stopServer} on every path; on a normal stop the hook above has already
-     * taken the bodies out by then, so this meets none.
+     * Keeps a body listed through the server's final stop instead of carrying out its disconnect: returns true when
+     * the disconnect is not to be run. That is how a crash reaches the bodies: the stopping hook above never ran, so
+     * {@code PlayerList.removeAll} meets them, and each disconnect that removed its body at once made the walk jump
+     * over the entry after it, a real player's perhaps. In its stop the server has already saved every player
+     * ({@code saveAll} comes first), and the bodies go with the process like a real player whose channel has not
+     * closed yet, still listed. What a logout would have brought up to date in the record is done here instead, since
+     * the level save that follows writes the file. {@code isStopped} is set before {@code stopServer} on every path;
+     * on a normal stop the hook above has already taken the bodies out by then, so this meets none.
      */
-    boolean leavesLoggedInAtShutdown(BotPlayer body) {
+    boolean keepLoggedInAtShutdown(BotPlayer body) {
         if (!serverStopped.getAsBoolean()) return false;
         try {
             if (!body.isDeadOrDying()) {
-                // As in logOut: a respawn that failed halfway left this body a brain that wants nothing, and what it
-                // wanted is then only in the record.
+                // As in logOut: the record may know a want the brain has since dropped, and a brain that throws here
+                // (the crash may be its own doing) must not cost the body its flag.
                 BodyRecords.Entry before = records().get(body.getUUID());
                 boolean stay = body.brain().wantsToStayLoaded() || (before != null && before.stayLoaded());
                 records().put(entryFor(body, stay, false));
@@ -536,6 +579,15 @@ public final class BodyManager {
             if (done) {
                 pendingRespawns.remove(id);
                 BotPlayer replacement = get(id);
+                if (replacement != null && replacement != body) {
+                    // The respawn happened: another instance stands under the id. restoreFrom only copied the brain
+                    // onto the replacement, so the hand-over ends here: the body that died lets go of it. While
+                    // both held it, nothing ticked or saved the one brain twice: the copy and this are one
+                    // synchronous step of this tick, and after an attempt that threw in between, the body that died
+                    // is dead (its own tick and the record refresh skip a dead body) while the replacement never
+                    // made it into the player list, so nothing ticks or logs that one out either.
+                    body.setBrain(BotBrain.NONE);
+                }
                 if (replacement != null && !replacement.hasDisconnected()) {
                     records().put(entryFor(replacement, replacement.brain().wantsToStayLoaded(), false));
                 }
