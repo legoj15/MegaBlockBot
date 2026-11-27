@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -961,16 +962,24 @@ public final class SolverPlanner implements Planner {
             TreeMap<ItemKey, Long> outer = new TreeMap<>(reserved);
             TreeMap<ItemKey, Long> mine = new TreeMap<>();
             try {
+                // A slot is one unit to hold, so an item is asked for once, for as many units as slots name it. What a slot
+                // wears already is among what the snapshot counts, so the count is of every slot naming the item, worn
+                // or not: asking slot by slot for "one" would find the first slot's unit and make no second.
+                Map<ItemKey, Integer> asked = new LinkedHashMap<>();
+                Set<ItemKey> unmet = new TreeSet<>();
                 for (Map.Entry<EquipSlot, ItemKey> slot : new TreeMap<>(goal.slots()).entrySet()) {
-                    if (slot.getValue().equals(snapshot.equipped().get(slot.getKey()))) continue;
-                    Step step = itemPlan(slot.getValue(), 1);
+                    asked.merge(slot.getValue(), 1, Integer::sum);
+                    if (!slot.getValue().equals(snapshot.equipped().get(slot.getKey()))) unmet.add(slot.getValue());
+                }
+                for (Map.Entry<ItemKey, Integer> ask : asked.entrySet()) {
+                    if (!unmet.contains(ask.getKey())) continue; // every slot that names it wears it
+                    Step step = itemPlan(ask.getKey(), ask.getValue());
                     if (step.failure() != null) return step;
                     nodes.addAll(step.nodes());
-                    // One unit for this slot, counted with the earlier slots' rather than instead of them. A unit an
-                    // enclosing equip goal already holds is not this goal's to count.
-                    if (outer.containsKey(slot.getValue())) continue;
-                    mine.merge(slot.getValue(), 1L, Long::sum);
-                    reserved.merge(slot.getValue(), 1L, Long::sum);
+                    // A unit an enclosing equip goal already holds is not this goal's to count.
+                    if (outer.containsKey(ask.getKey())) continue;
+                    mine.merge(ask.getKey(), (long) ask.getValue(), Long::sum);
+                    reserved.merge(ask.getKey(), (long) ask.getValue(), Long::sum);
                 }
                 mine.forEach((item, count) -> relied.merge(item, count, (a, b) -> Math.max(a, b)));
             } finally {

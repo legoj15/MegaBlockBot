@@ -2041,6 +2041,18 @@ final class SolverPlannerTest {
         assertNull(shelved.executed().failure(), shelved.executed().failure() + " after " + shelved.executed().ran());
         assertTrue(shelved.executed().stock().getOrDefault(OAK_PLANKS, 0) >= 2,
                 "ended with " + shelved.executed().stock() + " after " + shelved.executed().ran());
+
+        // With no container the two are made: a wooden pickaxe is one to a craft, and the first does not stand for both.
+        Goal.Equip tools = new Goal.Equip(Map.of(EquipSlot.MAINHAND, WOODEN_PICKAXE, EquipSlot.OFFHAND, WOODEN_PICKAXE));
+        Executed made = run(planned(planner(), request(tools, EMPTY, Exclusions.NONE)), Map.of(), Map.of());
+        assertNull(made.failure(), made.failure() + " after " + made.ran());
+        assertTrue(made.stock().getOrDefault(WOODEN_PICKAXE, 0) >= 2, "ended with " + made.stock() + " after " + made.ran());
+
+        // One is in the off hand already, and the snapshot counts what is worn: one more is made for the main hand.
+        Snapshot oneWorn = Snapshot.builder().gameTime(0).item(WOODEN_PICKAXE, 1).equip(EquipSlot.OFFHAND, WOODEN_PICKAXE).build();
+        Executed second = run(planned(planner(), request(tools, oneWorn, Exclusions.NONE)), Map.of(WOODEN_PICKAXE, 1), Map.of());
+        assertNull(second.failure(), second.failure() + " after " + second.ran());
+        assertTrue(second.stock().getOrDefault(WOODEN_PICKAXE, 0) >= 2, "ended with " + second.stock() + " after " + second.ran());
     }
 
     @Test

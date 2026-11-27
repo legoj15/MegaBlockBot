@@ -307,8 +307,10 @@ the menu and closes it, and moves nothing.
   (`SupplyChests.stand(level, memory, pos)`, as `ContainerTask` above): another block where the container the goal was
   judged against was recorded drops what the body holds of the position (the word, the note, the claim on the spot:
   `SupplyChests.forget`) and fails `TargetGone`, and a position that is not loaded fails `Unreachable` and drops nothing, so
-  the executor goes there again. Nothing goes into a block the plan was never about
-  (`MoveAndMineGameTests.depositIntoAContainerThatIsAnotherBlockNowFailsTargetGone`).
+  the executor goes there again. So nothing goes into a block on the strength of a count that was made for another one
+  (`MoveAndMineGameTests.depositIntoAContainerThatIsAnotherBlockNowFailsTargetGone`). The goal itself names a position,
+  not a block: with the stale record gone, the retry and the next plan judge it afresh against what stands there now,
+  and when that is a container the body may use, it is looked into and filled.
 - `deposit` asks block safety before it opens the container too (`DepositTask`, "Block safety"): the stockpile goal's target
   is the owner's word for that goal, which reaches the check as an `Allowance` over exactly that container (both halves)
   open for the one question (`ContainerAccess.askAsGoalsWord`, which the look a stockpile plan makes of its target uses

@@ -137,8 +137,8 @@ public final class PlanInputGameTests {
 
     /**
      * The furnace family, one variant per fuel class: smelting cooks in 200 ticks and a coal burns 1600, so the
-     * coal variant's run is eight raw iron and one coal for eight ingots; blasting cooks in 100, so the same coal
-     * is sixteen and one, at a blast furnace.
+     * coal variant's run is eight raw iron and one coal for eight ingots; blasting cooks in 100 but a blast furnace
+     * burns a coal in 800, so there too one coal is eight, at a blast furnace.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
     public static void furnaceRecipesCarryTheirFuelAndStation(GameTestHelper helper) {
@@ -161,9 +161,9 @@ public final class PlanInputGameTests {
         helper.assertTrue(RecipeDef.SMELT.equals(blast.kind()), "kind is " + blast.kind());
         helper.assertTrue(ItemKey.of("minecraft:blast_furnace").equals(blast.station()),
             "station is " + blast.station());
-        helper.assertTrue(ItemKey.of("minecraft:iron_ingot").equals(blast.result()) && blast.resultCount() == 16,
+        helper.assertTrue(ItemKey.of("minecraft:iron_ingot").equals(blast.result()) && blast.resultCount() == 8,
             "makes " + blast.resultCount() + " of " + blast.result());
-        helper.assertTrue(blast.slots().size() == 2 && blast.slots().get(0).count() == 16
+        helper.assertTrue(blast.slots().size() == 2 && blast.slots().get(0).count() == 8
             && blast.slots().get(0).alternatives().equals(List.of(ItemKey.of("minecraft:raw_iron")))
             && blast.slots().get(1).count() == 1, "the slots are " + blast.slots());
         helper.succeed();

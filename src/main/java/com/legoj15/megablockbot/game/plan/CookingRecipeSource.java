@@ -66,13 +66,20 @@ public final class CookingRecipeSource implements RecipeSource {
     /** One fuel class with its burn time and the items that fill a variant's fuel slot, in the class's own order. */
     private record FuelClass(String name, List<ItemKey> items, int burnTicks) {}
 
-    /** One recipe type this source reads and the station its recipes run at. */
-    private record Family(RecipeType<? extends AbstractCookingRecipe> type, ItemKey station) {}
+    /**
+     * One recipe type this source reads, the station its recipes run at, and what the station divides a fuel's burn
+     * time by: a blast furnace and a smoker burn a fuel in half the time a furnace does (their block entities halve
+     * {@code getBurnDuration}), so although they cook twice as fast one coal still does eight items in them, not sixteen.
+     */
+    private record Family(RecipeType<? extends AbstractCookingRecipe> type, ItemKey station, int burnDivisor) {}
 
     private static final List<Family> FAMILIES = List.of(
-            new Family(RecipeType.SMELTING, ItemKey.of("minecraft:furnace")),
-            new Family(RecipeType.BLASTING, ItemKey.of("minecraft:blast_furnace")),
-            new Family(RecipeType.SMOKING, ItemKey.of("minecraft:smoker")));
+            new Family(RecipeType.SMELTING, ItemKey.of("minecraft:furnace"), 1),
+            new Family(RecipeType.BLASTING, ItemKey.of("minecraft:blast_furnace"), 2),
+            new Family(RecipeType.SMOKING, ItemKey.of("minecraft:smoker"), 2));
+
+    /** The most a run takes of the ingredient or of the fuel: what one furnace slot holds. */
+    static final int MAX_RUN = 64;
 
     /** Separates a variant id's two parts; a recipe id cannot contain it (a ResourceLocation's alphabet has no #). */
     private static final char VARIANT_MARK = '#';
@@ -92,7 +99,8 @@ public final class CookingRecipeSource implements RecipeSource {
     @Override
     public void collect(MinecraftServer server, Collector out) {
         RegistryAccess access = server.registryAccess();
-        // The burn times are the game's own, so a mod that adds a fuel or changes one is followed without a list here.
+        // The game's own table of fuels. A fuel a mod adds only through its loader's data is not in it: such an item is
+        // left out of its class below and noted, never guessed at.
         Map<Item, Integer> burnTimes = AbstractFurnaceBlockEntity.getFuel();
         List<String> leftOut = new ArrayList<>();
         List<String> noClassLeft = new ArrayList<>();
@@ -102,6 +110,7 @@ public final class CookingRecipeSource implements RecipeSource {
         List<String> ingredientWithoutItems = new ArrayList<>();
         List<String> neverDone = new ArrayList<>();
         List<String> unreadable = new ArrayList<>();
+        List<String> runTooLarge = new ArrayList<>();
         for (Family family : FAMILIES) {
             for (RecipeHolder<? extends AbstractCookingRecipe> holder
                     : server.getRecipeManager().getAllRecipesFor(family.type())) {
@@ -124,7 +133,14 @@ public final class CookingRecipeSource implements RecipeSource {
                         continue;
                     }
                     for (FuelClass fuelClass : classes) {
-                        Run run = runOf(fuelClass.burnTicks(), cookingTime);
+                        int burn = fuelClass.burnTicks() / family.burnDivisor();
+                        if (burn < 1) continue; // burns out before it cooks anything at this station
+                        Run run = runOf(burn, cookingTime);
+                        if (run.ingredient() > MAX_RUN || run.fuel() > MAX_RUN) {
+                            // A run is put into the furnace whole; one that does not fit its slots is no recipe.
+                            runTooLarge.add(variantId(id, fuelClass.name()));
+                            continue;
+                        }
                         out.recipe(new RecipeDef(variantId(id, fuelClass.name()), RecipeDef.SMELT,
                                 List.of(new RecipeDef.Slot(alternatives, run.ingredient()),
                                         new RecipeDef.Slot(fuelClass.items(), run.fuel())),
@@ -150,6 +166,10 @@ public final class CookingRecipeSource implements RecipeSource {
         }
         if (!unreadable.isEmpty()) {
             out.note(unreadable.size() + " recipes skipped because reading them threw " + named(unreadable));
+        }
+        if (!runTooLarge.isEmpty()) {
+            out.note(runTooLarge.size() + " fuel variants skipped because a whole run does not fit a furnace's slots "
+                    + named(runTooLarge));
         }
         if (!leftOut.isEmpty()) {
             out.note(leftOut.size() + " fuel items left out of their class because they burn differently from the "
@@ -212,22 +232,30 @@ public final class CookingRecipeSource implements RecipeSource {
 
     /**
      * The classes with their burn times. An item the game's map does not hold, or holds with a different time from
-     * the class's first item, is left out of the class: a variant is one size, and a fuel that burns differently
-     * needs one of its own. A class whose first item is no fuel at all (or whose tag holds nothing) is skipped.
+     * the class's first item that is a fuel, is left out of the class: a variant is one size, and a fuel that burns
+     * differently needs one of its own. A class none of whose items is a fuel (or whose tag holds nothing) is skipped.
      */
     private static List<FuelClass> fuelClasses(Map<Item, Integer> burnTimes, List<String> leftOut,
                                                List<String> noClassLeft) {
         List<FuelClass> classes = new ArrayList<>();
         for (FuelKind kind : FuelKind.values()) {
             List<Item> items = kind.items();
-            Integer burn = items.isEmpty() ? null : burnTimes.get(items.get(0));
-            if (burn == null || burn < 1) {
+            // The class burns as its first item that is a fuel at all does: a tag whose first item is none must not
+            // cost the class the ones after it.
+            Integer burn = null;
+            for (Item item : items) {
+                Integer ticks = burnTimes.get(item);
+                if (ticks != null && ticks >= 1) {
+                    burn = ticks;
+                    break;
+                }
+            }
+            if (burn == null) {
                 noClassLeft.add(kind.name);
                 continue;
             }
             Set<ItemKey> ofClass = new LinkedHashSet<>();
-            ofClass.add(ItemKeys.of(items.get(0)));
-            for (Item item : items.subList(1, items.size())) {
+            for (Item item : items) {
                 Integer ticks = burnTimes.get(item);
                 if (ticks == null || !ticks.equals(burn)) {
                     leftOut.add(ItemKeys.of(item).id());
