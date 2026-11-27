@@ -1387,7 +1387,8 @@ final class SolverPlannerTest {
     private static AcquisitionIndex tAndWIndex() {
         AcquisitionIndex.Builder builder = AcquisitionIndex.builder();
         builder.addItem(T).addItem(W);
-        builder.addSource(new Source.MineBlock("mine:minecraft:w", W, "minecraft:w", null, ToolTier.HAND,
+        // Mined from a block of another name: a block that only drops itself and has a recipe is not a source.
+        builder.addSource(new Source.MineBlock("mine:minecraft:w_rock", W, "minecraft:w_rock", null, ToolTier.HAND,
                 false, false, false, 1.0, false, null));
         return builder.build();
     }

@@ -114,6 +114,12 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
         if (source instanceof Source.MineBlock mine) {
             if (mine.needsSilkTouch()) return "needs silk touch, not planned yet";
             if (mine.needsShears()) return "needs shears, not planned yet";
+            // A block that only drops itself and that a recipe makes (a crafting table, planks, a chest) stands only
+            // where someone built it: the index lists it because breaking one gives it back, not because the
+            // world has any for the bot to find. Natural blocks (logs, dirt, sand) have no recipe and stay.
+            if (mine.block().equals(mine.item().id()) && !recipes.producers(mine.item()).isEmpty()) {
+                return "a crafted block: it stands only where someone placed one";
+            }
         }
         if (source instanceof Source.Trade trade && !(trade.chance() > 0)) return "the offer never comes up";
         // One item per trade: a trade that takes one or more of that item back leaves the stock no higher.
