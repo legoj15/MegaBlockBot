@@ -191,6 +191,10 @@ runs wherever the command tree is built (a worker thread while data loads).
   `versions/<node>/run-gameTestServer/logs/latest.log` shows `All N required tests passed` with N > 0 and no failed
   line. The log, not the exit code, is the evidence: on 1.21.1 a startup failure exits 0. It prints the failed
   tests and their messages, and kills any server JVM left behind.
+- GameTests run side by side in one world, five blocks apart, and share it: a mob one test spawns hunts the nearest
+  player, which may be another test's body, and the navigator's block search reads the neighbouring arenas. A test
+  whose body stands still makes it invulnerable (it is then no target at all), gives it a brain that does nothing
+  unless the brain is what it measures, and places only block kinds no other test uses.
 - `scripts/bot-server.ps1 <start|cmd|wait|log|status|stop> -Node <node>` runs one node's dev server headless for
   evidence runs: offline mode, loopback only, RCON on free ports. `cmd` sends a Minecraft command, `wait` blocks on a
   log regex (exit 0 match, 2 fail pattern, 1 timeout or server gone), `stop` ends the server and sweeps what is left.
