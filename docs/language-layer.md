@@ -239,14 +239,15 @@ advice (section 8) stands: default to a hosted or second-box endpoint. Latency m
 section): 1.7 to 7.4 s for a message that took one trip and 9.4 to 16.8 s for two or three, which is why the body never
 waits on the layer.
 
-## Not done here / for the wiring step
+## Wiring, and how it is checked
 
-- Nothing registers a layer. The runtime should call `ModelLanguageConfig.load(Platform.loader().configDir())`, build
-  `new ModelLanguageLayer(settings)` once, call `interpret` off the server thread (the future completes on an HTTP
-  thread: hand its result back to the server thread before touching the world), and feed terminal goal results to
-  `explain`.
-- Not exercised inside a running NeoForge server: the layer uses the JDK's `java.net.http` (the java.se module, in the
-  boot layer) and the Gson that Minecraft bundles; the node test classpath uses Gson 2.10.1 (what 1.21.1 ships; 1.21.10
-  ships 2.11.0 and 1.21.11 ships 2.13.2).
+- `BotFeature` builds the layer once from `ModelLanguageConfig.load(Platform.loader().configDir())` and sets it
+  (`LanguageLayers.set`); `BotTalk` calls `interpret` and `explain` and hands the answers back to the server thread.
+- It runs inside a NeoForge 1.21.1 server on the JDK's `java.net.http` and the Gson Minecraft bundles (the node test
+  classpath uses Gson 2.10.1, what 1.21.1 ships; 1.21.10 ships 2.11.0 and 1.21.11 ships 2.13.2).
+- Checked live with `scripts/bot-phrases.ps1` and `scripts/phrases/loose-goals.txt` (docs/platform-layer.md): on
+  2026-11-27, with a local model behind an OpenAI-compatible endpoint, each of the eleven loosely worded messages of
+  that list became the goal written above it ("we are low on coal, go dig up eight pieces" became get 8 coal; "put
+  on a full set of iron armour" became the four-slot equip goal).
 - Design 3.4 says pause and resume are "not a model tool"; the brief for #20 lists them among the model's tools, so they
   are. If that decision stands, correct design 3.3/3.4; if not, drop the two tools from `ToolSchemas`.

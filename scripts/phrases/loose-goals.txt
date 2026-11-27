@@ -1,0 +1,25 @@
+# Loosely worded goals for the language layer check (issue 20): scripts/bot-phrases.ps1 -File this.
+# One message a line. Each should become the goal named in the comment above it.
+
+# M1: go within reach of a place
+head over to 100 70 100 when you get a chance
+# M2: have 1 stone pickaxe
+I could really use a stone pickaxe
+# M2: have 2 oak logs
+could you grab me a couple of oak logs
+# M2: have 1 crafting table, have 4 sticks
+can you make a crafting table and four sticks
+# M3: have 3 iron ingots
+smelt me three iron ingots please
+# M3: equip iron armour, four slots
+put on a full set of iron armour
+# M3: have 8 coal
+we are low on coal, go dig up eight pieces
+# M4: have 3 cod
+go fishing and bring back three cod
+# M4: have 1 enchanted book with mending
+I want a book with mending on it
+# M4: have 1 bookshelf
+see if you can get a bookshelf
+# control: status
+what are you up to right now?

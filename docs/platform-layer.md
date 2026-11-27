@@ -207,7 +207,12 @@ runs wherever the command tree is built (a worker thread while data loads).
   `-At`, empty its inventory and fix daylight, then reads the log to the goal's result line and prints the result,
   status, inventory, position, deaths and reflex holds. Exit 0 satisfied, 1 any other result, 2 no result in time,
   3 no server. Use it for every end-to-end evidence run so runs can be compared.
-- All three scripts import `scripts/lib/MbbNodes.psm1` for the command-line sweep that finds and kills a node's
+- `scripts/bot-phrases.ps1 -Node <node> [-Bot Bot2] -File <list>` sends a list of loosely worded messages to a bot
+  on that running dev server and prints what each one became, cancelling every goal it set before the next line, so
+  nothing is carried out: the check that the language layer (the model, when one is configured) turns loose words
+  into the right goals. `scripts/phrases/loose-goals.txt` is the list for issue 20, each line with the goal it
+  should become. Exit 0 every line was answered, 1 one or more got no answer, 3 no server.
+- The first three scripts import `scripts/lib/MbbNodes.psm1` for the command-line sweep that finds and kills a node's
   leftover JVMs (the server JVM by its `versions/<node>/` path, the Gradle client by the wrapper jar and task name).
 - GameTest classes live in `com.legoj15.megablockbot.game.gametest`, use vanilla `@GameTest` with
   `templateNamespace = MegaBlockBot.MOD_ID, template = "empty"` (`megablockbot:empty`, 16x16x16 air) and are

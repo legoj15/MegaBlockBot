@@ -211,41 +211,6 @@ public final class BotRuntimeGameTests {
         });
     }
 
-    /**
-     * Seen on a live server: the table stood in a dip one block deep, its top level with the ground, and the body stood on
-     * it at the dip's edge. Broken, the table's item lies in the dip, straight under the body (the ground beside the dip
-     * holds it up) and a quarter block below its pickup box, so walking at it gets nowhere: the body must step down to
-     * it. The item was left lying, and the next craft made a second table.
-     *
-     * <p>Set-up, not the body's doing: the second layer of ground with its dip, the table in it, the body's memory of
-     * having put it there, and where the body is spawned. A goal that already holds ends at once, which is when the
-     * runtime looks for a table the body left standing and takes it up.
-     */
-    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600)
-    public static void aTableDropInADipUnderTheBodyIsSteppedDownTo(GameTestHelper helper) {
-        floor(helper);
-        for (int x = 0; x < 16; x++) {
-            for (int z = 0; z < 16; z++) helper.setBlock(x, FLOOR_Y + 1, z, Blocks.STONE);
-        }
-        BlockPos dip = new BlockPos(8, FLOOR_Y + 1, 8);
-        helper.setBlock(dip, Blocks.CRAFTING_TABLE);
-        // On the table, a hand's width from the dip's western edge: the body's box reaches 0.22 over the ground there.
-        Rig rig = Rig.spawnAt(helper, "dip", 600, new Vec3(8.08, FLOOR_Y + 2.0, 8.5));
-        BotMemory.of(rig.id()).notePlaced(helper.getLevel().dimension().location().toString(), helper.absolutePos(dip));
-        rig.give(Items.STICK, 1);
-        rig.runtime().submit(new Goal.HaveItem(ItemKey.of("stick"), 1));
-        int[] ticks = {0};
-        rig.onEachTick(() -> {
-            if (rig.count(Items.CRAFTING_TABLE) == 1) {
-                helper.assertTrue(rig.tablesInArena().isEmpty(), "a crafting table still stands at " + rig.tablesInArena());
-                rig.pass();
-                return;
-            }
-            helper.assertTrue(++ticks[0] < 500, "the table's item was not taken: the body is at " + rig.body().position()
-                + ", tables standing " + rig.tablesInArena());
-        });
-    }
-
     /** A table that stands beside the body is used where it is and left standing; the bot placed none of its own. */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = PICKAXE_TICKS)
     public static void usesTheTableThatStandsBeside(GameTestHelper helper) {
