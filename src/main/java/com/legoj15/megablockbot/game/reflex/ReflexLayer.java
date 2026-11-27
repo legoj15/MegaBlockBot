@@ -15,7 +15,9 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.annotation.Nullable;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 
@@ -32,6 +34,8 @@ import net.minecraft.world.entity.Mob;
  * stopped), the filter is set to {@link BreakRules#filterFor} for the body as it is then and no input, item in use or
  * navigator command is left behind. The layer remembers no filter of anyone else's: the executor's tasks arm the navigator
  * themselves whenever they start or resume. It never changes the goal tree, never cancels a goal and never teleports.
+ * The navigator command the layer starts on the tick its hold begins stays: the executor pauses its task in that same tick,
+ * and a paused task stops only a command that is its own ({@code BodyTask}, {@code BotNavigator#issuingFor}).
  *
  * <p><b>Hysteresis.</b> Each reflex keeps the body until its cause is clearly over (the named constants in
  * {@link ReflexConstants}), so the executor's task is not paused and resumed every few ticks. A higher reflex takes
@@ -78,6 +82,8 @@ public final class ReflexLayer {
     private final Map<UUID, Long> hurtBy = new HashMap<>();
     private int lastHurtStamp = -1;
     private final ShelterBlocks shelter = new ShelterBlocks();
+    /** How the mobs in sight are moving: whether a far creeper is coming. */
+    private final ApproachWatch approach = new ApproachWatch();
     private final Map<String, Long> quarantine = new HashMap<>();
     private NightPolicy nightPolicy = ReflexConstants.NIGHT_POLICY;
 
@@ -123,7 +129,8 @@ public final class ReflexLayer {
         LAYERS.values().removeIf(layer -> {
             if (layer.body.getServer() != server) return false;
             if (server.getPlayerList().getPlayer(layer.body.getUUID()) != null) return false;
-            layer.dropHold("the body was removed");
+            // The navigator of a body that is gone is swept with it: nothing of that body's is touched here.
+            layer.dropHold("the body was removed", null);
             return true;
         });
     }
@@ -142,7 +149,7 @@ public final class ReflexLayer {
         follow(current);
         if (body.isDeadOrDying() || body.isRemoved() || body.hasDisconnected()) {
             // Nothing to hand over: a respawn is a new instance, and the old one's state means nothing to it.
-            dropHold("the body is gone");
+            dropHold("the body is gone", body);
             return ReflexHold.NONE;
         }
         ReflexContext ctx = new ReflexContext(this, body);
@@ -152,6 +159,7 @@ public final class ReflexLayer {
         if (ctx.time % 200 == 0) {
             ignored.values().removeIf(until -> until <= ctx.time);
             unreachable.values().removeIf(until -> until <= ctx.time);
+            approach.prune(ctx.time);
         }
         noteHurt(ctx);
 
@@ -233,6 +241,20 @@ public final class ReflexLayer {
         return lastCause;
     }
 
+    /** How many shelter blocks this layer has recorded as standing (placed by the body, not yet taken down). */
+    public int recordedShelterBlocks() {
+        return shelter.size();
+    }
+
+    /**
+     * Records a block as one this body put up for a night shelter, so that a calm tick in daylight takes it down. The night
+     * reflex does this itself as it builds; this is for a block it did not see go up (a GameTest's, or one restored after a
+     * restart once the record is kept across it).
+     */
+    public void rememberShelterBlock(ServerLevel level, BlockPos pos) {
+        shelter.add(level, pos, level.getBlockState(pos).getBlock());
+    }
+
     public NightPolicy nightPolicy() {
         return nightPolicy;
     }
@@ -261,6 +283,10 @@ public final class ReflexLayer {
         return shelter;
     }
 
+    ApproachWatch approachWatch() {
+        return approach;
+    }
+
     void setNightResult(NightResult result) {
         nightResult = result;
     }
@@ -287,9 +313,10 @@ public final class ReflexLayer {
     /** Points this layer at the body as it is now; a replacement body starts from nothing. */
     private void follow(BotPlayer current) {
         if (current == body) return;
-        dropHold("the body was replaced (respawn)");
+        dropHold("the body was replaced (respawn)", current);
         body = current;
         reflexes = ReflexRegistry.instantiate();
+        approach.clear();
         ignored.clear();
         unreachable.clear();
         hurtBy.clear();
@@ -312,10 +339,23 @@ public final class ReflexLayer {
         for (UUID id : hurtBy.keySet()) ignored.remove(id);
     }
 
-    /** Forgets a hold without touching the body: it is dead or replaced, and its input and navigator went with it. */
-    private void dropHold(String why) {
+    /**
+     * Forgets a hold without touching the body it was for: that one is dead or replaced, and its input went with it. Its
+     * navigator did not (it is kept per UUID across respawns), so a hold that was running a command stops it on the body
+     * that is live now, {@code live}: the replacement, or the dead body itself when it is still the one the navigator
+     * follows. A hold dropped because the body was removed for good has no live body to give: its navigator is swept.
+     */
+    private void dropHold(String why, @Nullable BotPlayer live) {
         if (holder == null) return;
         MegaBlockBot.LOGGER.info("reflex {}: hold dropped after {} ticks ({}): {}", name(), heldTicks, lastCause, why);
+        if (navigatorUsed && live != null) {
+            try {
+                BotNavigator.of(live).stop();
+            } catch (RuntimeException e) {
+                // A dead body's engine may not take being told to stop; the replacement's first command starts it afresh anyway.
+                MegaBlockBot.LOGGER.warn("reflex {}: could not stop the navigator of the dropped hold", name(), e);
+            }
+        }
         holder = null;
         navigatorUsed = false;
         // filterOurs stays: the filter is given back to the body that is alive next (see tick), not to this dead instance.

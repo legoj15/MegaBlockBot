@@ -26,7 +26,7 @@ final class ReflexContext {
 
     /** Hostile mobs that need dealing with now, nearest first. */
     List<Threat> threats() {
-        if (threats == null) threats = Threats.scan(body, level, layer.ignoredMobs(), time);
+        if (threats == null) threats = Threats.scan(body, level, layer.ignoredMobs(), layer.approachWatch(), time);
         return threats;
     }
 

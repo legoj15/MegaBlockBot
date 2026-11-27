@@ -283,25 +283,42 @@ Decided in #8 (`game.reflex`, `docs/reflexes.md`, `ReflexGameTests` and `ReflexR
   break, and sets the navigator's break filter to "break nothing". Letting go, however the hold ends (finished, the body died or
   was replaced, the layer stopped), leaves none of those behind and sets the filter to `BreakRules.filterFor(body)` for the body
   as it is then; the layer remembers no filter. A handover between reflexes stops the navigator command of the old holder: the
-  layer does it, not each reflex. Reflexes are listed once, in `ReflexRegistry`; one that throws is quarantined, not allowed to
-  take the tick down. A despawned body's layer is dropped by a sweep, as its navigator is.
+  layer does it, not each reflex. A hold that is dropped (the body died and was replaced) stops its command on the live body's
+  navigator, so the replacement starts from an idle one. Reflexes are listed once, in `ReflexRegistry`; one that throws is
+  quarantined, not allowed to take the tick down. A despawned body's layer is dropped by a sweep, as its navigator is.
+- A task paused for a hold does not stop a navigator command that is not its own. In one body tick the layer runs first and may
+  have begun a retreat when the executor pauses the task for it; the navigator therefore remembers who gave each command
+  (`BotNavigator.issuingFor`, said by `BodyTask.nav` on the way to every command a task gives, and voided by anyone else asking
+  for the navigator), and a task's pause, abort or ending stops the navigator only when the command it runs is the task's own or
+  there is none. The navigator's engine is ticked once per body tick at most (the layer in a held tick, the runtime otherwise),
+  counted by `BotNavigator.engineTicks()` and asserted on every tick of the runtime GameTests.
 - A threat is a hostile whose target is the body, within 16 blocks, or any hostile within melee range, **and in sight**
   (which is what keeps a body walled into its shelter from fighting the zombies outside). A hold ends after a quiet
-  period (no threat for 20 ticks, no mob hurt for 40). The resume gate's "health above the retreat threshold" is the
+  period (no threat for 20 ticks, no mob hurt for 40; after a retreat from a threat that is still about, no threat in sight for
+  100 ticks, so that one creeper is one hold and not a hold for each time the body runs out of its sight and its task walks it
+  back). The resume gate's "health above the retreat threshold" is the
   vitals reflex's: it holds the body to eat while it can; with no food the gate opens (3.2 item 3: "otherwise only report").
+- A creeper that targets the body is a threat within the reach of its blast (9 blocks, 14 when charged) or while it is coming
+  closer (its own move, 0.6 blocks in 6 ticks); farther off and standing about (stuck behind a river, among trees) it is watched,
+  not run from. The first night run took the body nine times in half a minute for creepers that did not come, and the executor
+  gave the goal up (`PREEMPT_STALLED`, whose limit stays).
 - A mob that hurts the body is never ignored: a chase given up on goes on the ignore list unless the mob has hurt the body in
   the last 100 ticks, and one that keeps hurting it from where it cannot be reached is retreated from, to the nearest spot out
   of its sight, never stood in front of.
 - Attacks go through `Player.attack`, **before** `swing` (`ServerPlayer.swing` resets the attack cooldown, so a swing first makes
-  every hit a weak one); a shield is lowered for the swing, since a player cannot swing with it up. A creeper that targets the
-  body is a threat from anywhere in the scan and is never approached: the body keeps or opens the gap, and one whose fuse burns
-  near a body that holds a shield is faced with it raised.
+  every hit a weak one); a shield is lowered for the swing, since a player cannot swing with it up. A creeper is never
+  approached: the body keeps or opens the gap from one that is a threat. **The exception is a body that is cornered, with no spot
+  left to run to: it fights a creeper that is inside the swell range (3.5 blocks), or whose fuse is burning, as the last
+  resort**, and otherwise waits for it facing it. One whose fuse burns near a body that holds a shield is faced with it raised.
 - The night shelter is built from inside, bottom up, by clicking faces the eyes can see with the sneak key down (the cap goes
   against a block put on a wall from the top of a jump; a placement counts only when the cell holds the block), after asking
   `BlockSafety` whether each cell could be broken again, and is taken down in the morning by breaking what the body placed. The
   blocks it placed are recorded in the layer and leave the record only when the world no longer holds them: a takedown that
-  could not finish is tried again by a later calm tick in daylight. The night marked done is the night the hold was for (taken
-  when it started), not the one the clock names when it ends, and a policy changed under a walk to the bed spends nothing.
+  could not finish is tried again by a later calm tick in daylight, each failed attempt at the same block doubling the wait
+  before the next (400 ticks, up to a day), so a block that cannot be taken down does not take the body every few seconds. The
+  night marked done is the night the hold was for (taken when it started), not the one the clock names when it ends, and a
+  policy changed under a walk to the bed spends nothing. A body asleep in its bed gets up when the morning comes (day time
+  23000) or the policy is changed, and the night counts as spent.
 - A hazard that holds the body for 400 ticks is given up on per kind, so giving up on a fire does not switch off surfacing.
 
 ### 3.3 Language layer

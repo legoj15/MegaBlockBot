@@ -52,18 +52,26 @@ abstract class BodyTask extends AbstractTask<BotPlayer> {
         release(body);
     }
 
-    /** Stops the body and lets go of anything else this task holds. Safe to call twice, and before the task began. */
+    /**
+     * Stops the body and lets go of anything else this task holds. Safe to call twice, and before the task began. The
+     * navigator is stopped only when what it runs is this task's own command (or nothing): in one body tick the reflex layer
+     * runs first and may have begun a retreat by the time the executor pauses this task for it, and that retreat is not
+     * this task's to stop. The task cannot see the end of its own tick (its ticks are the subclasses'), so the navigator
+     * remembers who gave each command ({@link #nav}) instead of the task remembering which one was current.
+     */
     protected final void release(BotPlayer body) {
         if (!began) return;
         letGo(body);
-        BotNavigator.of(body).stop();
+        BotNavigator navigator = BotNavigator.of(body);
+        if (!navigator.runsCommandOfAnother(this)) navigator.stop();
     }
 
     /** Whatever the task holds besides the navigator (an open menu, a look target). */
     protected void letGo(BotPlayer body) {}
 
+    /** The navigator, told that the command the caller gives next is this task's. */
     protected final BotNavigator nav(BotPlayer body) {
-        return BotNavigator.of(body);
+        return BotNavigator.of(body).issuingFor(this);
     }
 
     /** The rule for what may be broken comes from one place, and every task that moves the body takes it from there. */

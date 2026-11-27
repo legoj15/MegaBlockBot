@@ -94,6 +94,13 @@ public final class ReflexConstants {
     public static final int RETREAT_REPICK_TICKS = 60;
     /** A retreat that has arrived this many times and is still followed, or finds no way, stands and fights instead (AIBot: "no valid retreat route"). */
     public static final int RETREAT_MAX_ARRIVALS = 8;
+    /**
+     * Once the body has retreated in a hold, the hold goes on until no threat has been in sight for this long, not for the
+     * short quiet of a fight ({@link #THREAT_QUIET_TICKS}): out of sight is not dealt with (the body ran behind cover and the
+     * creeper is a few blocks off the other side of it), and a hold that ends the moment the threat is hidden hands the body
+     * back to a task that walks it into sight again. One creeper is one hold.
+     */
+    public static final int RETREAT_QUIET_TICKS = 100;
     /** Spots the navigator failed to reach, tried one after another, before the body gives up on running. */
     public static final int RETREAT_MAX_FAILED_SPOTS = 8;
     public static final int CORNERED_TICKS = 80;
@@ -110,10 +117,12 @@ public final class ReflexConstants {
      */
     public static final int HIDE_SEARCH_RADIUS = 12;
 
-    // A creeper that targets the body is a threat from anywhere in the scan, and is never approached: the body keeps or
-    // opens the gap (AIBot never meleed one either, escape distance 12). It swells from 3 blocks and keeps swelling to 7;
-    // the fuse is 30 ticks. Only a creeper closer than CREEPER_SWELL_RANGE, or one already fusing, is fought when the body
-    // has nowhere left to run.
+    // A creeper is never approached: the body keeps or opens the gap (AIBot never meleed one either, escape distance 12). It
+    // swells from 3 blocks and keeps swelling to 7; the fuse is 30 ticks. One that targets the body is run from once it is
+    // within CREEPER_SAFE_DISTANCE, or from any distance while it comes closer; one that hovers farther off and does not come
+    // is watched. With nowhere left to run, only a creeper closer than CREEPER_SWELL_RANGE is fought. One farther off is
+    // stood up to and not walked at, fusing or not: closing on it would only walk into the blast, and a burning fuse
+    // within CREEPER_BRACE_RANGE is met with the shield when the body has one.
 
     /**
      * A creeper whose fuse is burning, this close, with a shield to hand: the body stops running, faces it and raises the
@@ -125,10 +134,21 @@ public final class ReflexConstants {
     public static final double CREEPER_SWELL_RANGE = 3.5;
     /**
      * Past this distance a creeper's explosion cannot reach and its fuse is cut (a charged one blows twice as wide): a
-     * creeper that does not target the body is of no concern from here, and one that does is run from all the same.
+     * creeper that does not target the body is of no concern from here, and one that does is run from only while it comes
+     * closer ({@link #CLOSING_WINDOW_TICKS}). This is the distance the layer retreats at.
      */
     public static final double CREEPER_SAFE_DISTANCE = 9.0;
     public static final double POWERED_CREEPER_SAFE_DISTANCE = 14.0;
+    /**
+     * A creeper that targets the body from beyond the safe distance is a threat only while it closes: its own move over the
+     * last {@code CLOSING_WINDOW_TICKS} ticks has brought it this much nearer. Creepers at twelve blocks that did not come
+     * (stuck behind a river, among trees) made the layer take the body nine times in thirty seconds in the first night run:
+     * each retreat took the body out of their sight, the hold ended, the executor walked it back, and they were in sight
+     * again. A creeper on its way covers 0.15 to 0.2 blocks a tick (measured, with stops while it plans a path), so six ticks
+     * tell it from one that only stands about, and the gap lost before the body reacts is about a block.
+     */
+    public static final int CLOSING_WINDOW_TICKS = 6;
+    public static final double CLOSING_MIN_BLOCKS = 0.6;
 
     // ---------------------------------------------------------------------------------------------------------
     // Health and hunger (priority 3)
@@ -208,6 +228,15 @@ public final class ReflexConstants {
     public static final int TAKEDOWN_PURSUE_RADIUS = 48;
     /** A shelter block the break rules refuse is asked about again after this long (the protected zone may have moved). */
     public static final int REFUSED_RETRY_TICKS = 6000;
+    /**
+     * A recorded shelter block that a takedown could not finish (no face of it can be seen from anywhere the body can stand,
+     * the navigator found no way to it, the break rules refused it) is asked about again after this long; each failed attempt
+     * at the same block doubles the wait, up to {@link #TAKEDOWN_MAX_WAIT_TICKS}, and the block stays recorded. A block that
+     * cannot be taken down is no reason to take the body from its goal every few seconds for the rest of the day (each time is
+     * a preemption the executor counts).
+     */
+    public static final int TAKEDOWN_RETRY_TICKS = 400;
+    public static final int TAKEDOWN_MAX_WAIT_TICKS = 24000;
     /** Ticks between two placements (a client's right-click repeat is 4; this is quicker because each click is its own). */
     public static final int PLACE_DELAY_TICKS = 2;
     /** How far from the middle of its cell the body may stand when it starts building: the walls must not touch its box. */

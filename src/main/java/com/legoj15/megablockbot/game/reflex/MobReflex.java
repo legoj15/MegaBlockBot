@@ -27,7 +27,9 @@ import net.minecraft.world.phys.Vec3;
  *
  * <p>It holds the body until no threat has been around for {@link ReflexConstants#THREAT_QUIET_TICKS} and no mob has
  * hurt the body for {@link ReflexConstants#HURT_QUIET_TICKS} (design 3.4's resume gate, less the health condition, which
- * the vitals reflex owns because it is the one that can do something about it).
+ * the vitals reflex owns because it is the one that can do something about it). A hold that retreated, from a threat that is
+ * still about, lasts {@link ReflexConstants#RETREAT_QUIET_TICKS} past the last sight of one: one creeper is one hold.
+ * What counts as a threat, a creeper that hovers far off excepted, is {@link Threats}'s to say.
  */
 final class MobReflex implements Reflex {
     private boolean active;
@@ -47,6 +49,8 @@ final class MobReflex implements Reflex {
 
     // Retreating.
     private boolean retreating;
+    /** This hold has retreated at least once: it is kept for {@link ReflexConstants#RETREAT_QUIET_TICKS} after the last threat is seen. */
+    private boolean retreated;
     /** The retreat in progress is to a spot the mobs cannot see, from a shooter that cannot be reached. */
     private boolean hiding;
     private long retreatPickedAt;
@@ -88,7 +92,10 @@ final class MobReflex implements Reflex {
         quietTicks++;
         BotPlayer body = ctx.body;
         boolean hurtRecently = body.getLastHurtByMob() != null && body.tickCount - body.getLastHurtByMobTimestamp() < ReflexConstants.HURT_QUIET_TICKS;
-        return quietTicks < ReflexConstants.THREAT_QUIET_TICKS || hurtRecently;
+        // A body that ran is not handed back the moment the threat is out of sight: the cover it ran behind is what hides it.
+        // A threat that is dead or gone is dealt with, and the short quiet will do.
+        int quiet = retreated && !engaged.isEmpty() ? ReflexConstants.RETREAT_QUIET_TICKS : ReflexConstants.THREAT_QUIET_TICKS;
+        return quietTicks < quiet || hurtRecently;
     }
 
     @Override
@@ -108,6 +115,7 @@ final class MobReflex implements Reflex {
         engaged.clear();
         kills = 0;
         retreating = false;
+        retreated = false;
         hiding = false;
         arrivals = 0;
         corneredUntil = 0;
@@ -317,15 +325,23 @@ final class MobReflex implements Reflex {
         if (body.isUsingItem() && Hands.isShield(body.getUseItem())) body.releaseUsingItem();
     }
 
-    /** No threat is in sight but the hold goes on for the quiet period: stand ready, shield down. */
+    /**
+     * No threat is in sight but the hold goes on for the quiet period: shield down, and stand ready. A retreat that is under
+     * way is finished first (the navigator is the layer's and is ticked after this): out of sight is not out of reach, a
+     * zombie that was behind the body is still coming, and a body that stops where it lost sight of it waits for it.
+     */
     private void calm(ReflexContext ctx) {
         BotPlayer body = ctx.body;
-        cause = "calming down";
+        lowerShield(body);
         if (retreating) {
+            if (ctx.nav.state() == BotNavigator.State.WORKING) {
+                cause = "finishing the retreat, nothing in sight";
+                return;
+            }
             ctx.nav.stop();
             retreating = false;
         }
-        lowerShield(body);
+        cause = "calming down";
         Steer.stand(body);
     }
 
@@ -370,18 +386,21 @@ final class MobReflex implements Reflex {
         }
         if (!retreating || ctx.time - retreatPickedAt >= ReflexConstants.RETREAT_REPICK_TICKS) {
             BlockPos spot = hide ? RetreatSpots.pickHidden(ctx, threats, badSpots) : null;
+            // A hide that finds nowhere to hide runs to a far spot as any retreat does, and arrives as one does.
+            boolean hiddenSpot = spot != null;
             if (spot == null) spot = RetreatSpots.pick(ctx, threats, badSpots);
             if (spot == null) {
                 corner(ctx, "no spot to run to");
                 return false;
             }
             // A far spot is arrived at when near it; a hiding place only when the body stands in it (a step short may be in sight).
-            ctx.goTo(spot, hide ? 0 : ReflexConstants.RETREAT_ARRIVE_RADIUS);
+            ctx.goTo(spot, hiddenSpot ? 0 : ReflexConstants.RETREAT_ARRIVE_RADIUS);
             retreating = true;
             retreatSpot = spot;
             retreatPickedAt = ctx.time;
         }
         lowerShield(body);
+        retreated = true;
         cause = "retreating from " + describe(threats.get(0).mob()) + " (" + why + ")";
         return true;
     }

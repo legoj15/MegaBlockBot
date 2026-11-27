@@ -150,6 +150,16 @@ public final class BotNavigator {
     private double bestHeuristic;
     private int sinceProgress;
     private boolean inputDirty;
+    /** Commands begun so far: advanced by every {@code goTo}, {@code mine}, {@code follow} and {@code explore}, never by a stop. */
+    private long serial;
+    /** Who the next command is for, as its giver said just before giving it ({@link #issuingFor}); gone when anyone else asks for this navigator. */
+    @Nullable
+    private Object claimant;
+    /** Who the current command is for, when they said; null when nobody did, and after a stop. */
+    @Nullable
+    private Object issuer;
+    /** Times the engine has been ticked for this body, whatever drove it; a test reads this to tell a double tick. */
+    private long engineTicks;
 
     private BotNavigator(BotPlayer body) {
         this.body = body;
@@ -159,6 +169,8 @@ public final class BotNavigator {
     public static BotNavigator of(BotPlayer body) {
         BotNavigator navigator = NAVIGATORS.computeIfAbsent(body.getUUID(), id -> new BotNavigator(body));
         navigator.follow(body);
+        // A claim is good for the caller that made it and for nobody who comes after: see issuingFor.
+        navigator.claimant = null;
         return navigator;
     }
 
@@ -276,6 +288,23 @@ public final class BotNavigator {
         return e;
     }
 
+    /**
+     * Says who the command the caller is about to give is for. A task calls this on its way to every command, so that when it
+     * is paused or aborted it can tell its own command from one somebody else started since: the reflex layer runs before the
+     * executor in a body tick, and can have begun a retreat by the time the executor pauses the task for it. The claim lasts
+     * until the next command begins; anyone else who asks for this navigator with {@link #of} voids it, so a claim made and not
+     * used cannot be taken by a command that is not the claimant's. A command given with no claim has no issuer.
+     */
+    public BotNavigator issuingFor(Object who) {
+        claimant = Objects.requireNonNull(who);
+        return this;
+    }
+
+    /** True when a command is running, done or failed here that {@code who} did not give: it is not theirs to stop. */
+    public boolean runsCommandOfAnother(Object who) {
+        return state != State.IDLE && issuer != who;
+    }
+
     /** Cancels whatever runs and releases the body's input. The state goes back to IDLE. */
     public void stop() {
         if (engine != null) {
@@ -283,6 +312,7 @@ public final class BotNavigator {
             cancelEngine(engine);
             engine.setMineTargetPolicy(null);
         }
+        issuer = null;
         kind = null;
         goal = null;
         focus = null;
@@ -294,6 +324,20 @@ public final class BotNavigator {
 
     public State state() {
         return state;
+    }
+
+    /** How many commands this navigator has begun; the number moves on whenever one begins, so it names the current command. */
+    public long serial() {
+        return serial;
+    }
+
+    /**
+     * How many times the engine has been ticked for this body since the navigator was made. The brain ticks it once per
+     * body tick at most; a GameTest compares this with the ticks the body has had to catch a second driver (a walk twice as
+     * fast as a player's shows nowhere else).
+     */
+    public long engineTicks() {
+        return engineTicks;
     }
 
     /** Why the last command failed, or null unless the state is FAILED. For logs: route on {@link #failKind()}. */
@@ -370,6 +414,7 @@ public final class BotNavigator {
         // The falls the body survives depend on its health, read fresh every tick (design 2.2).
         engine.settings().maxFallHeightNoWater.set(fallLimit(body.getHealth()));
         inputDirty = true;
+        engineTicks++;
         try {
             engine.serverTick();
         } catch (RuntimeException e) {
@@ -440,6 +485,9 @@ public final class BotNavigator {
         cancelEngine(e);
         e.clearLastFailure();
         e.setMineTargetPolicy(null);
+        serial++;
+        issuer = claimant;
+        claimant = null;
         kind = newKind;
         goal = null;
         focus = null;

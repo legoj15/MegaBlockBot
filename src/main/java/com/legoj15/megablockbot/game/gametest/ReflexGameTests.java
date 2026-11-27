@@ -74,6 +74,9 @@ public final class ReflexGameTests {
     private static final int ROOF_Y = FLOOR_Y + 7;
     /** The game's own moves of a body in a bed (into it, out of it): up to this far in a tick; any other move is capped at a block. */
     private static final double BED_STEP = 3.0;
+    /** The daylight ticks a block that cannot be taken down is watched for, and the most holds it may cost in them. */
+    private static final int BACKOFF_TICKS = 2400;
+    private static final int BACKOFF_MAX_HOLDS = 5;
 
     private ReflexGameTests() {}
 
@@ -741,13 +744,15 @@ public final class ReflexGameTests {
     }
 
     /**
-     * A creeper that is after the body, seen from twelve blocks (past the blast), is not waited for: the body keeps or
-     * opens the gap from the first sight of it. Protects: a body that carries on, or stands, while the creeper walks up
-     * to the edge of its blast. From the moment the creeper starts walking the gap never falls below where it started by
-     * more than a block, for as long as the body has room to run (twenty-five ticks: the arena is walled in, so a longer
-     * chase ends with the body in a corner, which the test says nothing about). The creeper is told whom it is after;
-     * it is inside the arena, which is ticking: one put out in the open stands still and nothing is tested. Open ground,
-     * in a batch of its own, like the other creeper run.
+     * A creeper that is after the body, seen from twelve blocks (past the blast), is not waited for once it comes: the body
+     * keeps or opens the gap as soon as the creeper is seen closing. Protects: a body that carries on, or stands, while the
+     * creeper walks up to the edge of its blast. From the moment the creeper starts walking the gap never falls below where it
+     * started by more than two blocks, for as long as the body has room to run (twenty-five ticks: the arena is walled in,
+     * so a longer chase ends with the body in a corner, which the test says nothing about). The two blocks are the creeper's
+     * first few ticks of walking, in which the layer sees that it is coming (a creeper that only stands about at that distance
+     * is watched, not run from: {@code ReflexRuntimeGameTests}); a body that did not react would lose five. The creeper is told
+     * whom it is after; it is inside the arena, which is ticking: one put out in the open stands still and nothing is tested.
+     * Open ground, in a batch of its own, like the other creeper run.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 520, batch = "reflex_open_far")
     public static void keepsTheGapFromACreeperSeenFarOff(GameTestHelper helper) {
@@ -784,7 +789,7 @@ public final class ReflexGameTests {
                 helper.assertTrue(since[0] < 200, "the creeper never started walking toward the body; " + run.watch.summary());
                 return;
             }
-            helper.assertTrue(gap >= start[0] - 1.0, "the gap fell from " + start[0] + " to " + gap + " blocks, " + (since[0] - walking[0]) + " ticks after the creeper started to walk; "
+            helper.assertTrue(gap >= start[0] - 2.0, "the gap fell from " + start[0] + " to " + gap + " blocks, " + (since[0] - walking[0]) + " ticks after the creeper started to walk; "
                 + run.watch.summary());
             if (since[0] - walking[0] < 25) return;
             helper.assertTrue(run.watch.reflexes.contains("mobs"), "the body never reacted to the creeper; " + run.watch.summary());
@@ -913,6 +918,179 @@ public final class ReflexGameTests {
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // The last fix round (issue 8, round three): what each of these protects is on its test
+    // ---------------------------------------------------------------------------------------------------------
+
+    /**
+     * A recorded shelter block that the body cannot take down does not keep taking the body. The block (dirt) is recorded
+     * through the layer, as the night reflex records what it places, and is walled in by stone on every side, so that no face
+     * of it can be seen: a takedown of it fails however many times it is tried. Protects: the layer taking the body again
+     * every two hundred ticks, for the rest of the day, to look at a block it can do nothing about (each of those is a
+     * preemption the executor counts: eight in 1200 ticks and it gives the goal up). Each failed attempt doubles the wait
+     * before the next, up to a day, and the block stays recorded. In 2400 daylight ticks with the block in view the body is
+     * held for at most {@link #BACKOFF_MAX_HOLDS} holds and a fraction of the time that the test prints.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = BACKOFF_TICKS + 300, batch = "reflex_takedown_backoff")
+    public static void aShelterBlockItCannotReachDoesNotKeepTakingTheBody(GameTestHelper helper) {
+        room(helper, true);
+        BlockPos dirt = new BlockPos(12, FLOOR_Y + 2, 8);
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) helper.setBlock(dirt.offset(dx, dy, dz), Blocks.STONE);
+            }
+        }
+        helper.setBlock(dirt, Blocks.DIRT);
+        backoffRun(helper, "nblk", dirt, new Vec3(2.5, FLOOR_Y + 1, 8.5));
+    }
+
+    /**
+     * The same where the body cannot even get within reach of the block: it stands in a nook of the room and the dirt is
+     * inside a mass of barrier too deep to be near any cell the body can stand in, so each attempt is a walk that goes
+     * nowhere and ends when its time does.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = BACKOFF_TICKS + 300, batch = "reflex_takedown_backoff")
+    public static void aShelterBlockItCannotGetNearDoesNotKeepTakingTheBody(GameTestHelper helper) {
+        room(helper, false);
+        BlockPos dirt = new BlockPos(9, FLOOR_Y + 4, 8);
+        for (int dx = -4; dx <= 4; dx++) {
+            for (int dy = -4; dy <= 4; dy++) {
+                for (int dz = -4; dz <= 4; dz++) helper.setBlock(dirt.offset(dx, dy, dz), Blocks.BARRIER);
+            }
+        }
+        helper.setBlock(dirt, Blocks.DIRT);
+        backoffRun(helper, "fblk", dirt, new Vec3(1.5, FLOOR_Y + 1, 8.5));
+    }
+
+    private static void backoffRun(GameTestHelper helper, String tag, BlockPos dirt, Vec3 bodyAt) {
+        Run run = Run.start(helper, tag, bodyAt, BACKOFF_TICKS + 250);
+        run.setDayTime(1000L);
+        run.layer().rememberShelterBlock(helper.getLevel(), helper.absolutePos(dirt));
+        run.each(BACKOFF_TICKS + 200, () -> {
+            helper.assertTrue(run.layer().recordedShelterBlocks() == 1, "the shelter block is no longer recorded: " + run.layer().recordedShelterBlocks());
+            helper.assertTrue(helper.getBlockState(dirt).is(Blocks.DIRT), "the block was taken down, so nothing was tested");
+            if (run.ticks < BACKOFF_TICKS) return;
+            Watch watch = run.watch;
+            MegaBlockBot.LOGGER.info("Reflex GameTest backoff {}: {} holds, {} ticks held of {} ({}%)", tag, watch.holdsStarted, watch.heldTicks, BACKOFF_TICKS,
+                100 * watch.heldTicks / BACKOFF_TICKS);
+            helper.assertTrue(watch.holdsStarted <= BACKOFF_MAX_HOLDS, "the body was taken " + watch.holdsStarted + " times in " + BACKOFF_TICKS
+                + " ticks for a block it cannot take down: " + watch.summary());
+            helper.assertTrue(watch.heldTicks <= BACKOFF_TICKS * 15 / 100, "the body was held for " + watch.heldTicks + " of " + BACKOFF_TICKS
+                + " ticks for a block it cannot take down: " + watch.summary());
+            run.pass();
+        });
+    }
+
+    /**
+     * A body that has run from a creeper is not handed back to its task the moment the creeper is out of sight: the hold goes on
+     * for a good while after the last sight of a threat that is still about. Protects: the flap of the first night run (a
+     * retreat takes the body out of the creeper's sight, the hold ends, the task walks the body back into it, nine holds in half a
+     * minute). The body stands in a corner and the creeper, which stands where it is put, seven blocks off along the wall and
+     * after the body (so it is a threat, and there is room to run east along the other wall); once the hold has begun a wall the
+     * width of the room goes up between them, and the creeper, alive and near, is not seen again. The hold must last at least
+     * {@link ReflexConstants#RETREAT_QUIET_TICKS} less a few ticks from there, and end.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 420)
+    public static void aRetreatHoldOutlastsTheSightOfTheCreeperItRanFrom(GameTestHelper helper) {
+        room(helper, true);
+        Run run = Run.start(helper, "hide", new Vec3(1.5, FLOOR_Y + 1, 1.5), 420);
+        run.body().getInventory().setItem(20, new ItemStack(Items.IRON_SWORD));
+        Creeper creeper = run.pinnedCreeper(new Vec3(1.5, FLOOR_Y + 1, 8.5));
+        int[] sightLostAt = {-1};
+        run.each(400, () -> {
+            if (sightLostAt[0] < 0) {
+                if (run.watch.holdsStarted == 0) return;
+                helper.assertTrue(run.layer().holderName().equals("mobs"), "the first hold is the '" + run.layer().holderName() + "' reflex's");
+                for (int x = 1; x <= 14; x++) {
+                    for (int y = FLOOR_Y + 1; y < ROOF_Y; y++) helper.setBlock(x, y, 5, Blocks.STONE);
+                }
+                sightLostAt[0] = run.ticks;
+                return;
+            }
+            int since = run.ticks - sightLostAt[0];
+            helper.assertTrue(creeper.isAlive(), "the creeper is gone, so nothing was tested");
+            if (run.layer().isHolding()) {
+                helper.assertTrue(since < 250, "the hold has not ended " + since + " ticks after the creeper was last seen");
+                return;
+            }
+            helper.assertTrue(since >= ReflexConstants.RETREAT_QUIET_TICKS - 5, "the body was handed back " + since + " ticks after the last sight of a creeper it ran from, "
+                + "which is still about: " + run.watch.summary());
+            run.pass();
+        });
+    }
+
+    /**
+     * A body that dies while the hazard reflex is walking it to water leaves nothing of that walk behind: the replacement,
+     * after the layer's first tick on it, has an idle navigator with no failure carried over from the dead body's command.
+     * Protects: a dropped hold leaving the navigator (kept per UUID across respawns) holding the dead body's command, which
+     * the replacement then finds as a failure it did not make. The test kills the body on the way and reads the navigator
+     * after the replacement's first brain tick.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 520)
+    public static void aBodyThatDiesWalkingToWaterLeavesTheNavigatorIdle(GameTestHelper helper) {
+        room(helper, true);
+        for (int x = 9; x <= 11; x++) {
+            for (int z = 7; z <= 9; z++) {
+                helper.setBlock(x, FLOOR_Y - 1, z, Blocks.STONE);
+                helper.setBlock(x, FLOOR_Y, z, Blocks.WATER);
+            }
+        }
+        Run run = Run.start(helper, "dwalk", new Vec3(1.5, FLOOR_Y + 1, 8.5), 520);
+        run.expectReplacement();
+        BotPlayer first = run.body();
+        first.setRemainingFireTicks(400);
+        boolean[] killed = {false};
+        run.each(480, () -> {
+            BotPlayer body = run.body();
+            ServerLevel level = helper.getLevel();
+            if (!killed[0]) {
+                if (!run.watch.lastHolder.equals("hazard") || BotNavigator.of(body).state() != BotNavigator.State.WORKING) return;
+                helper.assertTrue(run.watch.wasHeld, "setup: the hazard reflex is not holding the body");
+                body.hurt(level.damageSources().genericKill(), 1000.0F);
+                killed[0] = true;
+                return;
+            }
+            // The replacement's own first tick has run: the layer has met the new body.
+            if (body == first || run.watch.lastTicked != body) return;
+            BotNavigator nav = BotNavigator.of(body);
+            helper.assertTrue(nav.state() == BotNavigator.State.IDLE, "the replacement's navigator is " + nav.state() + " (" + nav.failKind() + "), not idle");
+            helper.assertTrue(nav.failKind() == null, "the replacement's navigator carries the dead body's failure: " + nav.failKind());
+            run.pass();
+        });
+    }
+
+    /**
+     * The policy is changed while the body lies asleep in its bed: it gets up. Protects: the sleep branch returning "still
+     * sleeping" before it looked at the policy (and at the morning), so that a body told to do something else stayed in bed
+     * until the game woke it. The night is spent (the body slept), and the result says so.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 760, batch = "reflex_night_wake")
+    public static void aPolicyChangedWhileAsleepGetsTheBodyUp(GameTestHelper helper) {
+        room(helper, false);
+        Run run = Run.start(helper, "wake", new Vec3(3.5, FLOOR_Y + 1, 7.5), 760);
+        run.setDayTime(18000L);
+        run.layer().setNightPolicy(ReflexConstants.NightPolicy.BED);
+        run.body().getInventory().setItem(20, new ItemStack(Items.DIRT, 20));
+        placeOwnedBed(helper, run.body(), new BlockPos(10, FLOOR_Y + 1, 7));
+        int[] changedAt = {-1};
+        run.each(740, () -> {
+            BotPlayer now = run.body();
+            ReflexLayer layer = run.layer();
+            if (changedAt[0] < 0) {
+                if (!now.isSleeping()) return;
+                layer.setNightPolicy(ReflexConstants.NightPolicy.IGNORE);
+                changedAt[0] = run.ticks;
+                return;
+            }
+            if (now.isSleeping()) {
+                helper.assertTrue(run.ticks - changedAt[0] < 40, "still asleep " + (run.ticks - changedAt[0]) + " ticks after the policy changed");
+                return;
+            }
+            helper.assertTrue(layer.lastNightResult() == ReflexLayer.NightResult.SLEPT, "the night ended as " + layer.lastNightResult() + ", the body had slept");
+            run.pass();
+        });
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // Terrain and measuring
     // ---------------------------------------------------------------------------------------------------------
 
@@ -1002,6 +1180,8 @@ public final class ReflexGameTests {
         int holdsEnded;
         int blockingTicks;
         boolean wasHeld;
+        /** The body this brain was last ticked with: a replacement's first tick shows here. */
+        BotPlayer lastTicked;
         boolean navigatorRanWhileHeld;
         final Set<String> reflexes = new LinkedHashSet<>();
         String lastHolder = "";
@@ -1031,6 +1211,7 @@ public final class ReflexGameTests {
         public void tick(BotPlayer body) {
             ReflexLayer layer = ReflexLayer.of(body);
             ReflexHold hold = layer.tick(body);
+            lastTicked = body;
             BotNavigator nav = BotNavigator.of(body);
             if (body.isBlocking()) blockingTicks++;
             String holder = layer.holderName();
@@ -1164,6 +1345,15 @@ public final class ReflexGameTests {
             ServerLevel level = helper.getLevel();
             Creeper creeper = EntityType.CREEPER.create(level);
             place(creeper, relative);
+            return creeper;
+        }
+
+        /** A creeper that stands where it is put (no AI) and is after the body. */
+        Creeper pinnedCreeper(Vec3 relative) {
+            Creeper creeper = EntityType.CREEPER.create(helper.getLevel());
+            creeper.setNoAi(true);
+            place(creeper, relative);
+            creeper.setTarget(body());
             return creeper;
         }
 

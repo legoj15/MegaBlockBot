@@ -16,13 +16,14 @@ import net.minecraft.world.phys.AABB;
 /**
  * Who is a threat to a body (design 3.2, item 2): a hostile mob whose target is the body, or any hostile within melee
  * range, and in both cases one the body could see. The sight rule is what keeps a body that is walled into its shelter
- * from fighting the zombies outside it: a player could not hit them either.
+ * from fighting the zombies outside it: a player could not hit them either. A creeper that targets the body counts only
+ * within the reach of its blast or while it is coming closer ({@link ApproachWatch}); one that hovers farther off is watched.
  */
 final class Threats {
     private Threats() {}
 
     /** The threats around {@code body}, nearest first, leaving out mobs it has given up on ({@code ignored}: mob to the tick until which). */
-    static List<Threat> scan(BotPlayer body, ServerLevel level, Map<UUID, Long> ignored, long now) {
+    static List<Threat> scan(BotPlayer body, ServerLevel level, Map<UUID, Long> ignored, ApproachWatch approach, long now) {
         AABB box = body.getBoundingBox().inflate(ReflexConstants.SCAN_RADIUS, ReflexConstants.SCAN_HEIGHT, ReflexConstants.SCAN_RADIUS);
         List<Threat> found = new ArrayList<>();
         for (Mob mob : level.getEntitiesOfClass(Mob.class, box, m -> m.isAlive() && isHostile(m, body))) {
@@ -31,7 +32,9 @@ final class Threats {
             if (!body.hasLineOfSight(mob)) continue;
             boolean targets = mob.getTarget() == body;
             double distance = body.distanceTo(mob);
-            Threat threat = mob instanceof Creeper creeper ? ofCreeper(creeper, distance, targets) : ordinary(mob, distance, targets);
+            // Only a creeper that is after the body and far off needs its approach watched: nearer ones are threats at once.
+            boolean closing = mob instanceof Creeper && targets && approach.closing(mob.getUUID(), now, mob.position(), body.position());
+            Threat threat = mob instanceof Creeper creeper ? ofCreeper(creeper, distance, targets, closing) : ordinary(mob, distance, targets);
             if (threat != null) found.add(threat);
         }
         found.sort(Comparator.comparingDouble(Threat::distance));
@@ -50,7 +53,7 @@ final class Threats {
         return new Threat(mob, distance, targets, false, false, false, false);
     }
 
-    private static Threat ofCreeper(Creeper creeper, double distance, boolean targets) {
+    private static Threat ofCreeper(Creeper creeper, double distance, boolean targets, boolean closing) {
         boolean powered = creeper.isPowered();
         double safe = powered ? ReflexConstants.POWERED_CREEPER_SAFE_DISTANCE : ReflexConstants.CREEPER_SAFE_DISTANCE;
         boolean fusing = creeper.getSwellDir() > 0 || creeper.isIgnited();
@@ -58,8 +61,11 @@ final class Threats {
         if (!targets && !fusing && distance > ReflexConstants.MELEE_TRIGGER) return null;
         // Beyond the blast and with no fuse lit, a creeper that is not after the body is only a mob that has not got here yet.
         if (!targets && distance >= safe && !fusing) return null;
-        // One that is after the body counts from wherever it is seen: it is never approached, and the gap is kept or
-        // widened from the first sight of it, not from the edge of the blast.
+        // One that is after the body but beyond the blast and not coming (it hovers, stuck behind a river or among trees) is
+        // watched, not run from: a retreat from each sight of one took the body out of sight, the hold ended, the executor walked
+        // it back, and the creeper was in sight again, nine holds in thirty seconds. Once it is within the blast's reach, or
+        // closing, it is a threat from the first tick: the gap is kept or widened, never closed.
+        if (targets && !fusing && distance >= safe && !closing) return null;
         boolean about = fusing || targets || distance <= ReflexConstants.CREEPER_SWELL_RANGE;
         return new Threat(creeper, distance, targets, true, powered, about, fusing);
     }

@@ -27,6 +27,8 @@ final class ShelterBlocks {
         final BlockPos pos;
         final Block block;
         long retryAt;
+        /** Takedown attempts at this block that failed; each doubles the wait before the next ({@link ShelterBlocks#fail}). */
+        int failures;
 
         Entry(ResourceKey<Level> dimension, BlockPos pos, Block block) {
             this.dimension = dimension;
@@ -101,6 +103,19 @@ final class ShelterBlocks {
     /** Whether the entry is still on the list (it is taken off when its block is gone). */
     boolean isRecorded(Entry entry) {
         return entries.contains(entry);
+    }
+
+    /**
+     * A takedown attempt at this block failed (it could not be seen, reached or broken): it is asked about again after
+     * {@link ReflexConstants#TAKEDOWN_RETRY_TICKS}, twice that after the next failure, and so on up to a day. The block stays
+     * recorded. {@code floor} is a wait it must have at least (a block the break rules refused: the protected zone does not
+     * move in a few minutes).
+     */
+    void fail(Entry entry, long now, long floor) {
+        entry.failures++;
+        long wait = ReflexConstants.TAKEDOWN_RETRY_TICKS;
+        for (int i = 1; i < entry.failures && wait < ReflexConstants.TAKEDOWN_MAX_WAIT_TICKS; i++) wait *= 2;
+        entry.retryAt = now + Math.min(ReflexConstants.TAKEDOWN_MAX_WAIT_TICKS, Math.max(wait, floor));
     }
 
     /** Puts every entry of this level that is due off until {@code until}: an attempt that could not finish them is not repeated at once. */

@@ -56,7 +56,8 @@ import net.minecraft.world.phys.Vec3;
  * <p><b>The blocks it placed</b> are recorded in the layer ({@link ShelterBlocks}), not here, and leave the record only when
  * the world no longer holds them. A takedown that cannot finish (the time ran out, the body was carried off by a fight,
  * the break rules refused a block) ends and is tried again by a later calm tick in daylight; the walk back to a block that
- * is out of reach is part of it.
+ * is out of reach is part of it. Each failed attempt at the same block doubles the wait before the next ({@link ShelterBlocks#fail}),
+ * so a block that cannot be taken down does not take the body every few seconds for the rest of the day.
  */
 final class NightReflex implements Reflex {
     private enum Phase { IDLE, GO_TO_SPOT, GO_TO_BED, SLEEP, BUILD, WAIT, TAKEDOWN, RETURN, COLLECT }
@@ -557,6 +558,8 @@ final class NightReflex implements Reflex {
         List<ShelterBlocks.Entry> due = shelter.due(ctx.level, ctx.time, body);
         due.removeIf(entry -> skipped.contains(entry.pos));
         if (due.isEmpty() || ctx.time - takedownSince > ReflexConstants.TAKEDOWN_TIMEOUT_TICKS) {
+            // Out of time with a block half done: that attempt failed (the others it never got to are only put off).
+            if (!due.isEmpty() && target != null) shelter.fail(target, ctx.time, 0L);
             endTakeDown(ctx);
             return;
         }
@@ -574,7 +577,7 @@ final class NightReflex implements Reflex {
                 // and is asked about again much later.
                 MegaBlockBot.LOGGER.warn("reflex {}: the break rules refuse the shelter block at {}; it stays recorded",
                     body.getGameProfile().getName(), target.pos);
-                target.retryAt = ctx.time + ReflexConstants.REFUSED_RETRY_TICKS;
+                shelter.fail(target, ctx.time, ReflexConstants.REFUSED_RETRY_TICKS);
                 target = null;
             }
             case UNREACHABLE -> {
@@ -583,8 +586,9 @@ final class NightReflex implements Reflex {
                     enter(Phase.RETURN, ctx);
                     cause = "walking back to the shelter block at " + target.pos.toShortString();
                 } else {
-                    // Near, and no face can be seen from here: the others first, and this one at the next attempt.
+                    // Near, and no face can be seen from here: the others first, and this one at the next attempt (later each time).
                     skipped.add(target.pos);
+                    shelter.fail(target, ctx.time, 0L);
                     target = null;
                 }
             }
@@ -611,8 +615,9 @@ final class NightReflex implements Reflex {
         boolean stuck = ctx.nav.state() == BotNavigator.State.FAILED || ctx.nav.state() == BotNavigator.State.DONE
             || ctx.time - phaseSince > ReflexConstants.SPOT_WALK_TICKS;
         if (stuck) {
-            // Cannot be got to from here, or too slow: not this one now; it stays recorded for the next attempt.
+            // Cannot be got to from here, or too slow: not this one now; it stays recorded for the next attempt (later each time).
             skipped.add(target.pos);
+            shelter.fail(target, ctx.time, 0L);
             ctx.nav.stop();
             target = null;
             phase = Phase.TAKEDOWN;
@@ -742,17 +747,20 @@ final class NightReflex implements Reflex {
     private void sleep(ReflexContext ctx, boolean night, NightPolicy policy) {
         BotPlayer body = ctx.body;
         Steer.stand(body);
-        if (body.isSleeping()) {
-            slept = true;
-            cause = "sleeping";
-            return;
-        }
+        boolean asleep = body.isSleeping();
+        if (asleep) slept = true;
+        // Morning and a changed policy are looked at before "still sleeping" is answered: a body whose night is over, or that
+        // was told to do something else, gets up now (the hold ends and its release wakes it) and not when the game does.
         if (!night || slept && policy != NightPolicy.BED) {
             endBedNight(ctx, "morning came before the body slept");
             return;
         }
         if (policy != NightPolicy.BED) {
             policyChanged(ctx, policy);
+            return;
+        }
+        if (asleep) {
+            cause = "sleeping";
             return;
         }
         // Awake at night: the first try was too early (sleep is possible from tick 12542), or something woke the body.
