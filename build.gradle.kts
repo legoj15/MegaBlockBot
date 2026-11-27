@@ -180,10 +180,21 @@ dependencies {
     testImplementation(platform("org.junit:junit-bom:5.10.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    // core/lang/model parses JSON with Gson. Minecraft bundles it on every node (main compiles against it there:
+    // 2.10.1 on 1.21.1, 2.11.0 on 1.21.10, 2.13.2 on 1.21.11, read from each version manifest), but the test classpath
+    // has no Minecraft, so it is added here at the oldest of those, 1.21.1's, to keep the code on API every node has.
+    testImplementation("com.google.code.gson:gson:2.10.1")
 }
 
 tasks.test {
     useJUnitPlatform()
+    // `-Dmbb.<name>=...` on the gradlew command line reaches the test JVM (the live model probe is switched on
+    // this way, see LiveModelProbe); nothing else is forwarded.
+    System.getProperties().stringPropertyNames().filter { it.startsWith("mbb.") }.forEach { name ->
+        systemProperty(name, System.getProperty(name))
+    }
+    // The probe's table is its output, so show test output only on a run that asked for it.
+    if (System.getProperty("mbb.liveProbe") != null) testLogging.showStandardStreams = true
 }
 
 // ModDevGradle must wait for Stonecutter to emit this node's sources before it resolves them (it reads main's

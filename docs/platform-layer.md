@@ -7,8 +7,9 @@ BuildCraft's design (`../BuildCraft/docs/platform-layer.md`); read that for the 
 
 - `com.legoj15.megablockbot` and everything outside `platform/<loader>/`: common code. Compiles against
   the JDK, vanilla Minecraft, solver-core and `platform` contracts only.
-- `com.legoj15.megablockbot.core`: Minecraft-free contract types (JDK and solver-core only); plain JUnit
-  tests for it live in `src/test/java`.
+- `com.legoj15.megablockbot.core`: Minecraft-free contract types (JDK and solver-core only; `core.lang.model` also
+  uses Gson, which Minecraft bundles on every node, see `docs/language-layer.md`); plain JUnit tests for it live in
+  `src/test/java`.
 - `com.legoj15.megablockbot.game`: everything that touches Minecraft for the bot. Bot nodes only (below).
 - `com.legoj15.megablockbot.nav`: the navigation module, its own mod and jar (below). Sources in `src/nav/`.
 - `com.legoj15.megablockbot.platform`: loader-neutral contracts (one interface per service, e.g.
@@ -151,8 +152,10 @@ runs wherever the command tree is built (a worker thread while data loads).
 ## Checks
 
 - `gradlew buildAll` builds every node's jar into `versions/<node>/build/libs/`.
-- `gradlew :<node>:test` runs the plain JUnit 5 tests of `core` (`src/test/java`, no Minecraft on the classpath).
-  Every node's `check` runs them.
+- `gradlew :<node>:test` runs the plain JUnit 5 tests of `core` (`src/test/java`, no Minecraft on the classpath; Gson
+  is added to it explicitly at 1.21.1's version). Every node's `check` runs them. `-Dmbb.<name>=...` on the command
+  line reaches the test JVM; `-Dmbb.liveProbe=<base URL>` switches on the live language-model probe, which the
+  default run skips (`docs/language-layer.md`).
 - `scripts/smoke-server.ps1 [-Nodes …]` starts each node's dev server and passes when the log shows
   `MegaBlockBot ready (NeoForge on Minecraft <version>)`. Logs land in `build/smoke/`.
 - `scripts/gametest.ps1 [-Node 1.21.1]` runs `:<node>:runGameTestServer` (bot nodes; game directory

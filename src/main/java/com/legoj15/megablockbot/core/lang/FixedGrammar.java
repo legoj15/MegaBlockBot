@@ -102,17 +102,20 @@ public final class FixedGrammar implements LanguageLayer {
     /** Fewest leading characters an unknown enchantment id must share with a known one for it to be suggested. */
     private static final int MIN_SHARED_START = 2;
 
-    /** Inclusive bounds of the radius of {@code within}, in blocks. */
-    private static final int MIN_RADIUS = 0, MAX_RADIUS = 256;
+    /**
+     * Inclusive bounds of the radius of {@code within}, in blocks. Public because the model-backed layer holds a
+     * model's goals to the same ranges (design 3.3).
+     */
+    public static final int MIN_RADIUS = 0, MAX_RADIUS = 256;
 
     /** The longest run of words {@code equip} reads as one item name. */
     private static final int MAX_ITEM_WORDS = 4;
 
-    /** Inclusive bounds of a count the grammar accepts. */
-    private static final int MIN_COUNT = 1, MAX_COUNT = 10000;
+    /** Inclusive bounds of a count the grammar accepts (public: the model-backed layer uses the same ones). */
+    public static final int MIN_COUNT = 1, MAX_COUNT = 10000;
 
-    /** The game stores enchantment levels up to 255. */
-    private static final int MAX_LEVEL = 255;
+    /** The game stores enchantment levels up to 255 (public: the model-backed layer uses the same bound). */
+    public static final int MAX_LEVEL = 255;
 
     /** Separates commands in one message: a semicolon or the standalone word "then". */
     private static final Pattern COMMAND_SPLIT = Pattern.compile("\\s*;\\s*(?:then\\s+)?|\\s+then\\s+");
@@ -312,8 +315,11 @@ public final class FixedGrammar implements LanguageLayer {
         return slots;
     }
 
-    /** The slot an item's registry id implies: {@code *_helmet} head, {@code shield} offhand, else mainhand. */
-    private static EquipSlot slotFor(String path) {
+    /**
+     * The slot an item's registry id path implies: {@code *_helmet} head, {@code shield} offhand, else mainhand.
+     * Public so the model-backed layer files an equip goal's items the way the grammar does.
+     */
+    public static EquipSlot slotFor(String path) {
         if (path.endsWith("helmet")) return EquipSlot.HEAD;
         if (path.endsWith("chestplate") || path.equals("elytra")) return EquipSlot.CHEST;
         if (path.endsWith("leggings")) return EquipSlot.LEGS;

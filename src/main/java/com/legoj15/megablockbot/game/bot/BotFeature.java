@@ -1,7 +1,10 @@
 package com.legoj15.megablockbot.game.bot;
 
+import com.legoj15.megablockbot.MegaBlockBot;
+import com.legoj15.megablockbot.core.lang.model.ModelLanguageLayer;
 import com.legoj15.megablockbot.game.body.BotBrains;
 import com.legoj15.megablockbot.game.gametest.BotRuntimeGameTests;
+import com.legoj15.megablockbot.game.lang.ModelLanguageConfig;
 import com.legoj15.megablockbot.game.task.CraftTask;
 import com.legoj15.megablockbot.game.task.EquipTask;
 import com.legoj15.megablockbot.game.task.TaskRegistry;
@@ -24,6 +27,15 @@ public final class BotFeature {
 
         TaskRegistry.register(CraftTask.KIND, CraftTask::new);
         TaskRegistry.register(EquipTask.KIND, EquipTask::new);
+
+        // The owner's words go through a language model when megablockbot/language.json names one; with none (the
+        // default, written when the file is missing) the layer is the fixed grammar and makes no request.
+        try {
+            LanguageLayers.set(new ModelLanguageLayer(ModelLanguageConfig.load(Platform.loader().configDir())));
+        } catch (RuntimeException e) {
+            // A bad language config must never stop the server: the fixed grammar stays.
+            MegaBlockBot.LOGGER.error("Could not set up the language model; only the fixed commands work", e);
+        }
 
         BotCommands.register();
         // Chat is the owner's voice; the line is read on the server thread, after the loader's own handling.
