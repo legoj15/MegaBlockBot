@@ -930,12 +930,32 @@ abstract class StationTask extends BodyTask {
     }
 
     /**
-     * Takes into the hand the hotbar slot that breaks the block fastest, and of equals one that cannot wear out, as a
-     * player reaches for an axe or an empty hand: a station broken with the pickaxe just made would cost it durability
-     * for nothing.
+     * Takes into the hand what the block is to be broken with. A block that drops nothing without the right tool (a
+     * furnace) gets that tool, the fastest carried, from anywhere in the inventory: putting the station into the hand
+     * to place it swaps whatever was there out of the hotbar, often the pickaxe, and a furnace broken with what was
+     * left in reach is a furnace destroyed. Any other block gets the hotbar slot that breaks it fastest, and of
+     * equals one that cannot wear out, as a player reaches for an axe or an empty hand: a table broken with the
+     * pickaxe just made would cost it durability for nothing.
      */
     static void selectBreakingTool(BotPlayer body, BlockState state) {
         var inventory = body.getInventory();
+        if (state.requiresCorrectToolForDrops()) {
+            int tool = -1;
+            float toolSpeed = -1.0F;
+            for (int slot = 0; slot < MenuHand.CARRIED_SLOTS; slot++) {
+                ItemStack stack = inventory.getItem(slot);
+                if (stack.isEmpty() || !stack.isCorrectToolForDrops(state)) continue;
+                float speed = stack.getDestroySpeed(state);
+                if (speed > toolSpeed) {
+                    toolSpeed = speed;
+                    tool = slot;
+                }
+            }
+            if (tool >= 0) {
+                Weapons.toMainHand(body, tool);
+                return;
+            }
+        }
         int best = inventory.selected;
         float bestSpeed = -1.0F;
         boolean bestSafe = false;

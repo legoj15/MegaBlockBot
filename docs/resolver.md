@@ -91,6 +91,16 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
   feature: of those peaking at or below the dimension's sea level (the noise settings' `sea_level`), the one with the
   largest veins, then the widest range; when none peaks that low, the lowest peak. So iron is 16 (the middle feature),
   not the mountain-only 232, and diamond is -64.
+- Mining sources say whether the world generates their block (`MineBlock.generated`, read by `NaturalBlocks`): every
+  configured feature and every dimension's terrain settings is written out through its own codec and each block id in
+  the result counts, so a mod's ores and plants are covered unnamed. A feature that places a block from its own code
+  with nothing in its configuration is missed; the four such blocks that a recipe also makes are listed by hand with
+  their feature (`PLACED_BY_CODE`: glowstone, the snow layer, dripstone block, bone block). Structures are not read.
+  The planner asks only about blocks a recipe makes: one of those that the world does not generate (a crafting table,
+  planks, a campfire, a bookshelf) is not a source, whatever it drops; a generated one stays (diorite, clay, a melon),
+  and so does every block no recipe makes. Before this the rule was "a block that drops itself and has a recipe",
+  which let a live run go looking for a campfire to get charcoal from and kept diorite from being mined. A failed read
+  counts every block as generated: a wasted search at worst, never a lost source.
 - Kill sources: entity types that have attributes (a living entity), other than the player and the armor stand. Each
   carries what the fight is, from the type's default attributes: `health` (max health), `attack` (attack damage, 0
   when it has none) and `spawnsNaturally` (its spawn category is not `MISC`: a golem or a villager stands only where a

@@ -90,6 +90,31 @@ public final class ResolverGameTests {
         helper.succeed();
     }
 
+    /**
+     * Which blocks the world generates is read from the generator's own data. What it protects: a read that finds
+     * nothing would leave every made block's source standing (a wasted search each), and one that finds too little
+     * would take real sources away, so both sides are asked, by blocks a first day's plan meets.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void generatedBlocksAreToldFromMadeOnes(GameTestHelper helper) {
+        AcquisitionIndex index = index(helper);
+        String[][] generated = {
+            {"minecraft:cobblestone", "minecraft:stone"}, {"minecraft:oak_log", "minecraft:oak_log"},
+            {"minecraft:raw_iron", "minecraft:iron_ore"}, {"minecraft:coal", "minecraft:coal_ore"},
+            {"minecraft:diorite", "minecraft:diorite"}, {"minecraft:clay_ball", "minecraft:clay"},
+            {"minecraft:sand", "minecraft:sand"}, {"minecraft:glowstone_dust", "minecraft:glowstone"}};
+        for (String[] pair : generated) {
+            helper.assertTrue(mine(helper, index, pair[0], pair[1], false).generated(), pair[1] + " is not counted as generated");
+        }
+        String[][] made = {
+            {"minecraft:charcoal", "minecraft:campfire"}, {"minecraft:book", "minecraft:bookshelf"},
+            {"minecraft:crafting_table", "minecraft:crafting_table"}, {"minecraft:oak_planks", "minecraft:oak_planks"}};
+        for (String[] pair : made) {
+            helper.assertTrue(!mine(helper, index, pair[0], pair[1], false).generated(), pair[1] + " is counted as generated");
+        }
+        helper.succeed();
+    }
+
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
     public static void logsNeedNoTool(GameTestHelper helper) {
         AcquisitionIndex index = index(helper);

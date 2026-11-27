@@ -6,6 +6,7 @@ import com.legoj15.megablockbot.core.lang.Intent;
 import com.legoj15.megablockbot.core.lang.LanguageContext;
 import com.legoj15.megablockbot.game.body.BodyManager;
 import com.legoj15.megablockbot.game.body.BotPlayer;
+import com.legoj15.megablockbot.game.build.Blueprints;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
@@ -177,7 +178,7 @@ public final class BotTalk {
         body.registryAccess().registryOrThrow(Registries.ENCHANTMENT).keySet()
                 .forEach(id -> enchantments.add(id.toString()));
         return new LanguageContext(new RegistryItemSearch(), body.level().dimension().location().toString(), ownerPos,
-                botPos, runtime.statusText(), List.of(), enchantments);
+                botPos, runtime.statusText(), Blueprints.names(), enchantments);
     }
 
     private static Pos pos(BlockPos pos) {

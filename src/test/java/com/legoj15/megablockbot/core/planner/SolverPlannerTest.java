@@ -2480,6 +2480,30 @@ final class SolverPlannerTest {
     }
 
     @Test
+    void aMadeBlockTheWorldDoesNotGenerateIsNotASourceWhateverItDrops() {
+        // A campfire gives charcoal when broken and stands only in a village. Diorite has a recipe too, and the
+        // generator places it. A vine has no recipe: where it comes from is not asked.
+        ItemKey campfire = ItemKey.of("campfire");
+        ItemKey diorite = ItemKey.of("diorite");
+        ItemKey vine = ItemKey.of("vine");
+        Source fromCampfire = new Source.MineBlock("mine:minecraft:campfire", CHARCOAL, "minecraft:campfire",
+                null, ToolTier.HAND, false, false, false, 2.0, false, null, false);
+        Source fromDiorite = new Source.MineBlock("mine:minecraft:diorite", diorite, "minecraft:diorite",
+                null, ToolTier.HAND, false, false, false, 1.0, false, null, true);
+        Source fromVine = new Source.MineBlock("mine:minecraft:vine", vine, "minecraft:vine",
+                null, ToolTier.HAND, false, false, false, 1.0, false, null, false);
+        AcquisitionIndex indexOf = AcquisitionIndex.builder().addSource(fromCampfire).addSource(fromDiorite)
+                .addSource(fromVine).build();
+        SimpleRecipeBook made = bookWith(
+                recipe("campfire", campfire, 1, CRAFTING_TABLE, one(STICK), one(COAL), one(OAK_LOG)),
+                recipe("diorite", diorite, 2, null, one(COBBLESTONE), one(AMBER)));
+        GatherCosts costs = new GatherCosts(made, indexOf, PlannerConfig.defaults(), Exclusions.NONE, EMPTY);
+        assertFalse(costs.usable(fromCampfire), "a campfire is not a place to go looking for charcoal");
+        assertTrue(costs.usable(fromDiorite), "a block the generator places is a source, recipe or not");
+        assertTrue(costs.usable(fromVine), "a block no recipe makes is a source without being asked");
+    }
+
+    @Test
     void aKillIsPricedByTheFightAndAMobThatDoesNotSpawnOnItsOwnIsNotHunted() {
         // A cow is the mob the base price is for; a zombie has twice its health and hits back; an iron golem gives
         // four ingots a kill and stands only where a village or a player made one.

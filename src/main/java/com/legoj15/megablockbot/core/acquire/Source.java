@@ -35,16 +35,25 @@ public sealed interface Source {
      * block no tool speeds up has tier {@link ToolTier#HAND}). A route that needs shears reports {@code toolClass}
      * SHEARS and tier HAND.
      *
-     * @param ore where the block generates as an ore, or null when no ore placed feature produces it
+     * @param ore       where the block generates as an ore, or null when no ore placed feature produces it
+     * @param generated true when the world generator places the block (a feature or the terrain names it); false for
+     *                  one that stands only in a structure or where someone placed it
      */
     record MineBlock(String id, ItemKey item, String block, ToolClass toolClass, ToolTier minTier, boolean toolRequired,
-                     boolean needsSilkTouch, boolean needsShears, double yield, boolean random, OreRange ore)
+                     boolean needsSilkTouch, boolean needsShears, double yield, boolean random, OreRange ore,
+                     boolean generated)
         implements Source {
         public MineBlock {
             Objects.requireNonNull(id, "id");
             Objects.requireNonNull(item, "item");
             Objects.requireNonNull(block, "block");
             Objects.requireNonNull(minTier, "minTier");
+        }
+
+        /** A block the world generates: what a fixture that is not about where blocks come from needs. */
+        public MineBlock(String id, ItemKey item, String block, ToolClass toolClass, ToolTier minTier, boolean toolRequired,
+                         boolean needsSilkTouch, boolean needsShears, double yield, boolean random, OreRange ore) {
+            this(id, item, block, toolClass, minTier, toolRequired, needsSilkTouch, needsShears, yield, random, ore, true);
         }
     }
 
