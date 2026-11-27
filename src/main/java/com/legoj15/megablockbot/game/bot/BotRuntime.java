@@ -78,6 +78,12 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     /** A loaded memory not yet installed: see the class comment. */
     @Nullable
     private CompoundTag pendingMemory;
+    /**
+     * Loaded shelter blocks of the reflex layer, not yet given back to it: like the memory, they are installed on the
+     * first tick, when a live body (and its level, to check the blocks against) is there.
+     */
+    @Nullable
+    private CompoundTag pendingShelterBlocks;
 
     /**
      * A table this body put down and was stopped before it took it up again (a restart, a cancel, a failure) is taken
@@ -179,7 +185,7 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         return executor.active();
     }
 
-    /** Makes this the body whose answers go out, and installs a parked memory. Every entry point calls it first. */
+    /** Makes this the body whose answers go out, and installs a parked memory and the layer's shelter blocks. Every entry point calls it first. */
     void attach(BotPlayer current) {
         if (body != current) {
             body = current;
@@ -188,6 +194,10 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         if (pendingMemory != null) {
             BotMemory.restore(current.getUUID(), pendingMemory);
             pendingMemory = null;
+        }
+        if (pendingShelterBlocks != null) {
+            ReflexSources.current().loadShelterBlocks(current, pendingShelterBlocks);
+            pendingShelterBlocks = null;
         }
     }
 
@@ -308,6 +318,14 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     @Override
     public void onDeath(BotPlayer dead, DeathRecord death) {
         attach(dead);
+        // The reflex layer is told before the executor is, so the hold ends with the body that died and not on the
+        // replacement's first tick (issue 29: a dead body's brain is not ticked, so the layer would hold on paper).
+        try {
+            ReflexSources.current().onDeath(dead);
+        } catch (RuntimeException e) {
+            // The layer must not throw; if it does, the drop of the hold falls to the replacement's first tick.
+            MegaBlockBot.LOGGER.error("The reflex source threw while {} died", dead.getGameProfile().getName(), e);
+        }
         if (tidy != null) {
             tidy.abort(dead, "died");
             tidy = null;
@@ -336,6 +354,13 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         tag.put("executor", NbtForm.toTag(executor.save()));
         if (bodyId != null) tag.put("memory", BotMemory.of(bodyId).save());
         else if (pendingMemory != null) tag.put("memory", pendingMemory.copy());
+        // The shelter blocks the layer remembers are the body's own state: a restart that loses them loses which
+        // blocks to take down (issue 29). Nothing standing, nothing written: a brain with no shelter saves as before.
+        if (body != null) {
+            CompoundTag shelter = new CompoundTag();
+            ReflexSources.current().saveShelterBlocks(body, shelter);
+            if (!shelter.isEmpty()) tag.put("shelterBlocks", shelter);
+        }
     }
 
     @Override
@@ -347,6 +372,9 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
             throw new IllegalArgumentException("the saved brain has schema " + schema + ", this build reads " + SAVE_SCHEMA);
         }
         if (tag.contains("memory", Tag.TAG_COMPOUND)) pendingMemory = tag.getCompound("memory").copy();
+        // The layer's shelter blocks are given back to it on the first tick, when the body's level can be asked what
+        // stands at each position now.
+        if (tag.contains("shelterBlocks", Tag.TAG_COMPOUND)) pendingShelterBlocks = tag.getCompound("shelterBlocks").copy();
         if (tag.contains("executor", Tag.TAG_COMPOUND)) {
             // No body yet: the executor takes the live one with its first tick, and replans then (design 3.4).
             executor.load(NbtForm.toMap(tag.getCompound("executor")), null);

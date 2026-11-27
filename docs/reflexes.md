@@ -44,6 +44,9 @@ What the layer does with the body:
   filter left at "break nothing" would have refused every break for the rest of the session), and one the dev command ends
   with `stop()`. A dropped hold gives the filter to the live body on its first tick, and stops the command it was running
   on that body's navigator, so the replacement starts from an idle navigator and not from the dead body's failed command.
+  **A hold ends with the body that died** (issue 29): a dead body's brain is not ticked, so the layer would only have
+  noticed on the replacement's first tick; `BotRuntime.onDeath` tells it through the reflex source (`ReflexSource.onDeath`)
+  and the hold and its per-hold state are dropped at once, in the tick the death is reported.
 - **A handover** from one reflex to another (a higher one takes the body from a lower) is one hold to the executor. The layer
   itself stops whatever navigator command the old holder had running and clears its own use of the navigator; the new holder
   starts with it idle and uses it only for a command it starts. A reflex's `release` need not (and cannot be relied on to).
@@ -139,8 +142,11 @@ What the layer does with the body:
      rules refused a block) ends, keeps them recorded and puts them off for 200 ticks; **a later calm tick in daylight takes them
      down**, wherever the body is within 48 blocks, walking back to a block that is out of reach (the navigator, 300 ticks at most,
      breaking nothing on the way). A shelter that is abandoned (the body was driven off it) keeps its blocks recorded the same
-     way. They are never forgotten while they stand; the record is in memory only (a server restart loses it, as it loses the
-     layer). **A block the body cannot take down does not keep taking the body**: each failed attempt at a block (no face of it
+     way. They are never forgotten while they stand, and **the record travels with the brain's save** (issue 29): `BotRuntime.save`
+     asks the reflex source for where they stand (dimension and position of each), `load` gives it back on the body's first
+     tick, and a position that no longer holds a shelter block -- air, another block, a dimension that is gone -- is dropped
+     rather than restored.
+     **A block the body cannot take down does not keep taking the body**: each failed attempt at a block (no face of it
      can be seen from where the body can stand, the navigator cannot get near it, the break rules refuse it) doubles the wait
      before the next, 400 ticks after the first, then 800, 1600 and so on up to a day (`TAKEDOWN_RETRY_TICKS`,
      `TAKEDOWN_MAX_WAIT_TICKS`), a refused one never under 6000; the block stays recorded. Without that, a block walled in by
@@ -184,6 +190,7 @@ when it has come 0.6 blocks nearer in 6 ticks (`CLOSING_MIN_BLOCKS`, `CLOSING_WI
 ticks past the last sight of a threat (`RETREAT_QUIET_TICKS`), and a shelter block that could not be taken down is asked
 about again after 400 ticks, doubling on each failure up to a day (`TAKEDOWN_RETRY_TICKS`, `TAKEDOWN_MAX_WAIT_TICKS`).
 
+
 ## Differences from the design text, and decisions
 
 - Design 3.4's resume gate lists "health above the retreat threshold". The mob hold ends on quiet; the vitals reflex then
@@ -219,7 +226,9 @@ body is carried off by the test, walks back, takes down, picks up), the BED poli
 skips does not switch off the next one; a policy changed on the way to bed builds a shelter and does not claim it slept), no
 hold at dusk with nothing to build with, a body that dies in a hold able to break blocks after its respawn, a handover from
 the hazard reflex stopping the navigator, a shooter that cannot be reached being hidden from, and a despawned body's layer
-dropped by the sweep.
+dropped by the sweep. Round four's additions (issue 29): a hold that ends in the very tick its body's death is reported, and shelter
+blocks that survive a save and a load into a fresh layer for the same body (the one that still stands is taken down, the
+one that was replaced by air is not among them).
 `ReflexRuntimeGameTests` (default-brain bodies, a mob arriving mid-goal; on every tick of every test the navigator's engine has
 not been ticked more often than the game): a craft finishing satisfied after a fight, a mining goal getting its blocks after a
 hold, a hold while the runtime's leftover-table step runs, a retreat that begins on the tick the hold does staying on (the

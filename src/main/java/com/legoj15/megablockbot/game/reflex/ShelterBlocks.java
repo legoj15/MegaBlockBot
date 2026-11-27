@@ -55,6 +55,11 @@ final class ShelterBlocks {
         return entries.size();
     }
 
+    /** Every recorded block, in any dimension: for the layer's save, which writes where they are and nothing else. */
+    List<Entry> recorded() {
+        return List.copyOf(entries);
+    }
+
     /**
      * Forgets the entries of this level whose block is gone or is something else now: they are not the body's to break any
      * more. A position in a chunk that is not loaded is not looked at (that would load it) and stays.

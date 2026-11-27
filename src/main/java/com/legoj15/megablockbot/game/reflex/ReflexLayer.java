@@ -16,10 +16,18 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
 
 /**
  * The reflex layer of one body (design 3.2): above whatever goal runs, every tick, it looks at the body and what is
@@ -253,6 +261,54 @@ public final class ReflexLayer {
      */
     public void rememberShelterBlock(ServerLevel level, BlockPos pos) {
         shelter.add(level, pos, level.getBlockState(pos).getBlock());
+    }
+
+    /**
+     * The shelter blocks this body has standing, as the brain's save holds them: the dimension and position of each, and
+     * nothing else. What the block is, the world says on the way back in (see {@link #loadShelterBlocks}).
+     */
+    public void saveShelterBlocks(CompoundTag tag) {
+        ListTag blocks = new ListTag();
+        for (ShelterBlocks.Entry entry : shelter.recorded()) {
+            CompoundTag each = new CompoundTag();
+            each.putString("dim", entry.dimension.location().toString());
+            each.putLong("pos", entry.pos.asLong());
+            blocks.add(each);
+        }
+        // Nothing standing, nothing written: a body with no shelter keeps the brain's save as it was.
+        if (!blocks.isEmpty()) tag.put("blocks", blocks);
+    }
+
+    /**
+     * Restores what {@link #saveShelterBlocks} wrote. A block that no longer holds a shelter block where the save had it
+     * -- air, another block, a position in a dimension that is gone or a chunk that is not loaded to look at -- is not
+     * the body's to take down any more and is dropped; the rest are recorded as they stand, and a calm daylight tick
+     * takes them down (issue 29: after a restart the body no longer knew which blocks were its own).
+     */
+    public void loadShelterBlocks(BotPlayer current, CompoundTag tag) {
+        MinecraftServer server = current.getServer();
+        ListTag blocks = tag.getList("blocks", Tag.TAG_COMPOUND);
+        for (int i = 0; i < blocks.size(); i++) {
+            CompoundTag each = blocks.getCompound(i);
+            ResourceLocation id = ResourceLocation.tryParse(each.getString("dim"));
+            ResourceKey<Level> dimension = id == null ? null : ResourceKey.create(Registries.DIMENSION, id);
+            ServerLevel level = server == null || dimension == null ? null : server.getLevel(dimension);
+            BlockPos pos = BlockPos.of(each.getLong("pos"));
+            if (level == null || !level.isLoaded(pos)) continue;
+            Block block = level.getBlockState(pos).getBlock();
+            if (!ReflexConstants.SHELTER_BLOCKS.contains(block.asItem())) continue;
+            shelter.add(level, pos, block);
+        }
+    }
+
+    /**
+     * The body died: the brain's {@code onDeath} says so through the reflex source. The hold ends with the body that
+     * died, at once, and its state with it -- not on the replacement's first tick, which is a tick the executor already
+     * counts as held (issue 29). The navigator, kept per UUID across respawns, is stopped on the dying instance, which
+     * is the one its command still follows.
+     */
+    public void bodyDied(BotPlayer dead) {
+        dropHold("the body died", dead);
     }
 
     public NightPolicy nightPolicy() {

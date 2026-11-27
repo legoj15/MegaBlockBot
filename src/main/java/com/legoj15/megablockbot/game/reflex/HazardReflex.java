@@ -3,7 +3,9 @@ package com.legoj15.megablockbot.game.reflex;
 import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
+import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.List;
 import java.util.Locale;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
@@ -35,6 +37,8 @@ final class HazardReflex implements Reflex {
     /** Per kind, the game time until which it is given up on. See {@link ReflexConstants#HAZARD_GIVE_UP_TICKS}. */
     private final EnumMap<Kind, Long> giveUpUntil = new EnumMap<>(Kind.class);
     private boolean gaveUp;
+    /** The kinds this hold gave up on before the one it ends on, in order: a handover to another hazard must not lose them. */
+    private final List<Kind> givenUpKinds = new ArrayList<>();
     private String cause = "";
     private String outcome = "";
     private boolean reachedWater;
@@ -70,6 +74,7 @@ final class HazardReflex implements Reflex {
             navFailed = false;
             waterTarget = null;
             outcome = "";
+            givenUpKinds.clear();
             return true;
         }
         if (++heldTicks > ReflexConstants.HAZARD_GIVE_UP_TICKS) {
@@ -79,6 +84,8 @@ final class HazardReflex implements Reflex {
             MegaBlockBot.LOGGER.info("reflex {}: gave up on {} after {} ticks; it is left alone for {} ticks", ctx.body.getGameProfile().getName(),
                 kind.name().toLowerCase(Locale.ROOT), heldTicks, ReflexConstants.HAZARD_GIVE_UP_TICKS);
             gaveUp = true;
+            // The story of the kind that was given up on stays in the outcome even though the hold goes on against the next.
+            givenUpKinds.add(kind);
             now = detect(ctx);
             if (now == null) return false;
             switchKind(now);
@@ -97,9 +104,14 @@ final class HazardReflex implements Reflex {
 
     @Override
     public void release(ReflexContext ctx) {
-        outcome = String.format(Locale.ROOT, "%s %s after %d ticks%s", kind.name().toLowerCase(Locale.ROOT), gaveUp ? "given up on" : "over",
-            heldTicks, reachedWater ? ", reached water" : "");
+        // A give-up that handed straight over to another hazard keeps both stories: the first kind is as much what the
+        // hold came to as the one it ended on (issue 29).
+        StringBuilder earlier = new StringBuilder();
+        for (Kind given : givenUpKinds) earlier.append(", ").append(given.name().toLowerCase(Locale.ROOT)).append(" given up on earlier");
+        outcome = String.format(Locale.ROOT, "%s %s after %d ticks%s%s", kind.name().toLowerCase(Locale.ROOT), gaveUp ? "given up on" : "over",
+            heldTicks, reachedWater ? ", reached water" : "", earlier);
         gaveUp = false;
+        givenUpKinds.clear();
         active = false;
         waterTarget = null;
     }

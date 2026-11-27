@@ -510,7 +510,10 @@ the task is aborted and the node marked SATISFIED; otherwise the task resumes. W
 shut the executor starts nothing: no replan, no new tree, no queued goal. Responses that arrive
 meanwhile (a `DIED` replan, the next queued goal) wait until the gate opens. If the gate stays shut past a configured limit (total paused ticks, or repeated
 preemptions within a window), the active node fails with `PREEMPT_STALLED`, so a spawner or an
-empty food supply cannot hold a goal paused forever without a result.
+empty food supply cannot hold a goal paused forever without a result. A death starts the count again: `onDeath` resets
+the goal's held ticks and its preemption window, as a goal's start does, so a goal that has just lost its kit to a death
+is not also given up for the holds that led to it. The death cap (`maxDeathsPerGoal`, three per goal) is what bounds a
+goal that keeps dying.
 
 **Persistence.** Two records, both schema-versioned:
 - **Body record**, in a server-level saved-data file: body UUID and name, owner, dimension and

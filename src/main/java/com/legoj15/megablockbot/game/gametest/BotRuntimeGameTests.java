@@ -909,7 +909,29 @@ public final class BotRuntimeGameTests {
         rig.give(Items.OAK_LOG, 1);
         ReflexSource before = ReflexSources.current();
         boolean[] held = {true};
-        ReflexSources.set(body -> body.getUUID().equals(rig.id()) && held[0] ? new ReflexHold(true, "a test") : before.holdFor(body));
+        // The source is the server's one: every other body's calls go on to the real one, all of them (a wrapper that
+        // passed only holdFor on would swallow the deaths and the saves of the tests running beside this one).
+        ReflexSources.set(new ReflexSource() {
+            @Override
+            public ReflexHold holdFor(BotPlayer body) {
+                return body.getUUID().equals(rig.id()) && held[0] ? new ReflexHold(true, "a test") : before.holdFor(body);
+            }
+
+            @Override
+            public void onDeath(BotPlayer body) {
+                before.onDeath(body);
+            }
+
+            @Override
+            public void saveShelterBlocks(BotPlayer body, CompoundTag out) {
+                before.saveShelterBlocks(body, out);
+            }
+
+            @Override
+            public void loadShelterBlocks(BotPlayer body, CompoundTag in) {
+                before.loadShelterBlocks(body, in);
+            }
+        });
         rig.atEnd(() -> ReflexSources.set(before));
         int[] tick = {0};
         boolean[] queued = {false};

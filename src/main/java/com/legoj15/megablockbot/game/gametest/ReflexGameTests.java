@@ -7,6 +7,7 @@ import com.legoj15.megablockbot.game.body.BodyManager;
 import com.legoj15.megablockbot.game.body.BotBrain;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.body.DeathRecord;
+import com.legoj15.megablockbot.game.bot.ReflexSources;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
 import com.legoj15.megablockbot.game.reflex.ReflexConstants;
 import com.legoj15.megablockbot.game.reflex.ReflexLayer;
@@ -1091,6 +1092,95 @@ public final class ReflexGameTests {
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // Issue 29: a death, a restart
+    // ---------------------------------------------------------------------------------------------------------
+
+    /**
+     * A hold whose body dies is dropped in the tick the death is reported -- the brain's {@code onDeath} tells the layer
+     * through the reflex source, as the real brain does -- and not on the replacement's first tick. Protects: the
+     * executor counting a dead body's hold as held ticks against the goal (issue 29). The test kills the body mid-fight
+     * and asks the layer on that same tick, then checks the replacement starts unheld.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 320)
+    public static void aHoldEndsInTheTickTheBodyDies(GameTestHelper helper) {
+        room(helper, true);
+        Run run = Run.start(helper, "dhold", new Vec3(8.5, FLOOR_Y + 1, 8.5), 320);
+        run.expectReplacement();
+        BotPlayer first = run.body();
+        Zombie zombie = run.zombie(new Vec3(10.5, FLOOR_Y + 1, 8.5));
+        boolean[] killed = {false};
+        run.each(300, () -> {
+            BotPlayer body = run.body();
+            if (!killed[0]) {
+                if (!run.layer().isHolding()) return;
+                zombie.discard();
+                body.hurt(helper.getLevel().damageSources().genericKill(), 1000.0F);
+                killed[0] = true;
+                // die() told the brain, and the brain the reflex source, before it returned.
+                helper.assertTrue(!run.layer().isHolding(), "the layer still holds a body that died: " + run.layer().status());
+                helper.assertTrue(run.layer().holderName().isEmpty(), "the dead body is held by '" + run.layer().holderName() + "'");
+                return;
+            }
+            if (body == first || run.watch.lastTicked != body) return;
+            helper.assertTrue(!run.layer().isHolding(), "the replacement is held the moment it appears: " + run.layer().status());
+            run.pass();
+        });
+    }
+
+    /**
+     * Shelter blocks survive a save and a load: what the layer remembered as standing is saved with the brain's state,
+     * and a fresh layer for the same body (what a restart gets) takes the blocks back as its own -- except one that no
+     * longer holds a shelter block where the save had it. Protects: a restart forgetting which blocks to take down
+     * (issue 29). The takedown of the block that survived the load is what shows it was counted as the body's own. A
+     * batch of its own: the layer map is cleared to stand in for the restart, which is global state.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 460, batch = "reflex_shelter_save")
+    public static void shelterBlocksSurviveASaveAndALoad(GameTestHelper helper) {
+        room(helper, true);
+        // Two shelter blocks standing in the arena, put there by the test before it starts (setup, once).
+        BlockPos kept = new BlockPos(5, FLOOR_Y + 2, 8);
+        BlockPos gone = new BlockPos(10, FLOOR_Y + 2, 8);
+        helper.setBlock(kept, Blocks.DIRT);
+        helper.setBlock(gone, Blocks.DIRT);
+        Run run = Run.start(helper, "shsv", new Vec3(8.5, FLOOR_Y + 1, 8.5), 460);
+        run.setDayTime(1000L);
+        ServerLevel level = helper.getLevel();
+        int[] stage = {0};
+        run.each(420, () -> {
+            ReflexLayer layer = ReflexLayer.of(run.body());
+            switch (stage[0]) {
+                case 0 -> {
+                    // Both standing blocks are recorded as the body's shelter and saved as the brain saves them...
+                    layer.rememberShelterBlock(level, helper.absolutePos(kept));
+                    layer.rememberShelterBlock(level, helper.absolutePos(gone));
+                    CompoundTag tag = new CompoundTag();
+                    ReflexSources.current().saveShelterBlocks(run.body(), tag);
+                    // ...then one of them is gone by the time the brain loads again (taken down, or something broke it).
+                    helper.setBlock(gone, Blocks.AIR);
+                    // A restart: the layer map went with it, and a fresh layer is made for the same body.
+                    ReflexLayer.clearAll();
+                    ReflexLayer fresh = ReflexLayer.of(run.body());
+                    helper.assertTrue(fresh.recordedShelterBlocks() == 0, "setup: the fresh layer came with a record");
+                    ReflexSources.current().loadShelterBlocks(run.body(), tag);
+                    helper.assertTrue(fresh.recordedShelterBlocks() == 1, "the fresh layer counts "
+                        + fresh.recordedShelterBlocks() + " shelter blocks after the load, not the one that still stands");
+                    stage[0] = 1;
+                }
+                default -> {
+                    // The block the load kept is the body's own: a calm daylight tick takes it down. The other was air,
+                    // and never comes back.
+                    if (helper.getBlockState(kept).is(Blocks.DIRT)) return;
+                    helper.assertTrue(layer.recordedShelterBlocks() == 0, layer.recordedShelterBlocks()
+                        + " shelter blocks are still recorded after the takedown");
+                    MegaBlockBot.LOGGER.info("Reflex GameTest shelter save: the standing block was taken down after the load, {}",
+                        run.watch.summary());
+                    run.pass();
+                }
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // Terrain and measuring
     // ---------------------------------------------------------------------------------------------------------
 
@@ -1256,7 +1346,13 @@ public final class ReflexGameTests {
             return "holds " + holdsStarted + "/" + holdsEnded + ", " + heldTicks + " ticks held by " + reflexes + ", last cause '" + lastCause + "'";
         }
 
-        @Override public void onDeath(BotPlayer body, DeathRecord death) {}
+        @Override
+        public void onDeath(BotPlayer body, DeathRecord death) {
+            // What the real brain does (BotRuntime.onDeath): a hold ends with the body that died, the moment it is
+            // reported, and not on the replacement's first tick.
+            ReflexSources.current().onDeath(body);
+        }
+
         @Override public void onRespawn(BotPlayer newBody) {}
         @Override public boolean wantsToStayLoaded() { return true; }
         @Override public void save(CompoundTag tag, HolderLookup.Provider registries) {}

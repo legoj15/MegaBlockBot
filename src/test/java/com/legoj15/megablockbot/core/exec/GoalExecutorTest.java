@@ -722,6 +722,37 @@ class GoalExecutorTest {
         assertEquals(Failure.Kind.PREEMPT_STALLED, host.published.get(0).failure().kind());
     }
 
+    // --- A death starts the preemption count again (issue 29) --------------------------------
+
+    /** Two holds that add up past the paused-tick limit, with a death between them, do not give the goal up. */
+    @Test
+    void holdsAroundADeathDoNotAddUpToThePreemptionLimit() {
+        config = with(c -> c.preemptMaxPausedTicks = 10);
+        rebuild();
+        host.tasks.add(new Fakes.FakeTask());
+        runToActive(diamondLeaf("mine:ore"));
+        for (int i = 0; i < 6; i++) exec.tick(BODY, new ReflexHold(true, "mobs: cornered, fighting pillager"));
+        exec.onDeath(new Failure.Died("minecraft:overworld", new Pos(5, 60, 5), List.of(), 1L, "shot by Pillager"));
+        exec.onRespawn();
+        for (int i = 0; i < 6; i++) exec.tick(BODY, new ReflexHold(true, "mobs: fleeing from pillager"));
+        assertTrue(exec.active(), "the goal was given up for the holds that led to the death");
+        assertTrue(host.published.isEmpty());
+    }
+
+    /** The same holds without the death do: the count is per goal, and nothing reset it. */
+    @Test
+    void theSameHoldsWithoutADeathDoAddUpToThePreemptionLimit() {
+        config = with(c -> c.preemptMaxPausedTicks = 10);
+        rebuild();
+        host.tasks.add(new Fakes.FakeTask());
+        runToActive(diamondLeaf("mine:ore"));
+        for (int i = 0; i < 6; i++) exec.tick(BODY, new ReflexHold(true, "mobs: cornered, fighting pillager"));
+        exec.onRespawn(); // a respawn with no death told: the executor heard nothing that starts the count again
+        for (int i = 0; i < 6; i++) exec.tick(BODY, new ReflexHold(true, "mobs: fleeing from pillager"));
+        assertEquals(GoalResult.Status.FAILED, host.published.get(0).status());
+        assertEquals(Failure.Kind.PREEMPT_STALLED, host.published.get(0).failure().kind());
+    }
+
     // --- Budgets and watchdog ----------------------------------------------------------------
 
     @Test

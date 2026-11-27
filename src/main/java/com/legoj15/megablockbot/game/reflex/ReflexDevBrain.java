@@ -18,11 +18,12 @@ final class ReflexDevBrain implements BotBrain {
         ReflexLayer.of(body).tick(body);
     }
 
-    /** A death is a result of an evidence run: say what did it. */
+    /** A death is a result of an evidence run: say what did it, and end the hold with the body that died. */
     @Override
     public void onDeath(BotPlayer body, DeathRecord death) {
         MegaBlockBot.LOGGER.info("reflex {}: DIED: {} (at {}, {}; reflex status: {})", body.getGameProfile().getName(),
             body.getCombatTracker().getDeathMessage().getString(), death.pos().toShortString(), death.dimension(), ReflexLayer.of(body).status());
+        ReflexLayer.of(body).bodyDied(body);
     }
 
     @Override public void onRespawn(BotPlayer newBody) {}

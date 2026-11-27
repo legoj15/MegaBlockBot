@@ -283,6 +283,11 @@ public final class GoalExecutor<B> {
     public void onDeath(Failure.Died death) {
         guarded("onDeath", () -> {
             if (run == null) return;
+            // The preemption count starts again, as it does when a goal starts: a goal that has just lost its kit to a
+            // death is not also given up for the holds that led to it (issue 29 -- the live run's goal went to
+            // PREEMPT_STALLED on the held ticks of the very fight that killed the body). The death cap is what bounds
+            // a goal that keeps dying.
+            preemption.resetForGoal();
             clearTicket();
             ExecNode<B> active = findActive();
             if (active != null) {
