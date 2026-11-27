@@ -814,6 +814,7 @@ public final class ReflexGameTests {
         run.body().getInventory().setItem(21, new ItemStack(Items.IRON_SWORD));
         int[] stage = {0};
         int[] peak = {0};
+        int[] waited = {0};
         Zombie[] zombie = {null};
         run.each(1750, () -> {
             BotPlayer now = run.body();
@@ -842,6 +843,9 @@ public final class ReflexGameTests {
                     if (run.layer().isHolding()) return;
                     helper.assertTrue(run.watch.reflexes.contains("mobs"), "the fight never happened: " + run.watch.summary());
                     int standing = countBlock(helper, Blocks.DIRT);
+                    // A block the body could not get at in this hold is tried again after TAKEDOWN_RETRY_TICKS, in a hold
+                    // of its own: "afterwards" includes that, so a block still standing between two holds is waited for.
+                    if (standing > 0 && ++waited[0] < 2 * ReflexConstants.TAKEDOWN_RETRY_TICKS) return;
                     helper.assertTrue(standing == 0, standing + " dirt blocks still stand: the takedown was never finished");
                     int dirt = now.getInventory().countItem(Items.DIRT);
                     helper.assertTrue(dirt == 20, "the body carries " + dirt + " of its 20 dirt");
