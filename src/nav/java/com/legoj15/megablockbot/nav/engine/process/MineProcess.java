@@ -214,16 +214,19 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
       List<BlockPos> locs = this.knownOreLocations;
       if (locs.isEmpty() && !legit) {
          // MegaBlockBot: a block the owner's target policy holds back is not in this list, so when the blocks it preferred
-         // are gone the list is empty while the world is not. Look again -- on the search pool, the way every world scan
-         // this class makes is scheduled (onTick's rescan included; a scan on the server thread stalls the tick) -- and
+         // are gone the list is empty while the world is not. Look again -- on the search pool, as onTick's periodic rescan
+         // is (a scan on the server thread stalls the tick; only the first scan of a command, in mine(), runs there) -- and
          // idle this tick rather than end the command: the rescan fills the list, or ends the command itself when it finds
          // nothing, as it does when none was ever known. One at a time; a tick that still finds the list empty waits.
          if (!this.emptyListRescanPending) {
             this.emptyListRescanPending = true;
             CalculationContext context = new CalculationContext(this.baritone, true);
+            // The command this scan is for: a scan that starts after another command took the process over would fill
+            // that command's list from this one's question, or end it.
+            BlockOptionalMetaLookup asked = this.filter;
             NavRuntime.getExecutor().execute(() -> {
                try {
-                  this.rescan(new ArrayList<>(), context);
+                  if (this.filter == asked) this.rescan(new ArrayList<>(), context);
                } finally {
                   this.emptyListRescanPending = false;
                }
@@ -480,6 +483,8 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
          this.mine(quantity, (BlockOptionalMetaLookup)null);
       } else {
          this.desiredQuantity = quantity;
+         // MegaBlockBot: a scan the pool refused (it was shut down) never clears the flag itself; a new command starts clean.
+         this.emptyListRescanPending = false;
          this.knownOreLocations = new ArrayList<>();
          // MegaBlockBot: read by the search pool while the server thread adds to it. A process that ends (null filter)
          // keeps what it gave up on: it blacklists the last known block and cancels in the same tick, and its owner

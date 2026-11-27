@@ -857,14 +857,18 @@ public final class BotNavigator {
             airWithheld = false;
             return dry;
         }
-        if (open.isEmpty()) return open;
+        if (open.isEmpty()) {
+            airWithheld = false; // nothing is left to hold back: an old withholding must not start a wait
+            return open;
+        }
         if (wetCommitted || body.getAirSupply() >= body.getMaxAirSupply()) {
             wetCommitted = true;
             airWithheld = false;
             return open;
         }
-        airWithheld = true;
+        // The list before the flag: the tick thread reads the flag first, and must then find this withholding's list.
         withheldForAir = List.copyOf(open);
+        airWithheld = true;
         return List.of();
     }
 
