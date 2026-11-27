@@ -17,6 +17,7 @@ import com.legoj15.megablockbot.core.plan.NodeSpec;
 import com.legoj15.megablockbot.core.plan.PlanRequest;
 import com.legoj15.megablockbot.core.plan.Profile;
 import com.legoj15.megablockbot.core.planner.LookInside;
+import com.legoj15.megablockbot.core.planner.RecipeDef;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.megablockbot.core.task.Failure;
 import com.legoj15.megablockbot.core.task.Task;
@@ -49,6 +50,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.state.BlockState;
 
 /**
  * The brain of one body (design 3): it owns a {@link GoalExecutor} and is the executor's host, so a goal the owner
@@ -68,6 +70,14 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     /** How long a death's drops are worth walking back to: five minutes of game time, about when they despawn. */
     static final long DROPS_RECOVERABLE_TICKS = 5L * 60L * 20L;
 
+    /**
+     * The smelt kind's own task budget. The default one is 12000 ticks, but one stack of an item already takes 12800
+     * in a furnace (64 at 200 ticks each), so a plain smelt would time out mid-stack. 72000 ticks — one hour of game
+     * time, five and a half stacks — covers a furnace the plan fills more than once before taking it up, and still
+     * bounds a smelt that has stopped for good.
+     */
+    static final int SMELT_BUDGET_TICKS = 72_000;
+
     private final GoalExecutor<BotPlayer> executor;
 
     /** The instance of the body this brain last served: replaced on a respawn, which hands the brain to a new one. */
@@ -86,9 +96,10 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     private CompoundTag pendingShelterBlocks;
 
     /**
-     * A table this body put down and was stopped before it took it up again (a restart, a cancel, a failure) is taken
-     * up before the executor goes on: the planner counts the table in the inventory, so one left standing would cost a
-     * goal its planks. Looked for after a load and whenever a goal ends; {@link #tidy} is the task doing it.
+     * A station this body put down (a crafting table, a furnace) and was stopped before it took it up again (a
+     * restart, a cancel, a failure) is taken up before the executor goes on: the planner counts the station in the
+     * inventory, so one left standing would cost a goal its materials. Looked for after a load and whenever a goal
+     * ends; {@link #tidy} is the task doing it.
      */
     private boolean tidyArmed;
     @Nullable
@@ -120,7 +131,18 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         Postconditions postconditions = new Postconditions();
         // The goal the body gives itself when its owner names a container: its postcondition is true once it has looked.
         postconditions.register(LookInside.KIND, LookInside::postcondition);
-        this.executor = new GoalExecutor<>(this, postconditions, ExecutorConfig.defaults());
+        this.executor = new GoalExecutor<>(this, postconditions, config());
+    }
+
+    /** The defaults, with the one budget a kind of task needs its own: the smelt kind's ({@link #SMELT_BUDGET_TICKS}). */
+    private static ExecutorConfig config() {
+        ExecutorConfig defaults = ExecutorConfig.defaults();
+        return new ExecutorConfig(defaults.maxReplansWithoutProgress(), defaults.maxTotalReplans(),
+            defaults.totalReplanCeiling(), defaults.maxRepairReplans(), defaults.maxDeathsPerGoal(),
+            defaults.deathExclusionRadius(), defaults.hazardExclusionRadius(), defaults.defaultTaskBudgetTicks(),
+            Map.of(RecipeDef.SMELT, SMELT_BUDGET_TICKS), defaults.stuckTicks(), defaults.preemptMaxPausedTicks(),
+            defaults.preemptMaxCount(), defaults.preemptWindowTicks(), defaults.planRerunLimit(),
+            defaults.planTimeoutTicks());
     }
 
     /** The runtime driving this body, or null when it has another brain (a test's, the navigation dev command's). */
@@ -264,11 +286,11 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         ReflexHold hold = reflexHold(current);
         heldThisTick = hold.held();
         if (hold.held()) {
-            // The leftover-table step is a task like any other: paused for the hold, taken up again after it.
+            // The leftover-station step is a task like any other: paused for the hold, taken up again after it.
             if (tidy != null && tidy.state() == TaskState.RUNNING) tidy.pause(current, hold.cause());
         } else {
             if (tidy != null && tidy.state() == TaskState.PAUSED) tidy.resume(current);
-            // The executor waits for the table to be back in the inventory: its replan would plan without it.
+            // The executor waits for the station to be back in the inventory: its replan would plan without it.
             if (tidyTick(current)) return;
         }
         executor.tick(current, hold);
@@ -279,15 +301,16 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         taskWasActive = active;
     }
 
-    /** True while the leftover-table task has the body this tick. */
+    /** True while the leftover-station task has the body this tick. */
     private boolean tidyTick(BotPlayer current) {
         if (tidy == null && tidyArmed && !(currentTask != null && currentTask.state() == TaskState.RUNNING)) {
             tidyArmed = false;
-            BlockPos leftover = CraftTask.leftoverTable(current);
+            BlockPos leftover = CraftTask.leftoverStation(current);
             if (leftover != null) {
-                MegaBlockBot.LOGGER.info("{} takes up the crafting table it left standing at {}",
-                        current.getGameProfile().getName(), leftover.toShortString());
-                tidy = CraftTask.takeUp(leftover);
+                BlockState state = current.serverLevel().getBlockState(leftover);
+                MegaBlockBot.LOGGER.info("{} takes up the {} it left standing at {}",
+                        current.getGameProfile().getName(), state.getBlock().getName().getString(), leftover.toShortString());
+                tidy = CraftTask.takeUpStation(current.serverLevel(), leftover);
                 tidy.start(current);
             }
         }
@@ -445,7 +468,7 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         lastResult = result;
         stepIdentity = null;
         stepStartedTick = -1;
-        // A goal that ended early (a cancel, a failure) may have left a table standing: the next tick looks.
+        // A goal that ended early (a cancel, a failure) may have left a station standing: the next tick looks.
         tidyArmed = true;
         String name = body == null ? "?" : body.getGameProfile().getName();
         MegaBlockBot.LOGGER.info("Goal result of {}: goal=[{}] status={} matched={}/{} failure=[{}]", name,

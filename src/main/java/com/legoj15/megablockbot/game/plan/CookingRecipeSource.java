@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
+import javax.annotation.Nullable;
 import net.minecraft.core.Holder;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -31,7 +32,7 @@ import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
  * the class's burn time: with cooking time {@code c} and a burn time {@code b}, one fuel item cooks {@code b / c}
  * items, and that fraction in lowest terms {@code p / q} gives a run of {@code p} of the ingredient and {@code q} of
  * the fuel that makes {@code p} of the result. The id is the game recipe's id, {@code #} and the class name, so the
- * task that runs a smelt leaf (a later brief) can ask {@link #variantOf} what its recipe names.
+ * task that runs a smelt leaf ({@code game.task.SmeltTask}) can ask {@link #variantOf} what its recipe names.
  */
 public final class CookingRecipeSource implements RecipeSource {
     /** The fuel classes this source writes variants for, one each: every item of a class must burn the same. */
@@ -133,7 +134,7 @@ public final class CookingRecipeSource implements RecipeSource {
                         continue;
                     }
                     for (FuelClass fuelClass : classes) {
-                        int burn = fuelClass.burnTicks() / family.burnDivisor();
+                        int burn = burnAt(family.station(), fuelClass.burnTicks());
                         if (burn < 1) continue; // burns out before it cooks anything at this station
                         Run run = runOf(burn, cookingTime);
                         if (run.ingredient() > MAX_RUN || run.fuel() > MAX_RUN) {
@@ -188,8 +189,8 @@ public final class CookingRecipeSource implements RecipeSource {
 
     /**
      * What a variant id names, or empty when the id is not one of this source's: the game recipe's id and one of the
-     * fuel classes. The task that runs a smelt leaf (a later brief) asks this of the recipe a leaf carries, so it
-     * knows which game recipe to look up and what fuel to put in.
+     * fuel classes. The task that runs a smelt leaf asks this of the recipe a leaf carries, so it knows which game
+     * recipe to look up and what fuel to put in.
      */
     public static Optional<Variant> variantOf(String id) {
         int mark = id.indexOf(VARIANT_MARK);
@@ -204,8 +205,8 @@ public final class CookingRecipeSource implements RecipeSource {
     }
 
     /** One variant run's counts: {@code p} of the ingredient and {@code q} of the fuel, both whole items. */
-    record Run(int ingredient, int fuel) {
-        Run {
+    public record Run(int ingredient, int fuel) {
+        public Run {
             if (ingredient < 1 || fuel < 1) {
                 throw new IllegalArgumentException("a run takes at least one ingredient and one fuel, not "
                         + ingredient + " and " + fuel);
@@ -217,11 +218,40 @@ public final class CookingRecipeSource implements RecipeSource {
      * The counts of one variant's run: a fuel that burns {@code burnTicks} over a recipe that cooks in
      * {@code cookTicks} cooks {@code burnTicks / cookTicks} items, and the fraction in lowest terms {@code p / q}
      * says a run of {@code q} fuel cooks {@code p} items — coal over smelting, 1600/200 = 8/1, is eight items and
-     * one coal; a plank, 300/200 = 3/2; a stick, 100/200 = 1/2.
+     * one coal; a plank, 300/200 = 3/2; a stick, 100/200 = 1/2. Public for the task that runs a smelt leaf, which
+     * reads the same arithmetic instead of copying it.
      */
-    static Run runOf(int burnTicks, int cookTicks) {
+    public static Run runOf(int burnTicks, int cookTicks) {
         int common = gcd(burnTicks, cookTicks);
         return new Run(burnTicks / common, cookTicks / common);
+    }
+
+    /** One fuel class as the task that feeds a furnace asks for it: its items and the burn time a run is sized for. */
+    public record Fuel(String name, List<ItemKey> items, int burnTicks) {}
+
+    /**
+     * The fuel class of that name as the game holds its burn times now, or empty when no such class exists or the
+     * game knows no fuel of it: the task puts in what the variant was sized for, read here rather than worked out
+     * again.
+     */
+    public static Optional<Fuel> fuelOf(String name) {
+        Optional<FuelKind> kind = FuelKind.byName(name);
+        if (kind.isEmpty()) return Optional.empty();
+        // The task asks one question of one class, so what a whole book build would note is dropped here.
+        FuelClass ofKind = classOf(kind.get(), AbstractFurnaceBlockEntity.getFuel(), new ArrayList<>(), new ArrayList<>());
+        return Optional.ofNullable(ofKind).map(ofClass -> new Fuel(ofClass.name(), ofClass.items(), ofClass.burnTicks()));
+    }
+
+    /**
+     * What a fuel that burns {@code burnTicks} in a furnace burns at {@code station}: a blast furnace and a smoker
+     * halve it. The book sizes a variant with this, and the task that feeds the station asks the same question, so
+     * the two never disagree about how far a fuel goes. A station this source does not know burns as a furnace does.
+     */
+    public static int burnAt(ItemKey station, int burnTicks) {
+        for (Family family : FAMILIES) {
+            if (family.station().equals(station)) return burnTicks / family.burnDivisor();
+        }
+        return burnTicks;
     }
 
     private static int gcd(int a, int b) {
@@ -239,33 +269,44 @@ public final class CookingRecipeSource implements RecipeSource {
                                                List<String> noClassLeft) {
         List<FuelClass> classes = new ArrayList<>();
         for (FuelKind kind : FuelKind.values()) {
-            List<Item> items = kind.items();
-            // The class burns as its first item that is a fuel at all does: a tag whose first item is none must not
-            // cost the class the ones after it.
-            Integer burn = null;
-            for (Item item : items) {
-                Integer ticks = burnTimes.get(item);
-                if (ticks != null && ticks >= 1) {
-                    burn = ticks;
-                    break;
-                }
-            }
-            if (burn == null) {
-                noClassLeft.add(kind.name);
-                continue;
-            }
-            Set<ItemKey> ofClass = new LinkedHashSet<>();
-            for (Item item : items) {
-                Integer ticks = burnTimes.get(item);
-                if (ticks == null || !ticks.equals(burn)) {
-                    leftOut.add(ItemKeys.of(item).id());
-                    continue;
-                }
-                ofClass.add(ItemKeys.of(item));
-            }
-            classes.add(new FuelClass(kind.name, List.copyOf(ofClass), burn));
+            FuelClass ofKind = classOf(kind, burnTimes, leftOut, noClassLeft);
+            if (ofKind != null) classes.add(ofKind);
         }
         return classes;
+    }
+
+    /**
+     * One class as it stands in the game's own burn times, or null when the game knows none of it: its first item that
+     * is a fuel at all sizes the class (a tag whose first item is none must not cost the class the ones after it), and
+     * every item of it that burns the same fills the variant's fuel slot. Both the book build and {@link #fuelOf} ask
+     * this, so a variant is sized and fed by the same rule.
+     */
+    @Nullable
+    private static FuelClass classOf(FuelKind kind, Map<Item, Integer> burnTimes, List<String> leftOut,
+                                     List<String> noClassLeft) {
+        List<Item> items = kind.items();
+        Integer burn = null;
+        for (Item item : items) {
+            Integer ticks = burnTimes.get(item);
+            if (ticks != null && ticks >= 1) {
+                burn = ticks;
+                break;
+            }
+        }
+        if (burn == null) {
+            noClassLeft.add(kind.name);
+            return null;
+        }
+        Set<ItemKey> ofClass = new LinkedHashSet<>();
+        for (Item item : items) {
+            Integer ticks = burnTimes.get(item);
+            if (ticks == null || !ticks.equals(burn)) {
+                leftOut.add(ItemKeys.of(item).id());
+                continue;
+            }
+            ofClass.add(ItemKeys.of(item));
+        }
+        return new FuelClass(kind.name, List.copyOf(ofClass), burn);
     }
 
     /** The tag's items in the tag's own order, read where they are used: a static field would freeze it before the

@@ -816,7 +816,8 @@ Each adapter turns one recipe family into `RecipeInfo` for the solver:
   `p` results, id `recipe#class` (`minecraft:iron_ingot_from_smelting_raw_iron#coal`). The
   classes are a fixed list (coal, planks, logs, sticks) whose burn times are asked from the
   game; the solver chooses between variants by cost, as between any two recipes that make one
-  item, and the task that runs a `smelt` leaf comes later. Campfire cooking, stonecutting and
+  item, and the task that runs a `smelt` leaf is built (`game.task.SmeltTask`, on the station machinery the craft
+  task was split into). Campfire cooking, stonecutting and
   smithing are not in yet.
 - **Modded machine recipes:** there is no single place to read them from. Some mods register
   custom recipe types in `RecipeManager`, each with its own serializer and fields. Others keep

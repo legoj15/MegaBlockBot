@@ -76,8 +76,8 @@ returns its own `Failed`** (the executor does not abort a task that failed itsel
 `waiting()` is true while it waits on the game (a break, a pickup) so the stuck watchdog leaves it alone; `checkpoint()`
 returns hints for where to look after a restart, never facts.
 
-Registered here: `craft` and `equip`. `navigate`, `reach`, `mine`, `recover_drops`, `deposit` and `withdraw` are registered
-by the navigation work (`TaskFeature`), not here.
+Registered here: `craft`, `smelt` and `equip`. `navigate`, `reach`, `mine`, `recover_drops`, `deposit` and `withdraw` are
+registered by the navigation work (`TaskFeature`), not here.
 
 What the navigation tasks need from this runtime:
 
@@ -93,6 +93,14 @@ What the navigation tasks need from this runtime:
 ## `craft`
 
 Leaf params: `recipe` (the game recipe id), `times`, `station` (empty or `minecraft:crafting_table`), optional `layout`.
+
+Everything about the station block — a table found standing or put down, walked to, opened, broken and taken up again,
+with the walks, the wide search out of a protected area and the interruptions — is `game.task.StationTask`, the base
+class `CraftTask` and `SmeltTask` share; `CraftTask` itself is the crafting grid. What the base class asks of its
+subclass: the station's item and block and what its failures call it, whether a standing one may be used where it is
+(any table, but only a furnace the body's memory says it placed) and whether it may be taken up now (a furnace only
+with a tool that makes it drop), whether the station's menu is open, whether the work is done, what must still be
+carried before anything is put down, and the work itself, which runs with the menu open.
 
 - The recipe is found again in the game by id (`RecipeManager.byKey`), because a shaped recipe's grid positions are not in
   the planner's book. Cells are the recipe's non-blank ingredients in order (= the planner's slot order); a shaped recipe
@@ -195,16 +203,62 @@ Leaf params: `recipe` (the game recipe id), `times`, `station` (empty or `minecr
   `NoRoom` gives up the same way: the inventory cannot take what the step produces, and a replan would plan the same step into
   the same full inventory. `Internal` means a bug again, and `BotSpeech` says so.
 
-### A table left standing
+### A station left standing
 
 The planner counts a crafting table in the inventory, never in the world (`SolverPlanner` ignores `Snapshot.stations`), so a
 table this body put down and never took up (the server stopped between placing and breaking, a cancel, a failure) costs
 the replanned goal four planks, or fails it when there are none to spare. `BotRuntime` therefore looks for one after a
-load and whenever a goal ends (`tidyArmed`): the nearest crafting table within reach that `BotMemory` says this body
-placed. Found, it runs `CraftTask.takeUp(pos)` (the craft's own break and pickup, crafting nothing) before the executor is
-ticked again, so the next plan sees the table in the inventory. A failure there is logged, not a goal's failure; the table
-stays, remembered. A table the rules do not let the body break stays standing and remembered too (the tidy task completes,
+load and whenever a goal ends (`tidyArmed`): the nearest crafting table or furnace within reach that `BotMemory` says
+this body placed — a furnace only while it holds nothing (breaking one that still holds items would spill them) and
+while the body carries a tool that makes it drop, under the smelt task's rule below. Found, it runs
+`CraftTask.takeUpStation(level, pos)` (the public face of `StationTask.takeUp`, for the base class is package-private:
+the station's own break and pickup, working nothing) before the executor is
+ticked again, so the next plan sees the station in the inventory. A failure there is logged, not a goal's failure; the
+station stays, remembered. A station the rules do not let the body break stays standing and remembered too (the tidy task completes,
 and looks again at the next goal's end). Covered by `BotRuntimeGameTests.aTableLeftStandingByALogoutIsTakenUp`.
+
+## `smelt`
+
+Leaf params: the craft leaf's with an empty `layout` — `recipe` (a variant id: the game recipe's id, `#` and the fuel
+class its run is sized for), `times` (runs) and `station` (`minecraft:furnace`, `minecraft:blast_furnace` or
+`minecraft:smoker`).
+
+- The recipe is found again by id and must be an `AbstractCookingRecipe` of the station's kind; the fuel class and the
+  run's counts are read back from `CookingRecipeSource` (`variantOf`, `fuelOf`, `runOf`), never worked out again. One
+  run takes `p` of the ingredient and `q` of the fuel and makes `p` times the recipe's result; the leaf's goal is the
+  absolute count after the step, so a task started again makes only what is still missing, in whole runs.
+- The furnace is a container, and block safety keeps the body out of containers it did not place, so a standing
+  furnace of the right kind within reach is used only when `BotMemory` says the body placed it; otherwise the carried
+  one is put down. The ingredient and the fuel are asked for before anything is put down (`MissingInput` naming the
+  item and the count), so a smelt that cannot run puts nothing down; a furnace that is not carried is the same failure
+  once no usable one stands. The body's own furnace is taken up again at the end only when the body carries a tool
+  that makes it drop (`ItemStack.isCorrectToolForDrops`; a furnace broken by hand drops nothing): otherwise it is left
+  standing, remembered as the body's, and the task completes. What is still inside is taken out through the menu
+  before the furnace is broken (an unburnt rest of the fuel never is: a run is whole).
+- The work, in the open `AbstractFurnaceMenu` (slot 0 ingredient, slot 1 fuel, slot 2 result), by clicks as a player
+  makes them (`MenuHand`): the result is taken out whenever the result slot holds any (whole or not at all, the
+  craft's rule, `NoRoom` when it cannot be), the ingredient for the runs still to do goes in — at most a stack, and
+  more when the slot has emptied — then the fuel the same way, and what the slots already hold counts towards the
+  runs. The task is done when the inventory holds the count the goal asks for (or, without such a goal, when the
+  runs' results have been taken out). While the furnace burns and there is nothing to click the task is `waiting()`,
+  its menu kept open, the furnace's own LIT block state telling "burning" from "nothing happens".
+- Interruptions and exits: on pause, abort or failure the cursor is empty and the menu is closed; what the task put
+  into the furnace stays there, the furnace stays remembered, and a resumed task walks back to it, opens it and
+  carries on from what the slots hold (an ingredient already in the furnace counts as carried for the runs still to
+  do). A body carried out of reach while the work runs closes the menu itself and is walked back.
+- Failures: the station failures the base class already has; `TargetGone` for a recipe id the game does not have, one
+  that is no cooking recipe of the station's kind, or one whose fuel class the game no longer knows; `MissingInput`
+  when the ingredient, the fuel or the furnace is not carried; `NoRoom`; and `NoProgress` when the furnace holds the
+  ingredient and the fuel and has not burned for `SmeltTask.NO_PROGRESS_TICKS` (100) ticks — vanilla lights a furnace
+  within a tick or two of both slots being filled, so that is "something else is in a slot, or the game refuses the
+  recipe".
+- Time: a stack takes 12800 ticks in a furnace and the executor's default budget for a task is 12000, so the `smelt`
+  kind has its own budget where the runtime builds its `ExecutorConfig` (`BotRuntime.SMELT_BUDGET_TICKS`, 72000 — one
+  hour of game time, five and a half stacks, still bounding a smelt that has stopped for good).
+- `SmeltGameTests`: the two-run sticks variant ends with 2 ingots and nothing lost; the same without a pickaxe leaves
+  the furnace standing and remembered; a furnace somebody else put there is not opened, and the body puts its own
+  down; no fuel is a `MissingInput` naming a fuel item with nothing put down; a pause and a resume in the middle of
+  the burn still ends with the 2 ingots; and through the runtime a body asked to have 1 iron ingot ends satisfied.
 
 ## `mine`
 
