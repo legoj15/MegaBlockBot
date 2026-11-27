@@ -43,9 +43,9 @@ Everything runs on the server thread; every product is immutable and published a
   tag), `logs` (`minecraft:logs_that_burn`), `sticks` (stick). Other fuels (blaze rods, coal blocks, dried kelp
   blocks, lava buckets) are not classes yet, so no variant is sized for them and they cannot be planned as fuel.
 - A variant is an ordinary recipe to the planner: a `smelt` leaf carries the craft leaf's params with an empty
-  `layout`, and the solver chooses between variants by cost, as between any two recipes that make one item. The task
-  that runs a `smelt` leaf is not written yet; `CookingRecipeSource.variantOf` reads a variant id back into the game
-  recipe and the fuel class, which is how that task will know what to run and what to feed it.
+  `layout`, and the solver chooses between variants by cost, as between any two recipes that make one item.
+  `SmeltTask` runs the leaf (see `docs/bot-runtime.md`); `CookingRecipeSource.variantOf` reads a variant id back into
+  the game recipe and the fuel class, which is how the task knows what to run and what to feed it.
 - Other recipe types (campfire cooking, stonecutting, smithing) are unread until a source claims them. The summary
   line counts them, for example `{minecraft:campfire_cooking=..., ...}`.
 
