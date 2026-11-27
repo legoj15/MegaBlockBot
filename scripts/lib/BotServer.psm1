@@ -137,9 +137,16 @@ function Invoke-Rcon {
         $exec = [byte[]](ConvertTo-RconPacket 2 2 $Command)
         $sentinel = [byte[]](ConvertTo-RconPacket 3 100 '')
         $stream.Write($exec, 0, $exec.Length)
-        $stream.Write($sentinel, 0, $sentinel.Length)
         $sent = $true
         $body = [IO.MemoryStream]::new()
+        # The sentinel goes out only after the command's first answer. Minecraft reads one packet per socket read and
+        # drops the connection, command unrun, when two arrive in the same read; sent back to back they did so about
+        # one time in ten on a busy machine ("the server closed the connection"). Every command gets an answer packet,
+        # an empty one when it prints nothing, so waiting for it cannot hang short of the deadline.
+        $first = Read-RconPacket $stream $deadline
+        if ($first.Id -eq -1) { throw (New-BotError 'RCON: authentication was revoked.' 3) }
+        if ($first.Id -eq 2 -and $first.Body.Length) { $body.Write([byte[]]$first.Body, 0, $first.Body.Length) }
+        $stream.Write($sentinel, 0, $sentinel.Length)
         while ($true) {
             $p = Read-RconPacket $stream $deadline
             if ($p.Id -eq -1) { throw (New-BotError 'RCON: authentication was revoked.' 3) }

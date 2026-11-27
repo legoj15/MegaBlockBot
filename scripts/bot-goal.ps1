@@ -50,6 +50,9 @@ if ($At) {
     $null = Send "execute positioned $x.5 0 $z.5 positioned over motion_blocking_no_leaves run tp $Bot ~ ~ ~"
 }
 if ($Empty) { $null = Send "clear $Bot" }
+# A goal given to a bot that is not there would wait out the whole timeout and prove nothing.
+$here = & $server cmd -Node $Node -Command "aiplayer status $Bot" 2>&1 | Select-Object -Last 1
+if ("$here" -match 'is not spawned|RCON:') { [Console]::Error.WriteLine("bot-goal: $Bot is not online ($here)"); exit 3 }
 
 $before = @(Get-Content -LiteralPath $log).Count
 if (Send "aiplayer goal $Bot $Goal" -Once) {
