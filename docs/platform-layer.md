@@ -168,6 +168,11 @@ runs wherever the command tree is built (a worker thread while data loads).
   log regex (exit 0 match, 2 fail pattern, 1 timeout or server gone), `stop` ends the server and sweeps what is left.
   State and log are in `build/bot-server/`; `-Mods` jars are copied into `versions/<node>/run/mods` and removed again
   by the next start that does not list them. `Get-Help ./scripts/bot-server.ps1 -Full` has every option.
+- `scripts/bot-goal.ps1 -Node <node> -Goal "<words>" [-Bot Bot1] [-At "x z"] [-Empty] [-Day] [-TimeoutSec 600]`
+  gives a bot one goal on that running dev server and follows it: it spawns the bot, can stand it on the surface at
+  `-At`, empty its inventory and fix daylight, then reads the log to the goal's result line and prints the result,
+  status, inventory, position, deaths and reflex holds. Exit 0 satisfied, 1 any other result, 2 no result in time,
+  3 no server. Use it for every end-to-end evidence run so runs can be compared.
 - All three scripts import `scripts/lib/MbbNodes.psm1` for the command-line sweep that finds and kills a node's
   leftover JVMs (the server JVM by its `versions/<node>/` path, the Gradle client by the wrapper jar and task name).
 - GameTest classes live in `com.legoj15.megablockbot.game.gametest`, use vanilla `@GameTest` with
