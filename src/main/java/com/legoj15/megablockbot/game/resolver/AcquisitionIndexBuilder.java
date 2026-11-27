@@ -109,7 +109,7 @@ public final class AcquisitionIndexBuilder {
     }
 
     private AcquisitionIndex run() {
-        items();
+        section("items", this::items);
         Map<String, OreRange> ores = section("ore ranges", () -> OreRanges.read(server, notes), Map.of());
         section("block loot", () -> blocks(ores));
         section("entity loot", this::entities);
@@ -120,7 +120,7 @@ public final class AcquisitionIndexBuilder {
         section("loot tables of unread types", this::unreadLootTables);
         section("buckets", this::buckets);
         section("game code drops", this::gameCodeDrops);
-        standingNotes();
+        section("standing notes", this::standingNotes);
         notes.lines().forEach(index::note);
         return index.build();
     }
@@ -357,34 +357,44 @@ public final class AcquisitionIndexBuilder {
         for (Item item : BuiltInRegistries.ITEM) {
             if (!item.isEnabled(features)) continue;
             String itemId = BuiltInRegistries.ITEM.getKey(item).toString();
-            if (item instanceof MobBucketItem) {
-                // The entity type is a private field with no getter; the ids name it instead (every mob bucket is
-                // "<fish>_bucket" for the fish "<fish>"), so a bucket that does not follow the naming is counted.
-                Optional<EntityType<?>> fish = registrySibling(BuiltInRegistries.ENTITY_TYPE, itemId, "_bucket");
-                if (fish.isEmpty()) {
-                    notes.count("mob buckets whose entity type could not be named from the item id");
-                    continue;
-                }
-                String entityId = BuiltInRegistries.ENTITY_TYPE.getKey(fish.get()).toString();
-                index.addKnownWay(new KnownWay(wayIdPrefix(KnownWay.CATCH_IN_BUCKET) + entityId,
-                    ItemKey.of(itemId), KnownWay.CATCH_IN_BUCKET, entityId));
-            } else if (item instanceof BucketItem bucket) {
-                Fluid content = bucket.content;
-                if (content == Fluids.EMPTY) continue; // the empty bucket scoops nothing
-                String fluidId = BuiltInRegistries.FLUID.getKey(content).toString();
-                index.addKnownWay(new KnownWay(wayIdPrefix(KnownWay.FILL_BUCKET) + fluidId,
-                    ItemKey.of(itemId), KnownWay.FILL_BUCKET, fluidId));
-            } else if (item instanceof SolidBucketItem) {
-                // The block is a private field with no getter either; the id names it ("powder_snow_bucket").
-                Optional<Block> block = registrySibling(BuiltInRegistries.BLOCK, itemId, "_bucket");
-                if (block.isEmpty()) {
-                    notes.count("solid buckets whose block could not be named from the item id");
-                    continue;
-                }
-                String blockId = BuiltInRegistries.BLOCK.getKey(block.get()).toString();
-                index.addKnownWay(new KnownWay(wayIdPrefix(KnownWay.FILL_BUCKET) + blockId,
-                    ItemKey.of(itemId), KnownWay.FILL_BUCKET, blockId));
+            try {
+                bucket(item, itemId);
+            } catch (RuntimeException e) {
+                // One modded bucket that throws costs that bucket, not every way this section records.
+                notes.skipped("buckets whose content could not be read", itemId + " (" + e.getClass().getSimpleName() + ")");
             }
+        }
+    }
+
+    /** One bucket item: the way its content gives it, if it holds any. */
+    private void bucket(Item item, String itemId) {
+        if (item instanceof MobBucketItem) {
+            // The entity type is a private field with no getter; the ids name it instead (every mob bucket is
+            // "<fish>_bucket" for the fish "<fish>"), so a bucket that does not follow the naming is counted.
+            Optional<EntityType<?>> fish = registrySibling(BuiltInRegistries.ENTITY_TYPE, itemId, "_bucket");
+            if (fish.isEmpty()) {
+                notes.count("mob buckets whose entity type could not be named from the item id");
+                return;
+            }
+            String entityId = BuiltInRegistries.ENTITY_TYPE.getKey(fish.get()).toString();
+            index.addKnownWay(new KnownWay(wayIdPrefix(KnownWay.CATCH_IN_BUCKET) + entityId,
+                ItemKey.of(itemId), KnownWay.CATCH_IN_BUCKET, entityId));
+        } else if (item instanceof BucketItem bucket) {
+            Fluid content = bucket.content;
+            if (content == Fluids.EMPTY) return; // the empty bucket scoops nothing
+            String fluidId = BuiltInRegistries.FLUID.getKey(content).toString();
+            index.addKnownWay(new KnownWay(wayIdPrefix(KnownWay.FILL_BUCKET) + fluidId,
+                ItemKey.of(itemId), KnownWay.FILL_BUCKET, fluidId));
+        } else if (item instanceof SolidBucketItem) {
+            // The block is a private field with no getter either; the id names it ("powder_snow_bucket").
+            Optional<Block> block = registrySibling(BuiltInRegistries.BLOCK, itemId, "_bucket");
+            if (block.isEmpty()) {
+                notes.count("solid buckets whose block could not be named from the item id");
+                return;
+            }
+            String blockId = BuiltInRegistries.BLOCK.getKey(block.get()).toString();
+            index.addKnownWay(new KnownWay(wayIdPrefix(KnownWay.FILL_BUCKET) + blockId,
+                ItemKey.of(itemId), KnownWay.FILL_BUCKET, blockId));
         }
     }
 
@@ -399,8 +409,9 @@ public final class AcquisitionIndexBuilder {
     /** One drop the game's own code makes: what it yields, the way id, and where in the game it happens. */
     private record CodeDrop(String item, String id, String from) {}
 
-    // Drops no loot table makes, each row naming where the game makes it. A row whose item is not in the registry
-    // (another game version) or is behind a disabled feature flag is skipped silently.
+    // Drops no loot table makes, each row naming where the game makes it. A row behind a disabled feature flag is
+    // skipped; one whose item is not in the registry (another game version, or a wrong id here) is skipped and named
+    // in the notes, so a stale row cannot quietly put its item back on the unobtainable list.
     private static final List<CodeDrop> CODE_DROPS = List.of(
         // The wither spawns the star when it dies; its loot table holds none of it.
         new CodeDrop("minecraft:nether_star", "code:wither", "the wither drops it when it dies"),
@@ -413,7 +424,9 @@ public final class AcquisitionIndexBuilder {
         // The item frame an end ship generates with the elytra still in it.
         new CodeDrop("minecraft:elytra", "code:end_ship", "the item frame that holds it in an end ship"),
         // The egg the first killed dragon leaves on the exit portal; only one per world.
-        new CodeDrop("minecraft:dragon_egg", "code:dragon_egg", "the first dragon kill"));
+        new CodeDrop("minecraft:dragon_egg", "code:dragon_egg", "the first dragon kill"),
+        // An empty bucket used on a cow, a mooshroom or a goat: the milk is no fluid a bucket scoops and no drop.
+        new CodeDrop("minecraft:milk_bucket", "code:milking", "an empty bucket used on a cow, a mooshroom or a goat"));
 
     /** Records the code drops above as game-code ways. */
     private void gameCodeDrops() {
@@ -421,7 +434,11 @@ public final class AcquisitionIndexBuilder {
         for (CodeDrop drop : CODE_DROPS) {
             ResourceLocation id = ResourceLocation.tryParse(drop.item());
             Optional<Item> item = id == null ? Optional.empty() : BuiltInRegistries.ITEM.getOptional(id);
-            if (item.isEmpty() || !item.get().isEnabled(features)) continue;
+            if (item.isEmpty()) {
+                notes.skipped("game-code drops whose item is not registered", drop.item());
+                continue;
+            }
+            if (!item.get().isEnabled(features)) continue;
             index.addKnownWay(new KnownWay(drop.id(), ItemKey.of(drop.item()), KnownWay.GAME_CODE, drop.from()));
         }
     }

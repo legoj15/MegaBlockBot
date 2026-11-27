@@ -162,7 +162,9 @@ public final class BodyManager {
         GameProfileCache cache = profileCache.get();
         if (cache == null) return null;
         GameProfileCache.GameProfileInfo info = cache.profilesByName.get(name.toLowerCase(Locale.ROOT));
-        return info != null && !info.getProfile().getId().equals(uuidFor(name)) ? info.getProfile() : null;
+        // A body's own entry is told by the entry itself, not by this call's spelling of the name: the id of a body is
+        // made from its name as spawned, and the cache is keyed without case, so "bob" may find the body "Bob".
+        return info != null && !info.getProfile().getId().equals(uuidFor(info.getProfile().getName())) ? info.getProfile() : null;
     }
 
     /**
@@ -333,7 +335,9 @@ public final class BodyManager {
         // The body is placed, so the cache now holds its profile under the name; the player's goes back over it. The
         // supplier is asked for again rather than the cache held from above, so the write lands in the cache as it
         // stands now that the body is placed (the supplier answers for the server's cache, or a test's stand-in).
-        if (playersProfile != null) profileCache.get().add(playersProfile);
+        // A courtesy to the name check: it must never be what fails a spawn that has already happened.
+        GameProfileCache cacheNow = playersProfile == null ? null : profileCache.get();
+        if (cacheNow != null) cacheNow.add(playersProfile);
 
         idleTicks.remove(id);
         records().put(entryFor(body, body.brain().wantsToStayLoaded(), false));
