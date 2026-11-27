@@ -47,6 +47,8 @@ final class MobReflex implements Reflex {
 
     // Retreating.
     private boolean retreating;
+    /** The retreat in progress is to a spot the mobs cannot see, from a shooter that cannot be reached. */
+    private boolean hiding;
     private long retreatPickedAt;
     private int arrivals;
     private long corneredUntil;
@@ -106,6 +108,7 @@ final class MobReflex implements Reflex {
         engaged.clear();
         kills = 0;
         retreating = false;
+        hiding = false;
         arrivals = 0;
         corneredUntil = 0;
         retreatSpot = null;
@@ -125,27 +128,32 @@ final class MobReflex implements Reflex {
 
         Threat blow = null;
         Threat strong = null;
+        Threat shooter = null;
         int attackers = 0;
         for (Threat threat : threats) {
             if (threat.aboutToBlow() && blow == null) blow = threat;
             if (threat.mob().getMaxHealth() >= ReflexConstants.OUTCLASSED_MAX_HEALTH && strong == null) strong = threat;
+            if (shooter == null && keepsHurtingFromAfar(ctx, threat)) shooter = threat;
             if (threat.targetsBody() || threat.distance() <= ReflexConstants.MELEE_TRIGGER) attackers++;
         }
         boolean lowHealth = body.getHealth() <= ReflexConstants.RETREAT_HEALTH;
         boolean tooMany = attackers > ReflexConstants.MAX_ATTACKERS;
         boolean unarmedAndOutnumbered = Hands.bestWeapon(body) < 0
             && (attackers > ReflexConstants.FIST_MAX_ATTACKERS || body.getHealth() < ReflexConstants.FIST_MIN_HEALTH);
-        boolean outmatched = lowHealth || tooMany || blow != null || strong != null || unarmedAndOutnumbered;
+        boolean outmatched = lowHealth || tooMany || blow != null || strong != null || unarmedAndOutnumbered || shooter != null;
+        boolean hide = shooter != null;
 
         // A fuse is burning close by and there is a shield: face the creeper with it up rather than run from the blast.
         if (blow != null && blow.fusing() && blow.distance() <= ReflexConstants.CREEPER_BRACE_RANGE && brace(ctx, blow)) return;
 
         if (outmatched && ctx.time >= corneredUntil) {
             String why = blow != null ? "a creeper about to explode" : strong != null ? "a mob far stronger than a player"
-                : lowHealth ? "health " + String.format(Locale.ROOT, "%.1f", body.getHealth()) : tooMany ? attackers + " attackers" : "no weapon";
-            if (retreat(ctx, threats, why)) return;
+                : lowHealth ? "health " + String.format(Locale.ROOT, "%.1f", body.getHealth()) : tooMany ? attackers + " attackers"
+                : shooter != null ? describe(shooter.mob()) + " that it cannot reach keeps hurting it" : "no weapon";
+            if (retreat(ctx, threats, why, hide)) return;
         } else if (!outmatched) {
             retreating = false;
+            hiding = false;
             arrivals = 0;
         }
         fight(ctx, threats);
@@ -177,6 +185,7 @@ final class MobReflex implements Reflex {
 
         boolean inReach = body.canInteractWithEntity(mob, 0.0);
         if (inReach) {
+            ctx.layer.unreachableMobs().remove(mob.getUUID());
             Steer.stand(body);
             bestDistance = target.distance();
             noProgress = 0;
@@ -194,16 +203,44 @@ final class MobReflex implements Reflex {
         }
 
         lowerShield(body);
+        if (target.creeper() && target.distance() > ReflexConstants.CREEPER_SWELL_RANGE) {
+            // Never walk up to a creeper: stand, face it, and let it come (the shield goes up when its fuse burns).
+            Steer.stand(body);
+            cause = "holding off " + describe(mob) + ", not approaching it";
+            // One that does not come (stuck behind a river) is not waited for for ever.
+            if (target.distance() < bestDistance - 0.5) {
+                bestDistance = target.distance();
+                noProgress = 0;
+            } else if (++noProgress > ReflexConstants.CHASE_GIVE_UP_TICKS) {
+                ctx.layer.ignoredMobs().put(mob.getUUID(), ctx.time + ReflexConstants.IGNORE_MOB_TICKS);
+                chasing = null;
+                noProgress = 0;
+            }
+            return;
+        }
         boolean far = target.distance() > ReflexConstants.SPRINT_APPROACH_DISTANCE;
         Steer.walkToward(body, aim, far);
+        boolean hurtingUs = ctx.layer.hurtRecently(mob.getUUID(), ctx.time);
         if (target.distance() < bestDistance - 0.5) {
             bestDistance = target.distance();
             noProgress = 0;
-        } else if (++noProgress > ReflexConstants.CHASE_GIVE_UP_TICKS) {
-            ctx.layer.ignoredMobs().put(mob.getUUID(), ctx.time + ReflexConstants.IGNORE_MOB_TICKS);
+        } else if (++noProgress > (hurtingUs ? ReflexConstants.CHASE_GIVE_UP_HURT_TICKS : ReflexConstants.CHASE_GIVE_UP_TICKS)) {
+            if (hurtingUs) {
+                // It gets no closer and goes on hurting the body: never ignored. It is run from, out of its sight.
+                ctx.layer.unreachableMobs().put(mob.getUUID(), ctx.time + ReflexConstants.IGNORE_MOB_TICKS);
+            } else {
+                ctx.layer.ignoredMobs().put(mob.getUUID(), ctx.time + ReflexConstants.IGNORE_MOB_TICKS);
+            }
             chasing = null;
             noProgress = 0;
         }
+    }
+
+    /** A mob the body could not get closer to, that has hurt it in the last few seconds and is still out of reach. */
+    private static boolean keepsHurtingFromAfar(ReflexContext ctx, Threat threat) {
+        Long until = ctx.layer.unreachableMobs().get(threat.mob().getUUID());
+        if (until == null || until <= ctx.time) return false;
+        return ctx.layer.hurtRecently(threat.mob().getUUID(), ctx.time) && !ctx.body.canInteractWithEntity(threat.mob(), 0.0);
     }
 
     /** The nearest threat that is not a creeper about to explode; when there is only that, the creeper (cornered). */
@@ -296,10 +333,19 @@ final class MobReflex implements Reflex {
     // Retreating
     // ---------------------------------------------------------------------------------------------------------
 
-    /** Walks away from the threats. Returns false when there is nowhere to go, which makes the body stand and fight. */
-    private boolean retreat(ReflexContext ctx, List<Threat> threats, String why) {
+    /**
+     * Walks away from the threats. Returns false when there is nowhere to go, which makes the body stand and fight.
+     * {@code hide} runs to a spot the threats cannot see rather than just far from them (a shooter that cannot be reached).
+     */
+    private boolean retreat(ReflexContext ctx, List<Threat> threats, String why, boolean hide) {
         BotPlayer body = ctx.body;
         BotNavigator nav = ctx.nav;
+        if (hide != hiding) {
+            // The reason for running changed: the spot picked for the old one is no good for this one.
+            hiding = hide;
+            retreating = false;
+            nav.stop();
+        }
         if (retreating) {
             switch (nav.state()) {
                 case FAILED -> {
@@ -323,12 +369,14 @@ final class MobReflex implements Reflex {
             }
         }
         if (!retreating || ctx.time - retreatPickedAt >= ReflexConstants.RETREAT_REPICK_TICKS) {
-            BlockPos spot = RetreatSpots.pick(ctx, threats, badSpots);
+            BlockPos spot = hide ? RetreatSpots.pickHidden(ctx, threats, badSpots) : null;
+            if (spot == null) spot = RetreatSpots.pick(ctx, threats, badSpots);
             if (spot == null) {
                 corner(ctx, "no spot to run to");
                 return false;
             }
-            ctx.goTo(spot, ReflexConstants.RETREAT_ARRIVE_RADIUS);
+            // A far spot is arrived at when near it; a hiding place only when the body stands in it (a step short may be in sight).
+            ctx.goTo(spot, hide ? 0 : ReflexConstants.RETREAT_ARRIVE_RADIUS);
             retreating = true;
             retreatSpot = spot;
             retreatPickedAt = ctx.time;
@@ -341,10 +389,32 @@ final class MobReflex implements Reflex {
     private void corner(ReflexContext ctx, String why) {
         corneredUntil = ctx.time + ReflexConstants.CORNERED_TICKS;
         retreating = false;
+        hiding = false;
         arrivals = 0;
         badSpots.clear();
         ctx.nav.stop();
         cause = "cornered (" + why + ")";
+    }
+
+    /**
+     * The running start of a retreat: while the navigator has not put the body in motion yet, run straight away from the
+     * nearest threat, if the ground a step ahead is there. The navigator's own input replaces it the tick it has any.
+     */
+    @Override
+    public void afterNavigator(ReflexContext ctx) {
+        if (!retreating || ctx.time - retreatPickedAt > ReflexConstants.RETREAT_RUNNING_START_TICKS) return;
+        BotPlayer body = ctx.body;
+        if (body.input().forward != 0.0F || body.input().strafe != 0.0F) return;
+        List<Threat> threats = ctx.threats();
+        if (threats.isEmpty()) return;
+        Vec3 away = body.position().subtract(threats.get(0).mob().position());
+        away = new Vec3(away.x, 0.0, away.z);
+        if (away.lengthSqr() < 1.0E-6) return;
+        away = away.normalize();
+        Vec3 ahead = body.position().add(away.scale(1.5));
+        BlockPos at = body.blockPosition();
+        if (Cells.standableIn(ctx.level, (int) Math.floor(ahead.x), (int) Math.floor(ahead.z), at.getY() + 1, at.getY() - 1) == null) return;
+        Steer.walkToward(body, body.position().add(away.scale(6.0)), true);
     }
 
     private boolean corneredNow(ReflexContext ctx) {

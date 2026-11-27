@@ -66,6 +66,60 @@ final class RetreatSpots {
     }
 
     /**
+     * The nearest standable spot that none of the threats can see, or null when there is none within
+     * {@link ReflexConstants#HIDE_SEARCH_RADIUS}. This is the retreat from a shooter that cannot be reached: far from it
+     * is no help while it has a line of fire, and standing at the foot of what it stands on is what a body does by
+     * itself and gets shot for. A spot is hidden when no threat's eyes can see the body's eyes or its middle there (the
+     * rule the threat scan uses, and a little stricter, since arrows are aimed low). Rings of growing distance are
+     * searched, so the first hidden spot found is the nearest; a run that passes close to a threat is not taken.
+     */
+    @Nullable
+    static BlockPos pickHidden(ReflexContext ctx, List<Threat> threats, List<BlockPos> bad) {
+        BotPlayer body = ctx.body;
+        BlockPos origin = body.blockPosition();
+        Vec3 here = body.position();
+        double hereMin = minDistance(here, threats);
+        for (int ring = 1; ring <= ReflexConstants.HIDE_SEARCH_RADIUS; ring++) {
+            BlockPos best = null;
+            double bestScore = Double.NEGATIVE_INFINITY;
+            for (int dx = -ring; dx <= ring; dx++) {
+                for (int dz = -ring; dz <= ring; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != ring) continue;
+                    BlockPos spot = Cells.standableIn(ctx.level, origin.getX() + dx, origin.getZ() + dz, origin.getY() + 3, origin.getY() - 4);
+                    if (spot == null || isBad(spot, bad) || !hiddenFromAll(ctx, spot, threats)) continue;
+                    Vec3 at = Vec3.atBottomCenterOf(spot);
+                    double pass = minDistanceAlong(here, at, threats);
+                    if (pass < hereMin - 1.0 && pass < PASS_CLEARANCE) continue;
+                    double score = -0.4 * Math.abs(spot.getY() - origin.getY()) - at.distanceTo(here) * 0.1 + (clear(ctx, spot) ? 4.0 : 0.0);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = spot;
+                    }
+                }
+            }
+            if (best != null) return best;
+        }
+        return null;
+    }
+
+    /** No threat sees the body's eyes, or its middle, with its feet at {@code spot}. */
+    private static boolean hiddenFromAll(ReflexContext ctx, BlockPos spot, List<Threat> threats) {
+        Vec3 base = Vec3.atBottomCenterOf(spot);
+        Vec3 eyes = base.add(0.0, ctx.body.getEyeHeight(), 0.0);
+        Vec3 middle = base.add(0.0, ctx.body.getBbHeight() * 0.5, 0.0);
+        for (Threat threat : threats) {
+            Mob mob = threat.mob();
+            if (sees(ctx, mob, eyes) || sees(ctx, mob, middle)) return false;
+        }
+        return true;
+    }
+
+    private static boolean sees(ReflexContext ctx, Mob mob, Vec3 point) {
+        return ctx.level.clip(new ClipContext(mob.getEyePosition(), point, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, mob)).getType()
+            == HitResult.Type.MISS;
+    }
+
+    /**
      * What it costs to stand at the spot in sight of a mob that shoots (a skeleton): running in the open from one is
      * running into its arrows, and a hill between them ends it.
      */

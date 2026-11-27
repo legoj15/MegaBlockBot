@@ -56,9 +56,11 @@ final class Threats {
         boolean fusing = creeper.getSwellDir() > 0 || creeper.isIgnited();
         // A creeper that is not coming for the body and is not close is no business of the reflex.
         if (!targets && !fusing && distance > ReflexConstants.MELEE_TRIGGER) return null;
-        // Beyond the blast and with no fuse lit it is only a mob that has not got here yet.
-        if (distance >= safe && !fusing) return null;
-        boolean about = fusing || distance <= ReflexConstants.CREEPER_SWELL_RANGE || (targets && distance < safe);
+        // Beyond the blast and with no fuse lit, a creeper that is not after the body is only a mob that has not got here yet.
+        if (!targets && distance >= safe && !fusing) return null;
+        // One that is after the body counts from wherever it is seen: it is never approached, and the gap is kept or
+        // widened from the first sight of it, not from the edge of the blast.
+        boolean about = fusing || targets || distance <= ReflexConstants.CREEPER_SWELL_RANGE;
         return new Threat(creeper, distance, targets, true, powered, about, fusing);
     }
 }

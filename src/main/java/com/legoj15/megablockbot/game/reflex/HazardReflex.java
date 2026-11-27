@@ -1,7 +1,9 @@
 package com.legoj15.megablockbot.game.reflex;
 
+import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
+import java.util.EnumMap;
 import java.util.Locale;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
@@ -28,8 +30,11 @@ final class HazardReflex implements Reflex {
     private boolean active;
     private Kind kind = Kind.FIRE;
     private int clearTicks;
+    /** Ticks the hold has lasted on the current kind of hazard: the give-up clock, restarted when the kind changes. */
     private int heldTicks;
-    private long giveUpUntil;
+    /** Per kind, the game time until which it is given up on. See {@link ReflexConstants#HAZARD_GIVE_UP_TICKS}. */
+    private final EnumMap<Kind, Long> giveUpUntil = new EnumMap<>(Kind.class);
+    private boolean gaveUp;
     private String cause = "";
     private String outcome = "";
     private boolean reachedWater;
@@ -54,7 +59,6 @@ final class HazardReflex implements Reflex {
 
     @Override
     public boolean wants(ReflexContext ctx) {
-        if (ctx.time < giveUpUntil) return false;
         Kind now = detect(ctx);
         if (!active) {
             if (now == null) return false;
@@ -69,16 +73,19 @@ final class HazardReflex implements Reflex {
             return true;
         }
         if (++heldTicks > ReflexConstants.HAZARD_GIVE_UP_TICKS) {
-            outcome = "gave up after " + heldTicks + " ticks";
-            giveUpUntil = ctx.time + ReflexConstants.HAZARD_GIVE_UP_TICKS;
-            return false;
+            // This kind has held the body long enough: it is left alone for a while, and a hazard of another kind that is
+            // there (the air running out while a fire could not be put out) is looked for at once.
+            giveUpUntil.put(kind, ctx.time + ReflexConstants.HAZARD_GIVE_UP_TICKS);
+            MegaBlockBot.LOGGER.info("reflex {}: gave up on {} after {} ticks; it is left alone for {} ticks", ctx.body.getGameProfile().getName(),
+                kind.name().toLowerCase(Locale.ROOT), heldTicks, ReflexConstants.HAZARD_GIVE_UP_TICKS);
+            gaveUp = true;
+            now = detect(ctx);
+            if (now == null) return false;
+            switchKind(now);
+            return true;
         }
         if (now != null) {
-            if (now != kind) {
-                kind = now;
-                waterTarget = null;
-                navFailed = false;
-            }
+            if (now != kind) switchKind(now);
             clearTicks = 0;
             return true;
         }
@@ -90,26 +97,45 @@ final class HazardReflex implements Reflex {
 
     @Override
     public void release(ReflexContext ctx) {
-        outcome = String.format(Locale.ROOT, "%s over after %d ticks%s", kind.name().toLowerCase(Locale.ROOT), heldTicks,
-            reachedWater ? ", reached water" : "");
+        outcome = String.format(Locale.ROOT, "%s %s after %d ticks%s", kind.name().toLowerCase(Locale.ROOT), gaveUp ? "given up on" : "over",
+            heldTicks, reachedWater ? ", reached water" : "");
+        gaveUp = false;
         active = false;
         waterTarget = null;
     }
 
+    /** The hold goes on against another kind of hazard: its own give-up clock, and nothing of the last one's route. */
+    private void switchKind(Kind next) {
+        gaveUp = false;
+        kind = next;
+        heldTicks = 0;
+        waterTarget = null;
+        navFailed = false;
+        reachedWater = false;
+    }
+
     // ---------------------------------------------------------------------------------------------------------
 
+    /** The hazard the body is in now, in priority order, leaving out the kinds that are given up on for the moment. */
     @Nullable
     private Kind detect(ReflexContext ctx) {
         BotPlayer body = ctx.body;
-        if (body.isInLava()) return Kind.LAVA;
+        if (body.isInLava() && allowed(Kind.LAVA, ctx)) return Kind.LAVA;
         BlockState feet = ctx.level.getBlockState(body.blockPosition());
         boolean inFire = feet.is(BlockTags.FIRE) || feet.is(Blocks.CAMPFIRE) && feet.getValue(CampfireBlock.LIT);
-        if (inFire && !body.fireImmune() && !body.hasEffect(MobEffects.FIRE_RESISTANCE)) return Kind.FIRE;
-        if (body.isOnFire() && !body.fireImmune() && !body.hasEffect(MobEffects.FIRE_RESISTANCE) && findWater(ctx) != null) return Kind.FIRE;
+        if (allowed(Kind.FIRE, ctx)) {
+            if (inFire && !body.fireImmune() && !body.hasEffect(MobEffects.FIRE_RESISTANCE)) return Kind.FIRE;
+            if (body.isOnFire() && !body.fireImmune() && !body.hasEffect(MobEffects.FIRE_RESISTANCE) && findWater(ctx) != null) return Kind.FIRE;
+        }
         boolean breathes = body.canBreatheUnderwater() || body.hasEffect(MobEffects.WATER_BREATHING) || body.hasEffect(MobEffects.CONDUIT_POWER);
-        if (!breathes && body.isEyeInFluid(FluidTags.WATER) && body.getAirSupply() < ReflexConstants.AIR_LOW) return Kind.DROWNING;
-        if (body.isInWall()) return Kind.SUFFOCATION;
+        if (!breathes && body.isEyeInFluid(FluidTags.WATER) && body.getAirSupply() < ReflexConstants.AIR_LOW && allowed(Kind.DROWNING, ctx)) return Kind.DROWNING;
+        if (body.isInWall() && allowed(Kind.SUFFOCATION, ctx)) return Kind.SUFFOCATION;
         return null;
+    }
+
+    private boolean allowed(Kind candidate, ReflexContext ctx) {
+        Long until = giveUpUntil.get(candidate);
+        return until == null || ctx.time >= until;
     }
 
     @Override

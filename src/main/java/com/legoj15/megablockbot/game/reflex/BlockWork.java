@@ -9,9 +9,10 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action;
 import net.minecraft.world.InteractionHand;
-import net.minecraft.world.InteractionResult;
+import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -82,13 +83,22 @@ final class BlockWork {
 
     /**
      * Places the block in the main hand at {@code cell} by clicking a face of a neighbour that the eyes can see (a
-     * ray from them reaches that face first) and reach. Returns true when a block was placed. The body should be
-     * sneaking, so that a click on a door or a crafting table places instead of using it.
+     * ray from them reaches that face first) and reach, the way a player does: with the sneak key down, so that a click on
+     * a usable block (a crafting table, a furnace, a barrel) places against it instead of using it. Returns true only when
+     * the cell holds the block afterwards: a click that was consumed without placing (the sneak key was not down yet, a
+     * menu opened, an event refused it) is not a placement; any menu it opened is closed again and the next anchor tried.
+     * With the key not down yet the body is told to press it and nothing is clicked this tick.
      */
     boolean place(ReflexContext ctx, BlockPos cell) {
         BotPlayer body = ctx.body;
         ItemStack stack = body.getMainHandItem();
-        if (stack.isEmpty()) return false;
+        if (stack.isEmpty() || !(stack.getItem() instanceof BlockItem blockItem)) return false;
+        if (!body.isShiftKeyDown()) {
+            // Input written now is applied before the body's next tick: the click waits for it, as it would for a key press.
+            body.input().sneak = true;
+            return false;
+        }
+        Block expected = blockItem.getBlock();
         Vec3 eye = body.getEyePosition();
         for (Direction toAnchor : Direction.values()) {
             BlockPos anchor = cell.relative(toAnchor);
@@ -101,10 +111,12 @@ final class BlockWork {
             if (hit.getType() != HitResult.Type.BLOCK || !hit.getBlockPos().equals(anchor) || hit.getDirection() != face) continue;
             if (eye.distanceTo(hit.getLocation()) > body.blockInteractionRange()) continue;
             Steer.face(body, hit.getLocation());
-            InteractionResult result = body.getInteractionManager().interactBlock(body, ctx.level, stack, InteractionHand.MAIN_HAND, hit);
-            if (result.consumesAction()) {
+            body.getInteractionManager().interactBlock(body, ctx.level, stack, InteractionHand.MAIN_HAND, hit);
+            // A click on a door or a chest answers "consumed" without placing anything: the cell is what says.
+            if (body.containerMenu != body.inventoryMenu) body.closeContainer();
+            if (ctx.level.getBlockState(cell).is(expected)) {
                 // The loader's placement hook would record it at the end of the tick; this is the same fact, now.
-                if (!ctx.level.getBlockState(cell).isAir()) BlockSafety.of(ctx.level.getServer()).noteBotPlaced(body, ctx.level, cell);
+                BlockSafety.of(ctx.level.getServer()).noteBotPlaced(body, ctx.level, cell);
                 return true;
             }
         }

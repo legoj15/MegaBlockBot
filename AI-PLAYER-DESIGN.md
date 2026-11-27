@@ -254,22 +254,35 @@ The reflex layer never changes the goal tree. It only pauses the active task (§
 Preemption). Task state machines must
 be resumable after preemption; this is a hard requirement on every task.
 
-Decided in #8 (`game.reflex`, `docs/reflexes.md`, `ReflexGameTests`; the numbers are `ReflexConstants`, starting from
-AIBot's):
-- One `ReflexLayer` per body. The brain calls `tick(body)` once per body tick before the executor and gets a `ReflexHold`;
-  while it is held the layer drives the body (it ticks the navigator itself) and the runtime leaves the executor's task and
-  the navigator alone. Taking the body stops the navigator, clears input, item use and any block break; letting go leaves
-  none behind. Reflexes are listed once, in `ReflexRegistry`; one that throws is quarantined, not allowed to take the tick down.
+Decided in #8 (`game.reflex`, `docs/reflexes.md`, `ReflexGameTests` and `ReflexRuntimeGameTests`; the numbers are
+`ReflexConstants`, starting from AIBot's):
+- One `ReflexLayer` per body, wired in: `ReflexFeature.init()` makes it the reflex source of every body's runtime, and
+  `BotRuntime.think` asks it first, every body tick, and passes the `ReflexHold` to the executor. While the hold is on, the layer
+  drives the body (it ticks the navigator itself, so the runtime does not tick it in that tick), the executor's task is paused,
+  and so is the runtime's own leftover-table step. Taking the body stops the navigator, clears input, item use and any block
+  break, and sets the navigator's break filter to "break nothing". Letting go, however the hold ends (finished, the body died or
+  was replaced, the layer stopped), leaves none of those behind and sets the filter to `BreakRules.filterFor(body)` for the body
+  as it is then; the layer remembers no filter. A handover between reflexes stops the navigator command of the old holder: the
+  layer does it, not each reflex. Reflexes are listed once, in `ReflexRegistry`; one that throws is quarantined, not allowed to
+  take the tick down. A despawned body's layer is dropped by a sweep, as its navigator is.
 - A threat is a hostile whose target is the body, within 16 blocks, or any hostile within melee range, **and in sight**
   (which is what keeps a body walled into its shelter from fighting the zombies outside). A hold ends after a quiet
   period (no threat for 20 ticks, no mob hurt for 40). The resume gate's "health above the retreat threshold" is the
   vitals reflex's: it holds the body to eat while it can; with no food the gate opens (3.2 item 3: "otherwise only report").
+- A mob that hurts the body is never ignored: a chase given up on goes on the ignore list unless the mob has hurt the body in
+  the last 100 ticks, and one that keeps hurting it from where it cannot be reached is retreated from, to the nearest spot out
+  of its sight, never stood in front of.
 - Attacks go through `Player.attack`, **before** `swing` (`ServerPlayer.swing` resets the attack cooldown, so a swing first makes
-  every hit a weak one); a shield is lowered for the swing, since a player cannot swing with it up. A creeper is never
-  approached; one whose fuse burns near a body that holds a shield is faced with it raised.
-- The night shelter is built from inside, bottom up, by clicking faces the eyes can see (the cap goes against a block put on
-  a wall from the top of a jump), after asking `BlockSafety` whether each cell could be broken again, and is taken down in the
-  morning by breaking what the body placed.
+  every hit a weak one); a shield is lowered for the swing, since a player cannot swing with it up. A creeper that targets the
+  body is a threat from anywhere in the scan and is never approached: the body keeps or opens the gap, and one whose fuse burns
+  near a body that holds a shield is faced with it raised.
+- The night shelter is built from inside, bottom up, by clicking faces the eyes can see with the sneak key down (the cap goes
+  against a block put on a wall from the top of a jump; a placement counts only when the cell holds the block), after asking
+  `BlockSafety` whether each cell could be broken again, and is taken down in the morning by breaking what the body placed. The
+  blocks it placed are recorded in the layer and leave the record only when the world no longer holds them: a takedown that
+  could not finish is tried again by a later calm tick in daylight. The night marked done is the night the hold was for (taken
+  when it started), not the one the clock names when it ends, and a policy changed under a walk to the bed spends nothing.
+- A hazard that holds the body for 400 ticks is given up on per kind, so giving up on a fire does not switch off surfacing.
 
 ### 3.3 Language layer
 

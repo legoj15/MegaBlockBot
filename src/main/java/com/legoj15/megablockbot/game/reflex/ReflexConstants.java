@@ -60,6 +60,13 @@ public final class ReflexConstants {
     /** A target that has not got closer for this long is given up on, and ignored for {@link #IGNORE_MOB_TICKS}. */
     public static final int CHASE_GIVE_UP_TICKS = 100;
     public static final int IGNORE_MOB_TICKS = 600;
+    /**
+     * A mob that hurt the body this recently is never ignored and counts as "keeps hurting it": it comes off the ignore
+     * list, and a chase that gets nowhere while it does is given up on after {@link #CHASE_GIVE_UP_HURT_TICKS} instead,
+     * because every second spent walking at a shooter that cannot be reached is a second of arrows.
+     */
+    public static final int HURT_MEMORY_TICKS = 100;
+    public static final int CHASE_GIVE_UP_HURT_TICKS = 40;
 
     // ---------------------------------------------------------------------------------------------------------
     // Retreat
@@ -90,12 +97,24 @@ public final class ReflexConstants {
     /** Spots the navigator failed to reach, tried one after another, before the body gives up on running. */
     public static final int RETREAT_MAX_FAILED_SPOTS = 8;
     public static final int CORNERED_TICKS = 80;
+    /**
+     * A retreat starts running the moment it is picked: for this many ticks, while the navigator is still looking for its
+     * path and has put nothing into the input, the body runs straight away from the nearest threat (onto ground that is
+     * there). A first path takes a few ticks, and a creeper closes a block in the time.
+     */
+    public static final int RETREAT_RUNNING_START_TICKS = 12;
 
     /**
-     * A creeper that targets the body is never approached and counts as about to explode from this close. It swells
-     * from 3 blocks and keeps swelling to 7; the fuse is 30 ticks. AIBot never meleed one either (escape distance 12).
+     * How far a retreat looks for a spot that the mobs it runs from cannot see (a shooter that cannot be reached), in
+     * blocks around the body. Past it the body runs to a far spot as for any retreat.
      */
-    public static final double CREEPER_FLEE_RANGE = 9.0;
+    public static final int HIDE_SEARCH_RADIUS = 12;
+
+    // A creeper that targets the body is a threat from anywhere in the scan, and is never approached: the body keeps or
+    // opens the gap (AIBot never meleed one either, escape distance 12). It swells from 3 blocks and keeps swelling to 7;
+    // the fuse is 30 ticks. Only a creeper closer than CREEPER_SWELL_RANGE, or one already fusing, is fought when the body
+    // has nowhere left to run.
+
     /**
      * A creeper whose fuse is burning, this close, with a shield to hand: the body stops running, faces it and raises the
      * shield instead. An explosion is blocked like any hit from the front, and at this range running no longer gets the
@@ -104,7 +123,10 @@ public final class ReflexConstants {
     public static final double CREEPER_BRACE_RANGE = 4.5;
     /** A creeper this close starts swelling next tick whatever it targets. */
     public static final double CREEPER_SWELL_RANGE = 3.5;
-    /** Past this distance a creeper's explosion cannot reach and its fuse is cut (a charged one blows twice as wide). */
+    /**
+     * Past this distance a creeper's explosion cannot reach and its fuse is cut (a charged one blows twice as wide): a
+     * creeper that does not target the body is of no concern from here, and one that does is run from all the same.
+     */
     public static final double CREEPER_SAFE_DISTANCE = 9.0;
     public static final double POWERED_CREEPER_SAFE_DISTANCE = 14.0;
 
@@ -142,7 +164,13 @@ public final class ReflexConstants {
     public static final int HAZARD_CLEAR_TICKS = 10;
     /** How far a body that stands in lava, fire or a wall looks for the nearest open, safe cell. */
     public static final int SAFE_SPOT_RADIUS = 5;
-    /** A hazard that has held the body this long without ending is given up on (a body in a cage of fire cannot be helped by waiting). */
+    /**
+     * A hazard of one kind that has held the body this long without ending is given up on, and that kind is left alone
+     * for as long again: a body in a cage of fire cannot be helped by waiting, and a hold that never ends would keep the
+     * executor from its goal for good. The window is per kind, so giving up on reaching water for a fire does not switch
+     * off surfacing for air; and after it the kind is tried afresh, because what stopped the body (a wall, a pool it could
+     * not reach) may be gone.
+     */
     public static final int HAZARD_GIVE_UP_TICKS = 400;
 
     // ---------------------------------------------------------------------------------------------------------
@@ -171,6 +199,15 @@ public final class ReflexConstants {
     /** Taking the shelter down, and then picking its blocks up, are given this long each. */
     public static final int TAKEDOWN_TIMEOUT_TICKS = 600;
     public static final int COLLECT_TICKS = 100;
+    /**
+     * Shelter blocks that stand are never forgotten: a takedown that could not finish them (a fight carried the body off,
+     * the time ran out) is tried again by a later calm tick in daylight. Blocks farther than this from the body, in
+     * blocks on the ground plane, are left until it comes back near; the walk back to a block that is nearer takes at most
+     * {@link #SPOT_WALK_TICKS}.
+     */
+    public static final int TAKEDOWN_PURSUE_RADIUS = 48;
+    /** A shelter block the break rules refuse is asked about again after this long (the protected zone may have moved). */
+    public static final int REFUSED_RETRY_TICKS = 6000;
     /** Ticks between two placements (a client's right-click repeat is 4; this is quicker because each click is its own). */
     public static final int PLACE_DELAY_TICKS = 2;
     /** How far from the middle of its cell the body may stand when it starts building: the walls must not touch its box. */

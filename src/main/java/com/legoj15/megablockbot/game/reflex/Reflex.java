@@ -18,6 +18,13 @@ interface Reflex {
     void act(ReflexContext ctx);
 
     /**
+     * Called after the navigator has been ticked, when this reflex holds the body: what the navigator wrote into the input
+     * this tick (nothing, while it is still looking for a path) can be added to or replaced by a plain move of the reflex's
+     * own. Does nothing by default.
+     */
+    default void afterNavigator(ReflexContext ctx) {}
+
+    /**
      * Lets go: whatever this reflex started (a shield, a meal, a block break) stops, and its state is cleared, because
      * it is called both when the cause is over and when a higher reflex takes the body. The layer clears the body's
      * input, so a reflex need not.

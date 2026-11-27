@@ -6,6 +6,7 @@ import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
 import com.legoj15.megablockbot.game.nav.BreakFilter;
 import com.legoj15.megablockbot.game.reflex.ReflexConstants.NightPolicy;
+import com.legoj15.megablockbot.game.task.BreakRules;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -14,6 +15,9 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.annotation.Nullable;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Mob;
 
 /**
  * The reflex layer of one body (design 3.2): above whatever goal runs, every tick, it looks at the body and what is
@@ -23,13 +27,17 @@ import javax.annotation.Nullable;
  * returns says {@code held}, the layer drives the body (inputs, the navigator, the game mode) and the runtime must
  * leave the executor's task and the navigator alone: this layer ticks the navigator itself when it has a command
  * running. While it returns {@link ReflexHold#NONE} the layer touches nothing. On taking the body it stops the
- * navigator, drops the input, the item in use and any block break in progress; on letting go it leaves none of them
- * behind and puts the navigator's break filter back. It never changes the goal tree, never cancels a goal and never
- * teleports.
+ * navigator, drops the input, the item in use and any block break in progress, and sets the navigator's break filter to
+ * "break nothing"; whenever a hold ends, for whatever reason (finished, the body died or was replaced, the layer was
+ * stopped), the filter is set to {@link BreakRules#filterFor} for the body as it is then and no input, item in use or
+ * navigator command is left behind. The layer remembers no filter of anyone else's: the executor's tasks arm the navigator
+ * themselves whenever they start or resume. It never changes the goal tree, never cancels a goal and never teleports.
  *
  * <p><b>Hysteresis.</b> Each reflex keeps the body until its cause is clearly over (the named constants in
  * {@link ReflexConstants}), so the executor's task is not paused and resumed every few ticks. A higher reflex takes
- * the body from a lower one at once; that hands the hold over without letting it go, so the executor sees one hold.
+ * the body from a lower one at once; that hands the hold over without letting it go, so the executor sees one hold. A
+ * handover is made by the layer, not by the reflexes: whatever navigator command the old holder had running is stopped, so
+ * the new holder starts with the navigator idle and uses it only if it starts a command of its own.
  *
  * <p><b>Faults.</b> A brain must not throw (design 3.4), and this runs inside the body's tick, so a reflex that throws is
  * logged with its stack trace, counted ({@link #faults}) and left out for {@link #QUARANTINE_TICKS} ticks instead of
@@ -46,10 +54,30 @@ public final class ReflexLayer {
     /** While a reflex navigates it must not dig: breaking terrain is the executor's business, not a retreat's. */
     private static final BreakFilter NO_BREAKS = (level, pos, state) -> false;
 
+    /** How a night hold ended, for the log and for a test; the text of the outcome says why. */
+    public enum NightResult {
+        /** No night hold has ended yet. */
+        NONE,
+        /** The body slept in a bed. */
+        SLEPT,
+        /** It went for a bed and did not sleep in it: the policy changed, the bed was gone, morning came first. */
+        DID_NOT_SLEEP,
+        /** A shelter was closed and the night was spent in it. */
+        SHELTERED,
+        /** A shelter was begun and never closed. */
+        NO_SHELTER
+    }
+
     private BotPlayer body;
     private List<Reflex> reflexes = ReflexRegistry.instantiate();
     private final BlockWork work = new BlockWork();
     private final Map<UUID, Long> ignored = new HashMap<>();
+    /** Mobs the body could not get closer to and that went on hurting it: run from, out of their sight, never ignored. Mob to the tick until which. */
+    private final Map<UUID, Long> unreachable = new HashMap<>();
+    /** Mob to the game time it last hurt the body. */
+    private final Map<UUID, Long> hurtBy = new HashMap<>();
+    private int lastHurtStamp = -1;
+    private final ShelterBlocks shelter = new ShelterBlocks();
     private final Map<String, Long> quarantine = new HashMap<>();
     private NightPolicy nightPolicy = ReflexConstants.NIGHT_POLICY;
 
@@ -58,8 +86,9 @@ public final class ReflexLayer {
     private int heldTicks;
     private int holdsStarted;
     private boolean navigatorUsed;
-    @Nullable
-    private BreakFilter savedFilter;
+    /** The navigator's break filter is "break nothing" because of this layer, and has not been given back yet. */
+    private boolean filterOurs;
+    private NightResult nightResult = NightResult.NONE;
     private String note = "";
     private String lastCause = "";
 
@@ -77,6 +106,26 @@ public final class ReflexLayer {
     /** Forgets every layer. Called when a server stops; the bodies go with it. */
     public static void clearAll() {
         LAYERS.clear();
+    }
+
+    /** True while a layer exists for the body with this UUID, whatever it is doing. For tests. */
+    public static boolean tracks(UUID bodyId) {
+        return LAYERS.containsKey(bodyId);
+    }
+
+    /**
+     * Drops the layers of bodies that are gone for good, as {@code BotNavigator.sweep} does for navigators. A layer follows
+     * its body through a respawn (same UUID, new instance), so only a body that is no longer logged in at all, a despawn
+     * nothing replaced, makes its layer dead weight; left alone it would keep the removed body in memory for the life of
+     * the process. Called periodically from {@link ReflexFeature}.
+     */
+    public static void sweep(MinecraftServer server) {
+        LAYERS.values().removeIf(layer -> {
+            if (layer.body.getServer() != server) return false;
+            if (server.getPlayerList().getPlayer(layer.body.getUUID()) != null) return false;
+            layer.dropHold("the body was removed");
+            return true;
+        });
     }
 
     /** How many times a reflex has thrown since the JVM started: a GameTest asserts it stays put. */
@@ -98,7 +147,13 @@ public final class ReflexLayer {
         }
         ReflexContext ctx = new ReflexContext(this, body);
         note = "";
-        if (ctx.time % 200 == 0) ignored.values().removeIf(until -> until <= ctx.time);
+        // A hold that was dropped (the body died, or was replaced) never gave the filter back: the live body gets it now.
+        if (holder == null && filterOurs) giveBackFilter(ctx);
+        if (ctx.time % 200 == 0) {
+            ignored.values().removeIf(until -> until <= ctx.time);
+            unreachable.values().removeIf(until -> until <= ctx.time);
+        }
+        noteHurt(ctx);
 
         Reflex chosen = null;
         for (Reflex reflex : reflexes) {
@@ -126,6 +181,13 @@ public final class ReflexLayer {
         }
         // The navigator belongs to whoever has a command running on it: while held, that is this layer (or nobody).
         if (navigatorUsed) ctx.tickNavigator();
+        try {
+            chosen.afterNavigator(ctx);
+        } catch (RuntimeException e) {
+            fault(chosen, e, ctx.time);
+            switchTo(ctx, null);
+            return ReflexHold.NONE;
+        }
         heldTicks++;
         lastCause = chosen.name() + ": " + chosen.cause();
         return new ReflexHold(true, lastCause);
@@ -140,12 +202,25 @@ public final class ReflexLayer {
 
     /** Lets go of the body now, whatever holds it: what the dev command does when it takes the dev brain away. */
     public void stop() {
-        if (holder == null) return;
+        if (holder == null) {
+            if (filterOurs && !body.isDeadOrDying() && !body.isRemoved() && !body.hasDisconnected()) giveBackFilter(new ReflexContext(this, body));
+            return;
+        }
         switchTo(new ReflexContext(this, body), null);
     }
 
     public boolean isHolding() {
         return holder != null;
+    }
+
+    /** The name of the reflex that holds the body now ({@code hazard}, {@code mobs}, {@code vitals}, {@code night}), or empty when none does. */
+    public String holderName() {
+        return holder == null ? "" : holder.name();
+    }
+
+    /** How the latest night hold ended; {@link NightResult#NONE} until one has. */
+    public NightResult lastNightResult() {
+        return nightResult;
     }
 
     /** How many holds have started (a handover between reflexes is not a new hold). */
@@ -178,6 +253,24 @@ public final class ReflexLayer {
         return work;
     }
 
+    Map<UUID, Long> unreachableMobs() {
+        return unreachable;
+    }
+
+    ShelterBlocks shelterBlocks() {
+        return shelter;
+    }
+
+    void setNightResult(NightResult result) {
+        nightResult = result;
+    }
+
+    /** Whether this mob hurt the body in the last {@link ReflexConstants#HURT_MEMORY_TICKS} ticks. */
+    boolean hurtRecently(UUID mob, long now) {
+        Long at = hurtBy.get(mob);
+        return at != null && now - at <= ReflexConstants.HURT_MEMORY_TICKS;
+    }
+
     void markNavigatorUsed() {
         navigatorUsed = true;
     }
@@ -198,7 +291,25 @@ public final class ReflexLayer {
         body = current;
         reflexes = ReflexRegistry.instantiate();
         ignored.clear();
+        unreachable.clear();
+        hurtBy.clear();
+        lastHurtStamp = -1;
         quarantine.clear();
+    }
+
+    /**
+     * What hurt the body is remembered by mob: a mob that hurt it in the last few seconds is never on the ignore list,
+     * however it got there (a chase given up on, an earlier fight). The body's own record of its last attacker lasts five
+     * seconds and holds one mob; this one keeps each.
+     */
+    private void noteHurt(ReflexContext ctx) {
+        int stamp = body.getLastHurtByMobTimestamp();
+        LivingEntity by = body.getLastHurtByMob();
+        if (by instanceof Mob mob && stamp != lastHurtStamp) hurtBy.put(mob.getUUID(), ctx.time);
+        lastHurtStamp = stamp;
+        if (hurtBy.isEmpty()) return;
+        hurtBy.values().removeIf(at -> ctx.time - at > ReflexConstants.HURT_MEMORY_TICKS);
+        for (UUID id : hurtBy.keySet()) ignored.remove(id);
     }
 
     /** Forgets a hold without touching the body: it is dead or replaced, and its input and navigator went with it. */
@@ -207,7 +318,7 @@ public final class ReflexLayer {
         MegaBlockBot.LOGGER.info("reflex {}: hold dropped after {} ticks ({}): {}", name(), heldTicks, lastCause, why);
         holder = null;
         navigatorUsed = false;
-        savedFilter = null;
+        // filterOurs stays: the filter is given back to the body that is alive next (see tick), not to this dead instance.
         reflexes = ReflexRegistry.instantiate();
     }
 
@@ -223,6 +334,9 @@ public final class ReflexLayer {
         }
         if (previous == null && next != null) takeOver(ctx, next);
         if (previous != null && next != null) {
+            // Whatever the old holder had running on the navigator ends with its hold; the new one starts from idle.
+            ctx.nav.stop();
+            navigatorUsed = false;
             String outcome = previous.outcome();
             MegaBlockBot.LOGGER.info("reflex {}: hold handed from {} to {}{} (health {}, food {})", name(), previous.name(), next.name(),
                 outcome.isEmpty() ? "" : " [" + previous.name() + ": " + outcome + "]", health(), ctx.food());
@@ -236,8 +350,8 @@ public final class ReflexLayer {
         body.input().reset();
         if (body.isUsingItem()) body.stopUsingItem();
         work.abort(body);
-        savedFilter = ctx.nav.breakFilter();
         ctx.nav.setBreakFilter(NO_BREAKS);
+        filterOurs = true;
         navigatorUsed = false;
         heldTicks = 0;
         holdsStarted++;
@@ -245,20 +359,25 @@ public final class ReflexLayer {
     }
 
     private void finishHold(ReflexContext ctx, @Nullable Reflex last) {
-        if (navigatorUsed) {
-            ctx.nav.stop();
-            navigatorUsed = false;
-        }
-        if (savedFilter != null) {
-            ctx.nav.setBreakFilter(savedFilter);
-            savedFilter = null;
-        }
+        if (navigatorUsed || ctx.nav.state() == BotNavigator.State.WORKING) ctx.nav.stop();
+        navigatorUsed = false;
+        giveBackFilter(ctx);
         body.input().reset();
         if (body.isUsingItem()) body.stopUsingItem();
         work.abort(body);
         String outcome = last == null ? "" : last.outcome();
         MegaBlockBot.LOGGER.info("reflex {}: hold ended after {} ticks: {}{} (health {}, food {})", name(), heldTicks, lastCause,
             outcome.isEmpty() ? "" : "; " + outcome, health(), ctx.food());
+    }
+
+    /**
+     * Ends "break nothing": the navigator gets the rule every task arms it with, for the body as it is now. The layer keeps
+     * no filter of its own to put back, because the one it replaced belonged to a task that has since been paused,
+     * resumed (which re-arms it), replaced or lost with a dead body.
+     */
+    private void giveBackFilter(ReflexContext ctx) {
+        ctx.nav.setBreakFilter(BreakRules.filterFor(body));
+        filterOurs = false;
     }
 
     // ---------------------------------------------------------------------------------------------------------
