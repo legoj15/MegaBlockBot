@@ -15,6 +15,7 @@ import com.legoj15.megablockbot.core.plan.NodeIdentity;
 import com.legoj15.megablockbot.core.plan.NodeSpec;
 import com.legoj15.megablockbot.core.plan.PlanRequest;
 import com.legoj15.megablockbot.core.plan.Profile;
+import com.legoj15.megablockbot.core.planner.LookInside;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.megablockbot.core.task.Failure;
 import com.legoj15.megablockbot.core.task.Task;
@@ -109,7 +110,10 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     private CommandSourceStack feedback;
 
     public BotRuntime() {
-        this.executor = new GoalExecutor<>(this, new Postconditions(), ExecutorConfig.defaults());
+        Postconditions postconditions = new Postconditions();
+        // The goal the body gives itself when its owner names a container: its postcondition is true once it has looked.
+        postconditions.register(LookInside.KIND, LookInside::postcondition);
+        this.executor = new GoalExecutor<>(this, postconditions, ExecutorConfig.defaults());
     }
 
     /** The runtime driving this body, or null when it has another brain (a test's, the navigation dev command's). */

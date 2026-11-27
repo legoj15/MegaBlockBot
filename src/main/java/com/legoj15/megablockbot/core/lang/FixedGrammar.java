@@ -46,8 +46,10 @@ import java.util.regex.Pattern;
  *   <li>{@code stockpile <count> <item> at <x> <y> <z>} — into the context's dimension</li>
  *   <li>{@code use chest at <x> <y> <z>} — {@code UseChest}: the container there, in the context's dimension, is one the
  *       body may take items from (a "supply container", design 3.5); {@code forget chest at <x> <y> <z>} takes it off
- *       that list and {@code chests} asks for the list. Not goals: the body keeps them, and what such a container holds
- *       counts toward whatever goal comes next. Any container block can be named, whatever the word {@code chest}</li>
+ *       that list and {@code chests} asks for the list. Not goals: the body keeps them. Naming a container does not
+ *       tell the body what is in it (a closed chest cannot be seen into): the runtime sends the body to look inside,
+ *       ahead of whatever comes next in the message, and what it finds counts toward the goals after that. Any
+ *       container block can be named, whatever the word {@code chest}</li>
  *   <li>{@code build <blueprint> at <x> <y> <z>} — the blueprint must be in {@link LanguageContext#blueprints()}</li>
  *   <li>{@code goto|go to|come to <x> <y> <z> [within <r>]} — the radius is 0 to 256, default 2</li>
  *   <li>{@code come here|come} — to where the owner stands, within 3</li>
@@ -140,6 +142,9 @@ public final class FixedGrammar implements LanguageLayer {
             + "equip <item> [<item> ...]\n"
             + "equip <material> armor\n"
             + "stockpile <count> <item> at <x> <y> <z>\n"
+            + "use chest at <x> <y> <z>\n"
+            + "forget chest at <x> <y> <z>\n"
+            + "chests\n"
             + "build <blueprint> at <x> <y> <z>\n"
             + "goto|go to|come to <x> <y> <z> [within <r>]\n"
             + "come here|come\n"

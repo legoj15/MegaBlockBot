@@ -6,6 +6,7 @@ import com.legoj15.megablockbot.core.goal.Goal;
 import com.legoj15.megablockbot.core.plan.PlanOutcome;
 import com.legoj15.megablockbot.core.plan.PlanRequest;
 import com.legoj15.megablockbot.core.plan.Planner;
+import com.legoj15.megablockbot.core.planner.LookInside;
 import com.legoj15.megablockbot.core.planner.PlannerConfig;
 import com.legoj15.megablockbot.core.planner.RecipeBook;
 import com.legoj15.megablockbot.core.planner.SolverPlanner;
@@ -44,7 +45,7 @@ final class BotPlanner {
         synchronized (LOCK) {
             // By identity: a rebuild publishes a new instance, which is the only change a reader has to notice.
             if (planner == null || plannedBook != book || plannedIndex != index) {
-                planner = new SolverPlanner(book, index, PlannerConfig.defaults(), List.of());
+                planner = new SolverPlanner(book, index, PlannerConfig.defaults(), List.of(new LookInside()));
                 plannedBook = book;
                 plannedIndex = index;
             }

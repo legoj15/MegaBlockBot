@@ -104,8 +104,10 @@ import java.util.TreeSet;
  * from the containers, then from what the plan makes; so the containers give {@code drawn + relied - carried}, capped at
  * what they hold, nearest first, and each give is a {@code withdraw} leaf placed in front of every other node. Taking it
  * all up front is what keeps the leaf goals of the later nodes true: they were counted with the container's items in the
- * stock. A container is left out when the request's exclusions rule its position out (a failure at it), and the target
- * of a {@link Goal.Stockpile} is not a supply for that goal.
+ * stock. A container is left out when the request's exclusions rule its position out (a failure at it) or its withdraw
+ * source ({@code withdraw:<container>}, what a NO_SOURCE failure of that leaf names: the container would not open), and
+ * the target of a {@link Goal.Stockpile} is not a supply for that goal. A container the body has not been inside has
+ * no contents in its sight, so it supplies nothing: the plan counts only what the body noted when it opened one.
  */
 public final class SolverPlanner implements Planner {
     /** Solver budgets, SprawlCrafting's pins (docs/handoff/solver-core.md): depth and attempt caps per solve. */
@@ -292,8 +294,11 @@ public final class SolverPlanner implements Planner {
             Pos here = snapshot.pos();
             List<ContainerSight> boxes = new ArrayList<>();
             for (ContainerSight box : snapshot.containers()) {
+                // A container the body has not opened has no contents in its sight, so it has nothing to count.
                 if (!box.mayTakeFrom() || box.contents().isEmpty() || box.pos().equals(target)) continue;
                 if (exclusions.excludes(snapshot.dimension(), box.pos())) continue;
+                // A leaf that failed with NO_SOURCE (the container would not open) ruled out its own source id.
+                if (exclusions.sources().contains(withdrawSource(box.pos()))) continue;
                 boxes.add(box);
             }
             boxes.sort(Comparator.comparingLong((ContainerSight box) -> box.pos().distSq(here))
@@ -1081,7 +1086,7 @@ public final class SolverPlanner implements Planner {
                     params.put("container", box.pos().encode());
                     params.put("dimension", snapshot.dimension());
                     leaves.add(NodeSpec.leaf(new Goal.HaveItem(item, (int) total), "withdraw", params,
-                            "withdraw:" + box.pos().encode()));
+                            withdrawSource(box.pos())));
                     if (box.remembered()) {
                         note(item.id() + ": " + take + " from the container at " + box.pos().encode()
                                 + ", as the body remembers it (it cannot see it from here)");
@@ -1220,10 +1225,11 @@ public final class SolverPlanner implements Planner {
      * stations, the tools the sources it can be gathered from require, and what a trade charges) and, for a goal
      * the planner cannot see into (a build or a custom goal), of the whole inventory; and what {@code Stockpile}
      * reads (the container's known contents), {@code Equip} reads (what is worn) and a goal with a component check reads
-     * (the facts of the stacks of its item that the body holds). The sight is in it only as far as it can change a choice:
-     * whether each block that a mining or harvesting source in the closure names is in the sight, never how far away it
-     * is (a body that walks must not look like one whose situation changed), and whether the sight is empty, which
-     * switches its charge off ({@link GatherCosts}). Position, health, hunger, game
+     * (the facts of the stacks of its item that the body holds), and what each container the body may take from holds
+     * of the items the plan reads and of the tools that could stand in for the ones it needs. The sight is in it only
+     * as far as it can change a choice: whether each block that a mining or harvesting source in the closure names is
+     * in the sight, never how far away it is (a body that walks must not look like one whose situation changed), and
+     * whether the sight is empty, which switches its charge off ({@link GatherCosts}). Position, health, hunger, game
      * time and the counts of items the plan never reads are not part of it, so an unrelated pickup keeps the plan
      * current. Stable across JVMs: FNV-1a over a canonical text, no {@code hashCode} (whose 32 bits collide sooner
      * than needed here).
@@ -1238,7 +1244,8 @@ public final class SolverPlanner implements Planner {
         }
         text.append(";items=");
         boolean everything = goal instanceof Goal.Build || goal instanceof Goal.Custom;
-        TreeSet<ItemKey> read = everything ? new TreeSet<>(snapshot.items().keySet()) : relevantItems(goal);
+        TreeSet<ItemKey> tools = new TreeSet<>();
+        TreeSet<ItemKey> read = everything ? new TreeSet<>(snapshot.items().keySet()) : relevantItems(goal, tools);
         for (ItemKey item : read) {
             int count = snapshot.count(item);
             if (count > 0) text.append(item.id()).append(':').append(count).append(',');
@@ -1270,14 +1277,18 @@ public final class SolverPlanner implements Planner {
             else text.append(sight.count(stockpile.key()));
         }
         text.append(";take=");
-        Pos stockpileTarget = goal instanceof Goal.Stockpile stockpile ? stockpile.container() : null;
+        // The target is the goal's own only in the dimension the goal names, as supplyBoxes has it.
+        Pos stockpileTarget = goal instanceof Goal.Stockpile stockpile && stockpile.dimension().equals(snapshot.dimension())
+                ? stockpile.container() : null;
         for (ContainerSight box : sortedByPosition(snapshot.containers())) {
             if (!box.mayTakeFrom() || box.pos().equals(stockpileTarget)) continue;
             StringBuilder held = new StringBuilder();
-            // What a plan may take from a container, among the items it reads the stock of; a goal the planner cannot
-            // see into reads them all. Whether the contents are remembered or in sight is not read.
+            // What a plan may take from a container: the items it reads the stock of, and the tools it may count as
+            // carried (relyOnTool: any tool of a class and tier a pickaxe, say, would serve, not only the one the
+            // tool table names); a goal the planner cannot see into reads every item. Whether the contents are
+            // remembered or in sight is not read.
             for (Map.Entry<ItemKey, Integer> entry : new TreeMap<>(box.contents()).entrySet()) {
-                if (entry.getValue() > 0 && (everything || read.contains(entry.getKey()))) {
+                if (entry.getValue() > 0 && (everything || read.contains(entry.getKey()) || tools.contains(entry.getKey()))) {
                     held.append(entry.getKey().id()).append(':').append(entry.getValue()).append(',');
                 }
             }
@@ -1289,6 +1300,11 @@ public final class SolverPlanner implements Planner {
             hash *= 0x100000001b3L;
         }
         return hash;
+    }
+
+    /** The source id of a withdraw leaf: what a NO_SOURCE failure of that leaf excludes and the planner then honors. */
+    static String withdrawSource(Pos container) {
+        return "withdraw:" + container.encode();
     }
 
     private static List<ContainerSight> sortedByPosition(List<ContainerSight> boxes) {
@@ -1332,14 +1348,19 @@ public final class SolverPlanner implements Planner {
      * The items a plan for the goal reads the stock of: the goal's items and everything their recipes, stations,
      * gather sources' tools and trade payments lead to. Walked over the recipe book and the index whole (not the
      * request's exclusions, which the fingerprint does not see), up to {@link #MAX_CLOSURE_ITEMS} items.
+     *
+     * <p>{@code tools} gets, besides, every tool item that a tool the plan needs could be stood in for by: of the class
+     * and at least the tier a mining source or a tool goal asks for. Such a tool in a container the body may take from
+     * is one the plan counts as carried and takes ({@code relyOnTool}), though no recipe on the way names it.
      */
-    private TreeSet<ItemKey> relevantItems(Goal goal) {
+    private TreeSet<ItemKey> relevantItems(Goal goal, Set<ItemKey> tools) {
         ArrayDeque<ItemKey> queue = new ArrayDeque<>();
         switch (goal) {
             case Goal.HaveItem g -> queue.add(g.key());
             case Goal.HaveToolTier g -> {
                 ItemKey tool = config.toolItem(g.toolClass(), g.tier());
                 if (tool != null) queue.add(tool);
+                addToolsServing(tools, g.toolClass(), g.tier());
             }
             case Goal.Equip g -> queue.addAll(g.slots().values());
             case Goal.Stockpile g -> queue.add(g.key());
@@ -1359,12 +1380,20 @@ public final class SolverPlanner implements Planner {
                 if (source instanceof Source.MineBlock mine && mine.toolRequired() && mine.toolClass() != null) {
                     ItemKey tool = config.toolItem(mine.toolClass(), mine.minTier());
                     if (tool != null) queue.add(tool);
+                    addToolsServing(tools, mine.toolClass(), mine.minTier());
                 } else if (source instanceof Source.Trade trade) {
                     queue.addAll(trade.cost().keySet());
                 }
             }
         }
         return seen;
+    }
+
+    /** Adds every tool item of that class at that tier or better (the tool table read backwards). */
+    private void addToolsServing(Set<ItemKey> tools, ToolClass toolClass, ToolTier required) {
+        for (Map.Entry<ItemKey, ToolClass> entry : toolClasses.entrySet()) {
+            if (entry.getValue() == toolClass && toolTiers.get(entry.getKey()).atLeast(required)) tools.add(entry.getKey());
+        }
     }
 
     /** The goal as one canonical string; every field the planner would read differently is in it. */

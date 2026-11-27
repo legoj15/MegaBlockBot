@@ -326,9 +326,11 @@ id string), inventory and equipment counts by item key, best tool tier per tool 
 units, nearby stations and container contents (radius configurable), and the extra data an
 active goal asks for: per-stack component facts for the item keys a `componentCheck` names
 (enchantments, potion, fill state), a structure report for a build goal, and observations a
-strategy declares (the current offers of the villager a librarian reroll is watching). A container sight also says
-whether the body may take from it (one it placed, or one its owner named: §3.5, supply containers) and, for such a
-container out of sight, shows what the body last noted of it, marked as remembered. Collected on the server
+strategy declares (the current offers of the villager a librarian reroll is watching). A container sight is what the
+body noted when it last opened the container, never what the world holds now (a player cannot see into a closed chest):
+it is marked remembered, in range or not, until the body opens it again, and a container it has not opened has no
+contents in its sight and counts as nothing. A sight also says whether the body may take from it (one it placed, or one
+its owner named: §3.5, supply containers). Collected on the server
 thread, read-only. Collecting it never changes state (AIBot's collector made capability
 decisions as a side effect). It also holds the body's **sight**: for each block the acquisition index names
 as a mining or harvesting source, the horizontal distance of the nearest one in the chunks already loaded
@@ -606,7 +608,10 @@ above, these hold; the code is `core/exec`.**
 - A withdraw is the same in the other direction (supply containers, 3.5): the planner puts one `withdraw` leaf per
   container and item in front of the rest of the plan, and the task takes the items with the same clicks. A container
   that holds fewer than the leaf needs gives nothing (`MISSING_INPUT`, and what it held is noted so the replan counts
-  the truth); an inventory with no room for it is `NO_PROGRESS`, as in the craft task.
+  the truth); an inventory with no room for it is `NO_PROGRESS`, as in the craft task. A container that is there and may
+  be used but gives no menu (a block on top of a chest, a cat) fails the leaf `NO_SOURCE` naming the leaf's own source,
+  which the executor rules out, so the replan gathers or crafts instead; a deposit asks block safety before it opens a
+  container, as a withdraw does (3.5).
 - A craft that needs a table puts one down where a player could (a replaceable spot and a neighbour face the eyes can see
   and reach; no sturdy face is needed) and, when no such spot is within reach, walks to the nearest place that has one
   (`game.task.TableSites`, 12 blocks). It draws only from the main inventory and the hotbar, and takes its result whole or
@@ -615,6 +620,9 @@ above, these hold; the code is `core/exec`.**
   but `INTERNAL` and `PREEMPT_STALLED` end in a replan, and a replan only changes the plan when the planner can see why
   the node failed (a source to exclude, a block to avoid). A craft with nowhere to put its table fails `INTERNAL` with no
   exception as a stand-in; a kind of its own (or a planner input for it) belongs in `core` (#27).
+- A look inside (`look_inside`, the one leaf of the small goal the body gives itself when its owner names a container:
+  a `Goal.Custom` whose postcondition reads the snapshot) walks to the container, opens it with the real menu, notes
+  what is in it and closes it. It is how the body comes to know what a named container holds.
 
 ### 3.5 Block safety
 
@@ -646,17 +654,35 @@ Supply containers (#12, "craft from a given chest"). The rule above forbids taki
 place, and it stays: the one exception is the owner's word. `use chest at <x> <y> <z>` names a container, `forget chest
 at <x> <y> <z>` takes it back, `chests` lists them (only the owner or the console may say it: the rule that guards a
 goal). The list is per body and saved with it (`BotMemory`); naming either half of a double chest names both, and one
-half joined to it later is nobody's word, so the pair is refused. A named container is one the body may *use*: open it,
-take from it, put into it, exactly as it may its own. It may never *break* it, named or not: `mayBreak` does not read
-the list. Whether using a container inside the protected radius is allowed was already decided by the code and is kept:
-yes. `evaluateUse` skips the radius (it only ever stopped breaking, and would only keep a bot from its own chest) and
-asks the claim rule, then the container rule; a supply container passes the container and workstation rules for that
-block (a named barrel is also a job site) and still meets a claim. A bed cannot be named (it holds nothing to take). The
-position is the word: when the task finds no container there it drops the owner's word and what it remembered, so a
-container someone puts there later is not the one that was named. What the body knows of a named container is what it
-noted: the owner showing it (`use` notes the contents at that moment) and what the withdraw task saw when it opened it;
-the planner counts that, marked as remembered while the container is out of sight (4.5: nothing is read from a chest
-the body has not looked inside).
+half joined to it later is nobody's word, so the pair is refused (name it again to name the pair). A named container is
+one the body may *use*: open it, take from it, put into it, exactly as it may its own. It may never *break* it, named or
+not: `mayBreak` does not read the list. Whether using a container inside the protected radius is allowed was already
+decided by the code and is kept: yes. `evaluateUse` skips the radius (it only ever stopped breaking, and would only keep
+a bot from its own chest) and asks the claim rule, then the container rule; a supply container passes the container and
+workstation rules for that block (a named barrel is also a job site) and still meets a claim. A bed cannot be named (it
+holds nothing to take).
+
+The body does only what a player can, and a player cannot see into a closed chest. Naming a container records its
+position and its block and nothing about what is in it; the contents are unknown, and the planner counts nothing from a
+container whose contents are unknown. So `use chest at` also sends the body to look: the runtime queues the small goal
+`look_inside` for that container ahead of whatever follows (`use chest at x y z; make 4 stick` looks first and then
+plans the sticks knowing what is there). Its one leaf walks to the container, opens the real menu, notes what is inside
+and closes it, and its postcondition is that the snapshot has a note of the container. What the body noted is what the
+plans count, marked remembered in the snapshot (in range or not) until the body opens the container again; every withdraw
+refreshes it, and naming the container again drops the note and looks again. A note is per inventory, not per block
+position: a pair is one note, and naming a chest that has since become half of a double chest leaves one note for the
+pair, so one inventory is never counted twice.
+
+The container that is used is the one that was named. The word records the block, and the withdraw and look tasks
+compare it with the block standing there (both halves of a double chest) before they open anything: another block means
+the owner's word is gone (`TARGET_GONE`: the word and the note are dropped, nothing is opened). A position that is not
+loaded is "cannot tell", never "gone": the task fails `UNREACHABLE` and keeps the word and the note, and the executor
+answers by going there. A container that is there and may be used but will not open ends the withdraw leaf `NO_SOURCE`
+for that leaf's source, so the replan leaves it out and gathers or crafts. Putting into a container asks block safety
+too: a stockpile goal names its target, which is the owner's word for it for that goal, so the deposit task asks with
+an allowance that covers exactly that container (both halves) open for the one question; the allowance lifts the
+container rule and never a claim, a bed or a job site (a barrel the bot did not place is stocked once
+it is named).
 
 ## 4. Planning pipeline
 

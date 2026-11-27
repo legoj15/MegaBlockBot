@@ -2,6 +2,7 @@ package com.legoj15.megablockbot.game.bot;
 
 import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.Pos;
+import com.legoj15.megablockbot.core.planner.LookInside;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.plan.BotMemory;
 import com.legoj15.megablockbot.game.plan.SupplyChests;
@@ -17,16 +18,18 @@ import net.minecraft.server.level.ServerLevel;
  * and the sentence that answers each. They reach here only through {@link BotTalk}, which is reached only by whoever
  * may command the body, so the same rule that guards a goal guards these.
  *
- * <p>Naming a container is the owner showing it: the body notes what is in it as of that moment, the way it notes what
- * it sees when it opens one, because the plan that follows counts on it and the owner can see inside what they point
- * at. The note is a memory like any other: the task that opens the container writes what it really finds, and the
- * planner counts what is noted, marked as remembered while the container is out of sight.
+ * <p>Naming a container records where it is and which block it is, and nothing of what is in it: a player cannot see
+ * into a closed chest, and the body does only what a player can. What it holds is unknown until the body has opened it, so
+ * naming one queues the body's {@link LookInside} goal for it, ahead of whatever the owner says next ({@code use chest at
+ * x y z; make 4 stick} looks first and then plans the sticks knowing what is there). What the body notes then is what the
+ * planner counts, marked as remembered, until the body opens the container again.
  */
 final class BotSupply {
     private BotSupply() {}
 
     /** Server thread. Answers with what the body will do, or why it will not. */
-    static String use(BotPlayer body, String dimension, Pos pos) {
+    static String use(BotRuntime runtime, String dimension, Pos pos) {
+        BotPlayer body = runtime.body();
         ServerLevel level = body.serverLevel();
         String here = level.dimension().location().toString();
         if (!dimension.equals(here)) {
@@ -36,15 +39,15 @@ final class BotSupply {
         if (!level.isLoaded(at)) {
             return "I cannot tell what is at " + BotSpeech.position(pos) + ": it is not loaded.";
         }
-        SupplyChests.Spot spot = SupplyChests.look(level, at);
+        SupplyChests.Spot spot = SupplyChests.find(level, at);
         if (spot == null) {
             return "There is no chest or other container at " + BotSpeech.position(pos) + ".";
         }
-        BotMemory memory = BotMemory.of(body.getUUID());
-        boolean fresh = memory.addSupply(new BotMemory.SupplyContainer(here, spot.pos(), spot.other()));
-        memory.noteContainer(here, spot.pos(), spot.block(), spot.contents());
+        // The owner's word, which also forgets any note of it: what it held before is not known to be what it holds now.
+        boolean fresh = BotMemory.of(body.getUUID()).addSupply(new BotMemory.SupplyContainer(here, spot.pos(), spot.other(), spot.block()));
+        runtime.submit(LookInside.goal(here, new Pos(spot.pos().getX(), spot.pos().getY(), spot.pos().getZ())));
         return (fresh ? "I may take from " : "I already take from ") + describe(spot.pos(), spot.other(), spot.block())
-            + ", which holds " + contents(spot.contents()) + ".";
+            + ". I will go and look inside it" + (fresh ? "." : " again.");
     }
 
     /** Server thread. */
@@ -58,7 +61,7 @@ final class BotSupply {
         memory.removeSupply(dimension, at);
         // What it noted was for taking from it; a container it placed itself keeps its note, since that is still its own.
         if (!memory.isPlaced(dimension, entry.pos())) memory.forgetContainer(dimension, entry.pos());
-        return "I will no longer take from " + describe(entry.pos(), entry.other(), null) + ".";
+        return "I will no longer take from " + describe(entry.pos(), entry.other(), entry.block()) + ".";
     }
 
     /** Server thread. */
@@ -71,8 +74,8 @@ final class BotSupply {
         List<String> lines = new ArrayList<>();
         for (BotMemory.SupplyContainer entry : named) {
             BotMemory.RememberedContainer noted = memory.containerAt(entry.dimension(), entry.pos());
-            String where = describe(entry.pos(), entry.other(), noted == null ? null : noted.block());
-            String inside = noted == null ? "I have not seen inside it" : "last seen holding " + contents(noted.contents());
+            String where = describe(entry.pos(), entry.other(), entry.block());
+            String inside = noted == null ? "I have not looked inside it yet" : "last seen holding " + contents(noted.contents());
             lines.add(where + (entry.dimension().equals("minecraft:overworld") ? "" : " in " + entry.dimension()) + ": " + inside);
         }
         return "I may take from " + named.size() + (named.size() == 1 ? " container" : " containers") + ": "

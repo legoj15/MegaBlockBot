@@ -532,6 +532,15 @@ public final class PlanInputGameTests {
             memory.notePlaced("minecraft:overworld", b);
             memory.forgetPlaced("minecraft:overworld", b);
             memory.noteContainer("minecraft:overworld", a, "minecraft:barrel", Map.of(ItemKey.of("minecraft:coal"), 64, ItemKey.of("minecraft:stick"), 3));
+            // The containers the owner named (design 3.5, supply containers): one entry per inventory, a double chest as
+            // both halves, each with the block that was named, and one note for a pair, under the half that stands for it.
+            BlockPos pairLow = new BlockPos(3, 70, 5);
+            BlockPos pairHigh = pairLow.east();
+            memory.addSupply(new BotMemory.SupplyContainer("minecraft:overworld", pairLow, pairHigh, "minecraft:chest"));
+            memory.addSupply(new BotMemory.SupplyContainer("minecraft:the_nether", b, null, "minecraft:barrel"));
+            memory.noteContainer("minecraft:overworld", pairLow, pairHigh, "minecraft:chest", Map.of(ItemKey.of("minecraft:oak_planks"), 6));
+            helper.assertTrue(memory.supply().size() == 2 && memory.isSupply("minecraft:overworld", pairHigh) && !memory.isSupply("minecraft:overworld", b),
+                "the owner's list is not by inventory and dimension: " + memory.supply());
 
             CompoundTag saved = memory.save();
             // Something the body noted after that save: the restored memory is the save and nothing else.
@@ -543,12 +552,26 @@ public final class PlanInputGameTests {
             helper.assertTrue(restored.isPlaced("minecraft:overworld", a) && restored.isPlaced("minecraft:the_nether", b), "placed blocks were lost: " + restored);
             helper.assertTrue(!restored.isPlaced("minecraft:overworld", b) && !restored.isPlaced("minecraft:overworld", strayBlock) && restored.placedCount() == 2,
                 "a block that was forgotten, or noted after the save, is in the restored memory: " + restored);
-            helper.assertTrue(restored.containers().equals(memory.containers()) && restored.containers().size() == 1,
+            helper.assertTrue(restored.containers().equals(memory.containers()) && restored.containers().size() == 2,
                 "containers differ: " + restored.containers() + " against " + memory.containers());
+            helper.assertTrue(restored.supply().equals(memory.supply()), "the owner's list changed in a save: " + restored.supply() + " against " + memory.supply());
+            BotMemory.RememberedContainer pairNote = restored.containerAt("minecraft:overworld", pairHigh);
+            helper.assertTrue(pairNote != null && pairLow.equals(pairNote.pos()) && pairHigh.equals(pairNote.other()),
+                "the note of a pair is not found by its second half, or lost it: " + pairNote);
+            // Naming a container again forgets what was noted of it; taking back either half takes the pair back.
+            helper.assertTrue(!restored.addSupply(restored.supplyAt("minecraft:overworld", pairLow)) && restored.containerAt("minecraft:overworld", pairLow) == null,
+                "naming the pair again kept the old note: " + restored.containers());
+            helper.assertTrue(restored.removeSupply("minecraft:overworld", pairHigh) && restored.supplyAt("minecraft:overworld", pairLow) == null
+                && restored.supply().size() == 1, "taking back one half did not take back the pair alone: " + restored.supply());
 
             // A save that is missing, or damaged, must read as nothing rather than throw, and still replace the memory.
+            // A save from before the owner's list existed loads as none.
+            CompoundTag withoutList = memory.save();
+            withoutList.remove("supply");
+            helper.assertTrue(BotMemory.restore(id, withoutList).supply().isEmpty(), "a save with no list loaded one");
             BotMemory empty = BotMemory.restore(id, new CompoundTag());
-            helper.assertTrue(BotMemory.of(id) == empty && empty.placedCount() == 0 && empty.containers().isEmpty(), "an empty save is not empty: " + empty);
+            helper.assertTrue(BotMemory.of(id) == empty && empty.placedCount() == 0 && empty.containers().isEmpty() && empty.supply().isEmpty(),
+                "an empty save is not empty: " + empty);
             CompoundTag damaged = new CompoundTag();
             damaged.putInt("placed", 5); // should be a compound of long arrays
             ListTag halfAContainer = new ListTag();
@@ -556,9 +579,16 @@ public final class PlanInputGameTests {
             noPosition.putString("dimension", "minecraft:overworld");
             halfAContainer.add(noPosition);
             damaged.put("containers", halfAContainer);
+            // A word with no block says nothing about any block: skipped.
+            ListTag halfAWord = new ListTag();
+            CompoundTag noBlock = new CompoundTag();
+            noBlock.putString("dimension", "minecraft:overworld");
+            noBlock.putLong("pos", a.asLong());
+            halfAWord.add(noBlock);
+            damaged.put("supply", halfAWord);
             BotMemory fromDamaged = BotMemory.restore(id, damaged);
-            helper.assertTrue(BotMemory.of(id) == fromDamaged && fromDamaged.placedCount() == 0 && fromDamaged.containers().isEmpty(),
-                "a damaged save is not read as nothing: " + fromDamaged);
+            helper.assertTrue(BotMemory.of(id) == fromDamaged && fromDamaged.placedCount() == 0 && fromDamaged.containers().isEmpty()
+                && fromDamaged.supply().isEmpty(), "a damaged save is not read as nothing: " + fromDamaged);
             helper.succeed();
         } finally {
             BotMemory.forget(id);

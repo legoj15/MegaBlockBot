@@ -152,7 +152,8 @@ public final class BotTalk {
                 }
             }
             // The supply list belongs to the body: the answer needs the body the runtime was attached to (apply did that).
-            case Intent.UseChest use -> runtime.say(BotSupply.use(runtime.body(), use.dimension(), use.pos()));
+            // Naming a chest also queues the body's look inside it, ahead of whatever the owner says next.
+            case Intent.UseChest use -> runtime.say(BotSupply.use(runtime, use.dimension(), use.pos()));
             case Intent.ForgetChest forget -> runtime.say(BotSupply.forget(runtime.body(), forget.dimension(), forget.pos()));
             case Intent.Chests chests -> runtime.say(BotSupply.list(runtime.body()));
             case Intent.Status status -> runtime.say(runtime.statusText());

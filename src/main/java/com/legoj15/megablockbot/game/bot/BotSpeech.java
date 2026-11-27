@@ -8,6 +8,7 @@ import com.legoj15.megablockbot.core.exec.GoalResult;
 import com.legoj15.megablockbot.core.exec.NodeState;
 import com.legoj15.megablockbot.core.goal.ComponentCheck;
 import com.legoj15.megablockbot.core.goal.Goal;
+import com.legoj15.megablockbot.core.planner.LookInside;
 import com.legoj15.megablockbot.core.task.Failure;
 import java.util.ArrayList;
 import java.util.List;
@@ -41,7 +42,9 @@ public final class BotSpeech {
                     + position(g.container());
             case Goal.Build g -> "build " + g.blueprint() + " at " + position(g.anchor());
             case Goal.Reach g -> "go within " + g.radius() + " of " + position(g.pos());
-            case Goal.Custom g -> g.kind() + (g.params().isEmpty() ? "" : " " + new TreeMap<>(g.params()));
+            case Goal.Custom g -> LookInside.KIND.equals(g.kind()) && g.params().containsKey(LookInside.PARAM_CONTAINER)
+                    ? "look inside the container at " + g.params().get(LookInside.PARAM_CONTAINER).replace(',', ' ')
+                    : g.kind() + (g.params().isEmpty() ? "" : " " + new TreeMap<>(g.params()));
         };
     }
 

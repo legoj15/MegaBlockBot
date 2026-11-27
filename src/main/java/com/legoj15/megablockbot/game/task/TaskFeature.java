@@ -1,5 +1,7 @@
 package com.legoj15.megablockbot.game.task;
 
+import com.legoj15.megablockbot.core.planner.LookInside;
+
 /**
  * The tasks that move and mine (design 3.4, Task; 4.3, Acquisition resolver): what a plan leaf of each kind becomes in
  * the world. Each kind is registered with {@link TaskRegistry}, which the bot's runtime asks when the executor wants a
@@ -12,6 +14,7 @@ package com.legoj15.megablockbot.game.task;
  *   <li>{@value #DEPOSIT}: put items into a container ({@link DepositTask}).</li>
  *   <li>{@value #WITHDRAW}: take items out of a container its owner named (or the body placed), as a player does
  *       ({@link WithdrawTask}).</li>
+ *   <li>{@value #LOOK_INSIDE}: open a container its owner named and note what is in it ({@link LookTask}).</li>
  * </ul>
  *
  * <p>Called from {@code NavFeature.init()} for now, since the tasks are built on the navigator; the bot runtime
@@ -28,6 +31,8 @@ public final class TaskFeature {
     public static final String DEPOSIT = "deposit";
     /** The kind the planner's supply leaves bind to ({@code SolverPlanner}, "withdraw"). */
     public static final String WITHDRAW = "withdraw";
+    /** The kind of the one leaf of the body's look at a container it was told to take from ({@code LookInside}). */
+    public static final String LOOK_INSIDE = LookInside.TASK;
 
     private TaskFeature() {}
 
@@ -38,5 +43,6 @@ public final class TaskFeature {
         TaskRegistry.register(RECOVER_DROPS, (leaf, hints) -> new RecoverDropsTask(leaf));
         TaskRegistry.register(DEPOSIT, (leaf, hints) -> new DepositTask(leaf));
         TaskRegistry.register(WITHDRAW, (leaf, hints) -> new WithdrawTask(leaf));
+        TaskRegistry.register(LOOK_INSIDE, (leaf, hints) -> new LookTask(leaf));
     }
 }

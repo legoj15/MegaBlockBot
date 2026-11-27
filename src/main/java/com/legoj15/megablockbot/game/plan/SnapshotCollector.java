@@ -218,17 +218,21 @@ public final class SnapshotCollector {
     // ---- containers --------------------------------------------------------------------------------------------
 
     /**
-     * Only what the body's memory knows. A container is {@code contentsKnown} when it is within the scan radius, its
-     * chunk is loaded and the same kind of block still stands there; the contents are then what the body last saw, which
-     * an owner who opened the chest since has made stale. Otherwise the contents are withheld (an empty map) so that
+     * Only what the body's memory knows: a body cannot see into a closed container, so the contents of every sight are a
+     * note the body made when it opened it, never read from the world, and they stay {@link ContainerSight#remembered
+     * remembered} until it opens the container again. A container is {@code contentsKnown} when it is within the scan
+     * radius, its chunk is loaded and the same kind of block still stands there (a note is then not out of reach, though an
+     * owner who opened the chest since has made it stale). Otherwise the contents are withheld (an empty map) so that
      * nothing reads old memory as the current state: the postcondition answers UNKNOWN and the executor walks over.
      *
      * <p>A container the body may take from (one it placed, or one its owner named: design 3.5) is shown to the planner
-     * even when it is out of sight: its contents are then the remembered ones, marked
-     * {@link ContainerSight#remembered()}, because the plan walks over and counts on what the body last saw there. Only a
-     * container whose chunk is loaded and no longer holds that block is treated as gone, whatever the distance. Each
-     * inventory is one sight, a double chest included (its entry is at one half). A container the owner named and the
-     * body has no memory of is listed with nothing in it, so that it is at least known to be there.
+     * even when it is out of sight: its contents are then the remembered ones, because the plan walks over and counts on
+     * what the body last saw there. Only a container whose chunk is loaded and no longer holds that block (both blocks,
+     * for a double chest) is treated as gone, whatever the distance. Each inventory is one sight, a double chest included
+     * (a note and an owner's word are each per inventory, so the pair is listed once, at the half with the lower
+     * position hash). A container the owner named and the body has not opened is listed with nothing in it and not
+     * {@code remembered}: it is there and may be taken from, and what it holds is unknown, which the planner counts as
+     * nothing.
      */
     private static void containers(ServerLevel level, String dimension, BlockPos at, BotMemory memory, Snapshot.Builder builder) {
         long radiusSq = (long) STATION_SCAN_RADIUS * STATION_SCAN_RADIUS;
@@ -236,15 +240,18 @@ public final class SnapshotCollector {
         for (BotMemory.RememberedContainer container : memory.containers()) {
             if (!container.dimension().equals(dimension)) continue; // a Pos carries no dimension, so another one's cannot be shown
             BlockPos pos = container.pos();
+            BlockPos other = container.other();
             boolean placed = memory.isPlaced(dimension, pos);
-            boolean named = memory.isSupply(dimension, pos);
+            boolean named = memory.isSupply(dimension, pos) || (other != null && memory.isSupply(dimension, other));
             boolean inRange = pos(pos).distSq(pos(at)) <= radiusSq;
-            boolean loaded = level.hasChunkAt(pos);
-            boolean sameBlock = loaded && blockId(level.getBlockState(pos).getBlock()).equals(container.block());
+            boolean loaded = level.hasChunkAt(pos) && (other == null || level.hasChunkAt(other));
+            boolean sameBlock = loaded && blockId(level.getBlockState(pos).getBlock()).equals(container.block())
+                && (other == null || blockId(level.getBlockState(other).getBlock()).equals(container.block()));
             boolean stillThere = inRange && sameBlock;
             listed.add(pos);
+            if (other != null) listed.add(other);
             if (stillThere) {
-                builder.container(new ContainerSight(pos(pos), container.block(), true, placed, placed || named, false,
+                builder.container(new ContainerSight(pos(pos), container.block(), true, placed, placed || named, true,
                     container.contents()));
             } else if ((placed || named) && !(loaded && !sameBlock)) {
                 // Out of sight (or in range with its chunk not loaded): what the body remembers, marked as such.
@@ -254,8 +261,10 @@ public final class SnapshotCollector {
             }
         }
         for (BotMemory.SupplyContainer entry : memory.supply()) {
-            if (!entry.dimension().equals(dimension) || listed.contains(entry.pos())) continue;
-            builder.container(new ContainerSight(pos(entry.pos()), "", false, memory.isPlaced(dimension, entry.pos()), true, false, Map.of()));
+            if (!entry.dimension().equals(dimension) || listed.contains(entry.pos())
+                || (entry.other() != null && listed.contains(entry.other()))) continue;
+            builder.container(new ContainerSight(pos(entry.pos()), entry.block(), false, memory.isPlaced(dimension, entry.pos()), true,
+                false, Map.of()));
         }
     }
 

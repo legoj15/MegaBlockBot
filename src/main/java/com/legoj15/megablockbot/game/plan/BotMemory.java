@@ -23,11 +23,12 @@ import net.minecraft.nbt.Tag;
  *
  * <p>It also holds the containers the owner named as supply containers (design 3.5): ones the body may take from
  * although it did not place them. Those are the owner's word, not something the world can say, so they are saved with
- * the body like the rest.
+ * the body like the rest. Naming a container records where it is and which block it is, and nothing of what is in it:
+ * a player cannot see into a closed chest, so the contents are known only from a note the body makes when it opens it.
  *
  * <p>One instance per body UUID ({@link #of}); a respawned body has the same UUID and so the same memory. Server
- * thread only. The crafting task notes the blocks it places, and the supply commands and the withdraw task note the
- * containers they are shown or open; the brain persists it with {@link #save()} next to its own state, and at spawn
+ * thread only. The crafting task notes the blocks it places, and the tasks that open a container (withdraw, look
+ * inside) note what they find; the brain persists it with {@link #save()} next to its own state, and at spawn
  * the body gets what it saved back with {@link #restore}.
  *
  * <p>The sets are not bounded. A bot that places a block per second for a day has some tens of thousands of longs;
@@ -37,20 +38,33 @@ public final class BotMemory {
     private static final int SAVE_SCHEMA = 1;
     private static final Map<UUID, BotMemory> BY_BODY = new ConcurrentHashMap<>();
 
-    /** A container the body has seen the inside of, as it was then. */
-    public record RememberedContainer(String dimension, BlockPos pos, String block, Map<ItemKey, Integer> contents) {
+    /**
+     * A container the body has seen the inside of, as it was then: the note it made when it opened it. {@code pos} is the
+     * half with the lower {@code BlockPos.asLong} when it is a double chest and {@code other} the second half, else
+     * {@code other} is null: a note is per inventory, never per block, so a pair is one note.
+     */
+    public record RememberedContainer(String dimension, BlockPos pos, @Nullable BlockPos other, String block,
+                                      Map<ItemKey, Integer> contents) {
         public RememberedContainer {
             pos = pos.immutable();
+            other = other == null ? null : other.immutable();
             contents = Map.copyOf(contents);
+        }
+
+        /** Whether {@code at} in {@code in} is one of this inventory's blocks. */
+        public boolean covers(String in, BlockPos at) {
+            return dimension.equals(in) && (pos.equals(at) || at.equals(other));
         }
     }
 
     /**
      * A container its owner named for the body to take from. {@code pos} is the half with the lower
      * {@code BlockPos.asLong} when it is a double chest and {@code other} the second half, else {@code other} is null:
-     * one entry is one inventory, and naming either half names both (design 3.5).
+     * one entry is one inventory, and naming either half names both (design 3.5). {@code block} is the id of the block
+     * that stood there when it was named (both halves of a double chest are one block): the owner's word is for that
+     * block, and a different one at the position is something nobody named.
      */
-    public record SupplyContainer(String dimension, BlockPos pos, @Nullable BlockPos other) {
+    public record SupplyContainer(String dimension, BlockPos pos, @Nullable BlockPos other, String block) {
         public SupplyContainer {
             pos = pos.immutable();
             other = other == null ? null : other.immutable();
@@ -119,9 +133,20 @@ public final class BotMemory {
 
     // ---- containers --------------------------------------------------------------------------------------------
 
-    /** Records what the body saw in the container at that position, replacing what it saw there before. */
+    /**
+     * Records what the body saw in the container at that position, replacing what it saw there before. A note is per
+     * inventory: whatever was noted of any block of this one (a lone chest that has since become half of a double chest
+     * was noted under its own position) is replaced by this note, so one inventory is never counted twice.
+     */
     public void noteContainer(String dimension, BlockPos pos, String block, Map<ItemKey, Integer> contents) {
-        containers.put(new ContainerKey(dimension, pos.asLong()), new RememberedContainer(dimension, pos, block, contents));
+        noteContainer(dimension, pos, null, block, contents);
+    }
+
+    /** As above, for an inventory of two blocks ({@code other} is the second half of a double chest, else null). */
+    public void noteContainer(String dimension, BlockPos pos, @Nullable BlockPos other, String block,
+                              Map<ItemKey, Integer> contents) {
+        forgetContainersCovering(dimension, pos, other);
+        containers.put(new ContainerKey(dimension, pos.asLong()), new RememberedContainer(dimension, pos, other, block, contents));
     }
 
     /** Everything remembered, in the order it was first noted. */
@@ -129,25 +154,40 @@ public final class BotMemory {
         return List.copyOf(containers.values());
     }
 
-    /** What was noted of the container at that position, or null. */
+    /** What was noted of the container one of whose blocks is at that position, or null. */
     @Nullable
     public RememberedContainer containerAt(String dimension, BlockPos pos) {
-        return containers.get(new ContainerKey(dimension, pos.asLong()));
+        for (RememberedContainer note : containers.values()) {
+            if (note.covers(dimension, pos)) return note;
+        }
+        return null;
     }
 
-    /** Forgets what was noted of the container at that position: it is gone, or no longer the body's to use. */
+    /** Forgets what was noted of the container one of whose blocks is at that position: it is gone, or no longer the body's to use. */
     public void forgetContainer(String dimension, BlockPos pos) {
-        containers.remove(new ContainerKey(dimension, pos.asLong()));
+        forgetContainersCovering(dimension, pos, null);
+    }
+
+    private void forgetContainersCovering(String dimension, BlockPos pos, @Nullable BlockPos other) {
+        containers.values().removeIf(note -> note.covers(dimension, pos) || (other != null && note.covers(dimension, other)));
     }
 
     // ---- supply containers -------------------------------------------------------------------------------------
 
     /**
-     * Records that the owner named this container. An entry that shares a block with it is replaced (the owner named
-     * the other half of a double chest, or a chest was joined to another since). Returns false when the very same entry
-     * was already there.
+     * Records that the owner named this container, and forgets what was noted of its blocks: that was the container
+     * before the owner's word, and the body knows what is in it only when it has been inside since. Naming it again
+     * therefore sends the body to look again. An entry that shares a block with it is replaced (the owner named the other
+     * half of a double chest, or a chest was joined to another since). Returns false when the very same entry was already
+     * there.
      */
     public boolean addSupply(SupplyContainer entry) {
+        boolean fresh = putSupply(entry);
+        forgetContainersCovering(entry.dimension(), entry.pos(), entry.other());
+        return fresh;
+    }
+
+    private boolean putSupply(SupplyContainer entry) {
         SupplyContainer same = supply.get(new ContainerKey(entry.dimension(), entry.pos().asLong()));
         if (entry.equals(same)) return false;
         supply.values().removeIf(old -> old.covers(entry.dimension(), entry.pos())
@@ -216,6 +256,7 @@ public final class BotMemory {
             CompoundTag one = new CompoundTag();
             one.putString("dimension", container.dimension());
             one.putLong("pos", container.pos().asLong());
+            if (container.other() != null) one.putLong("other", container.other().asLong());
             one.putString("block", container.block());
             ListTag items = new ListTag();
             for (Map.Entry<ItemKey, Integer> item : new TreeMap<>(container.contents()).entrySet()) {
@@ -237,6 +278,7 @@ public final class BotMemory {
                 one.putString("dimension", entry.dimension());
                 one.putLong("pos", entry.pos().asLong());
                 if (entry.other() != null) one.putLong("other", entry.other().asLong());
+                one.putString("block", entry.block());
                 supplyList.add(one);
             }
             tag.put("supply", supplyList);
@@ -281,16 +323,21 @@ public final class BotMemory {
                         contents.merge(ItemKey.of(entry.getString("id")), entry.getInt("count"), Integer::sum);
                     }
                 }
-                memory.noteContainer(one.getString("dimension"), BlockPos.of(one.getLong("pos")), one.getString("block"), contents);
+                BlockPos other = one.contains("other", Tag.TAG_LONG) ? BlockPos.of(one.getLong("other")) : null;
+                memory.noteContainer(one.getString("dimension"), BlockPos.of(one.getLong("pos")), other, one.getString("block"), contents);
             }
         }
         if (tag.contains("supply", Tag.TAG_LIST)) {
             ListTag list = tag.getList("supply", Tag.TAG_COMPOUND);
             for (int i = 0; i < list.size(); i++) {
                 CompoundTag one = list.getCompound(i);
-                if (!one.contains("dimension", Tag.TAG_STRING) || !one.contains("pos", Tag.TAG_LONG)) continue;
+                // An entry with no block is not a word about any block: skipped like any other damaged part.
+                if (!one.contains("dimension", Tag.TAG_STRING) || !one.contains("pos", Tag.TAG_LONG)
+                    || !one.contains("block", Tag.TAG_STRING)) continue;
                 BlockPos other = one.contains("other", Tag.TAG_LONG) ? BlockPos.of(one.getLong("other")) : null;
-                memory.addSupply(new SupplyContainer(one.getString("dimension"), BlockPos.of(one.getLong("pos")), other));
+                // Not addSupply: that forgets the notes of the container, which were just restored.
+                memory.putSupply(new SupplyContainer(one.getString("dimension"), BlockPos.of(one.getLong("pos")), other,
+                    one.getString("block")));
             }
         }
         return memory;

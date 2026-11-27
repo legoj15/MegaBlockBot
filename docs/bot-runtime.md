@@ -169,45 +169,78 @@ ticked again, so the next plan sees the table in the inventory. A failure there 
 stays, remembered. A table the rules do not let the body break stays standing and remembered too (the tidy task completes,
 and looks again at the next goal's end). Covered by `BotRuntimeGameTests.aTableLeftStandingByALogoutIsTakenUp`.
 
-## Supply containers and `withdraw`
+## Supply containers, `look_inside` and `withdraw`
 
 The owner names the containers a body may take from (design 3.5): `use chest at <x> <y> <z>` (the position in the
 dimension the words were read in; any container block, whatever the word), `forget chest at ...`, `chests`. `BotTalk`
 carries the three `Intent`s out through `BotSupply`, which answers in a sentence: the dimension must be the body's, the
-position loaded, and a container with slots must stand there (`SupplyChests.look`: a double chest named by either half
-is one inventory, its two halves recorded as one `BotMemory.SupplyContainer`, and its contents are the two together).
-Naming also notes what is inside at that moment, as an owner would say it; naming again refreshes the note.
+position loaded, and a container with slots must stand there (`SupplyChests.find`: a double chest named by either half is
+one inventory, its two halves recorded as one `BotMemory.SupplyContainer` together with the block that was named).
 
-`BotMemory` keeps the list (saved with the body, the `supply` list of its compound; saves from before it load as none).
-`BlockSafety.mayUseContainer` lets a named container through the container and workstation rules for that block, never
-the claim rule; `mayBreak` never reads the list. Using a container is not subject to the protected radius, and the same
-holds here: a named chest inside the radius is used, and still cannot be broken.
+**Naming records where the container is and which block it is, and nothing of what is in it.** The body does only what a
+player can, and a player cannot see into a closed chest, so what a named container holds is unknown until the body has
+opened it, and the planner counts nothing from a container whose contents are unknown. `use chest at` therefore also
+submits the body's own goal `look_inside` for that container (`LookInside.goal`, a `Goal.Custom`), which the executor
+queues like any goal: ahead of whatever the owner says after it (`use chest at 1 2 3; make 4 stick` looks first and then
+plans the sticks knowing what is there) and behind a goal already running. Naming a container again drops what was noted
+of it (the owner's word is for the container as it is now) and looks again. The goal's plan is its strategy,
+`LookInside` (registered with the planner in `BotPlanner`): one `look_inside` leaf. Its postcondition (registered with the
+executor's `Postconditions` in `BotRuntime`) reads the snapshot: the container's sight is `remembered`, which is true once
+the body has a note of it; a container nobody names any more has nothing to look at and counts as done, and in another
+dimension it cannot be done.
+
+`BotMemory` keeps the list (saved with the body, the `supply` list of its compound, each entry with its block; an entry
+with no block is skipped on load; saves from before the list load as none). Notes of what a container held are per
+inventory: a double chest is one note (with its second half), whichever half the leaf named, and noting an inventory
+replaces whatever was noted under any of its blocks, so naming a chest that has since become half of a double chest
+leaves one note for the pair. `BlockSafety.mayUseContainer` lets a named container through the container and workstation
+rules for that block, never the claim rule; `mayBreak` never reads the list. Using a container is not subject to the
+protected radius, and the same holds here: a named chest inside the radius is used, and still cannot be broken.
 
 The snapshot shows each container the body may take from (placed by it, or named) as one `ContainerSight` with
-`mayTakeFrom`; out of sight (out of the 8-block scan radius, or its chunk not loaded) it shows the remembered contents with
-`remembered` set; a container whose chunk is loaded and no longer holds that block is shown with nothing. The planner
-(`SolverPlanner`, "Containers the body may take from") counts what such a container holds before anything is gathered or
-crafted and puts one `withdraw` leaf per container and item in front of the plan, nearest container first, never more
-than the container is known to hold and never more than the plan needs after what the body carries; a container ruled out
-by a `PROTECTED` failure, and a stockpile goal's own target, are not counted.
+`mayTakeFrom`. What a sight holds is the body's note, never read from the world, and it is `remembered` (in range or out of
+it) until the body opens the container again. A named container the body has not opened is listed with nothing and not
+`remembered`. A container whose chunk is loaded and no longer holds that block (both blocks, for a pair) is shown with
+nothing and may not be taken from. The planner (`SolverPlanner`, "Containers the body may take from") counts what such a
+container holds before anything is gathered or crafted and puts one `withdraw` leaf per container and item in front of the
+plan, nearest container first, never more than the container is known to hold and never more than the plan needs after
+what the body carries; a container ruled out by a `PROTECTED` failure or by a `NO_SOURCE` failure of its own leaf (its
+source id, `withdraw:<container>`), and a stockpile goal's own target, are not counted. The fingerprint of a plan reads the
+items it reads the stock of and the tools that could stand in for the ones it needs (a better pickaxe in a container is
+taken as carried), in each container the body may take from.
+
+`ContainerTask` is what `withdraw` and `look_inside` share: walk to within 2 blocks, look at the container, then (when it
+is about to open it, since a position far away is not loaded) ask what the world says: the block recorded when the
+container was named has to stand at the position (both halves of a pair), a position that is not loaded is not decided
+(`Unreachable`, and the word and the note stay: the executor goes there), and block safety is asked; then it uses the block
+so that the container's own rules decide whether it opens. The menu is closed on every exit, which empties the cursor.
 
 `withdraw` (`WithdrawTask`): leaf params `container`, `dimension`, `count`; the item and the absolute count the body should
-hold afterwards are the leaf goal's. It walks to within 2 blocks, looks at the container, checks block safety (at that
-point: a position far away is not loaded), uses the block so that the container's own rules decide whether it opens, and
-moves items with slot clicks on the menu (a shift-click for a whole stack, one right-click per item for part of one). The
-menu is closed on every exit, which empties the cursor. Before it takes anything it counts the item in the container's
-slots: fewer than the leaf needs is `MissingInput` with nothing taken. Whatever it saw is noted in `BotMemory` (before the
-failure, and after a take), so the replan counts the truth.
+hold afterwards are the leaf goal's. It moves items with slot clicks on the menu (a shift-click for a whole stack, one
+right-click per item for part of one). Before it takes anything it counts the item in the container's slots: fewer than the
+leaf needs is `MissingInput` with nothing taken. Whatever it saw is noted in `BotMemory` (before the failure, and after a
+take), so the replan counts the truth. `look_inside` (`LookTask`): leaf params `container`, `dimension`; it notes what is in
+the menu and closes it, and moves nothing.
 
-- Failures: `Unreachable` (no way there, the container will not open, another dimension, the menu kept closing),
-  `TargetGone` (no container at the position: the memory of it and the owner's word for it are dropped),
-  `Protected` (block safety, the rule in the failure), `MissingInput` (holds fewer; takes none), `NoProgress` (no room in
-  the inventory; what fitted was taken).
-- A goal that already holds when the task starts (a restart after part of it was taken) completes without opening anything.
-- `SupplyChestGameTests`: a named chest supplies a craft; what it holds is taken and the rest gathered; a double chest is
-  one inventory; a chest emptied after the plan is not counted again; a chest nobody named, or taken back, is never
-  opened; only the owner or the console can name one; a named chest is usable inside the protected radius and never
-  breakable.
+- Failures: `Unreachable` (no way there, the position is not loaded, another dimension, the menu kept closing; and for
+  `look_inside` a container that will not open), `NoSource` (a `withdraw` whose container is there and may be used but
+  will not open: blocked above, locked; it names the leaf's source, which the executor rules out, so the next plan gathers
+  or crafts instead), `TargetGone` (another block stands where the owner named one, or no container does: the owner's word
+  and the note of it are dropped, nothing is opened), `Protected` (block safety, the rule in the failure), `MissingInput`
+  (holds fewer; takes none), `NoProgress` (no room in the inventory; what fitted was taken).
+- A goal that already holds when a `withdraw` starts (a restart after part of it was taken) completes without opening
+  anything.
+- `deposit` asks block safety before it opens the container too (`DepositTask`, "Block safety"): the stockpile goal's target
+  is the owner's word for that goal, which reaches the check as an `Allowance` over exactly that container (both halves)
+  open for the one question. It lifts the container rule, never a claim, a bed or a job site: a barrel the body did not place
+  is stocked once the owner has named it with `use chest at`.
+- `SupplyChestGameTests`: a named chest supplies a craft, after the body has looked inside it; nothing is known of a chest
+  before; what it holds is taken and the rest gathered; a double chest is one inventory, also when a lone chest joined by a
+  second half is named again; a chest emptied after the plan is not counted again; a chest that will not open is left out of
+  the plan and the goal gathers instead; a chest replaced by another block before the body arrives is not opened; a chest
+  nobody named, or taken back, is never opened; only the owner or the console can name one; a named chest is usable
+  inside the protected radius and never breakable; a stockpile goal fills its own chest and is refused by a claim; what the
+  world says of a named container (stands, another block, not loaded).
 
 ## `equip`
 

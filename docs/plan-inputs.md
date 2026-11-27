@@ -46,14 +46,18 @@ container, moves an item or loads a chunk.
   `SHEARS` at `HAND`, so `bestTool(SHEARS)` cannot tell "carries shears" from "none"; `bestTools().containsKey` can.
 - `stations`: blocks within `STATION_SCAN_RADIUS` (8, Euclidean) whose item is a vanilla workstation or a station a
   recipe in the current book names; nearest first. Chipped and damaged anvils count as `minecraft:anvil`.
-- `containers`: only `BotMemory`. `contentsKnown` is true when the container is within the radius, its chunk is loaded
-  and the same block still stands there; the contents are then what the body last saw (stale if someone emptied it
-  since). Otherwise `contentsKnown` is false and the contents are withheld. Other dimensions are not listed.
-  `mayTakeFrom` says whether the body may take from it: the body placed it, or its owner named it (`BotMemory.supply`).
-  For such a container out of sight, or in range with its chunk not loaded, the contents are the remembered ones and
-  `remembered` is set, so that the plan can walk over and count on them; one whose chunk is loaded and no longer holds
-  the block is shown with nothing and may not be taken from. A named container the body has no note of is listed empty.
-  A double chest is one sight, at the half with the lower position hash.
+- `containers`: only `BotMemory`, and only what the body noted when it opened a container (it cannot see into a closed
+  one); the world is read for the block and the chunk, never for the contents. `contentsKnown` is true when the container is
+  within the radius, its chunk is loaded and the same block still stands there; the contents are then what the body noted,
+  stale if someone emptied it since. Otherwise `contentsKnown` is false and, for a container the body may not take from, the
+  contents are withheld. Other dimensions are not listed. `remembered` is true whenever the contents are a note, in range or
+  not, and stays true until the body opens the container again; a container it has never opened (one its owner named and it
+  has not looked in yet) is listed with nothing and not `remembered`, and unknown counts as nothing.
+  `mayTakeFrom` says whether the body may take from it: the body placed it, or its owner named it (`BotMemory.supply`). For
+  such a container out of sight, or in range with its chunk not loaded, the contents are the remembered ones, so that the
+  plan can walk over and count on them; one whose chunk is loaded and no longer holds the block (both blocks, for a double
+  chest) is shown with nothing and may not be taken from. A double chest is one sight, at the half with the lower position
+  hash, and one note: a note is per inventory.
 - `nearbyBlocks` (the sight, `BodySight`): block id to the horizontal distance of the nearest such block, for the blocks
   `AcquisitionIndex.sourceBlocks()` names (every mining or harvesting source's block). A scan reads the chunks that
   are loaded now (`ServerChunkCache.getChunkNow`; a chunk that is not loaded is skipped, never loaded) within
@@ -112,13 +116,15 @@ adoption, when a held body is released, and for commands; never per task tick.
 
 ## BotMemory
 
-Per body UUID (`BotMemory.of(uuid)`): positions of placed blocks per dimension, containers whose contents were seen, and
-the containers the owner named for the body to take from (`supply`, one entry per inventory: a double chest is one entry
-holding both halves). `BotMemory.peek(uuid)` reads without making one.
+Per body UUID (`BotMemory.of(uuid)`): positions of placed blocks per dimension, containers whose contents were seen (one
+note per inventory, a pair with its second half), and the containers the owner named for the body to take from (`supply`,
+one entry per inventory: a double chest is one entry holding both halves, with the block that was named; naming also
+forgets what was noted of the container). `BotMemory.peek(uuid)` reads without making one.
 `save()` is the compact persistent form; `BotMemory.restore(uuid, tag)` reads one back (tolerant of missing or
 malformed parts) and installs it as that body's memory, replacing what was there, which is how a body gets its memory
-back at spawn. Nothing in production calls the `note` methods or `restore` yet: the brain's placement hook, the
-container tasks and body spawn will. The registry is cleared when the server stops.
+back at spawn (`BotRuntime` installs a loaded memory when it first attaches to the body). `CraftTask` notes the table it
+places; the tasks that open a container (`withdraw`, `look_inside`) note what they find in it, and `use chest at` records the
+owner's word. The registry is cleared when the server stops.
 
 ## Checks
 
@@ -126,7 +132,8 @@ container tasks and body spawn will. The registry is cleared when the server sto
 count against the game's ingredients, the book rebuilt after a real reload (proved by a probe source read only by the
 later build), the builder isolating a throwing source and a duplicate id, snapshot contents with a real body (offhand
 counted once, two stacks of one item as two entries), tool classes and tiers, a tool known only by its data component,
-a tool with two denying rules, the memory save round trip through `restore`.
+a tool with two denying rules, the memory save round trip through `restore` (the owner's list of named containers and the
+note of a double chest included).
 
 `SightGameTests` (same run): the nearest block of each kind at its horizontal distance (a block in the body's column is
 0 away, a 3-4-5 triangle is 5, a block no source names is absent); a block in a chunk nobody has loaded is absent and

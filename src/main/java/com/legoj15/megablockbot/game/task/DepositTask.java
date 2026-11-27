@@ -9,6 +9,10 @@ import com.legoj15.megablockbot.core.task.TickResult;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BodyInteractionManager;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
+import com.legoj15.megablockbot.game.plan.SupplyChests;
+import com.legoj15.megablockbot.game.safety.Allowance;
+import com.legoj15.megablockbot.game.safety.BlockSafety;
+import com.legoj15.megablockbot.game.safety.Verdict;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -37,8 +41,17 @@ import net.minecraft.world.phys.Vec3;
  *
  * <p>Failures: {@code Unreachable} when the body cannot get to the container, or the container will not open (blocked
  * above, locked, in another dimension); {@code TargetGone} when no container stands at the position;
- * {@code MissingInput} when the body does not hold the count. A container with no room takes what it can and the task
- * completes: the postcondition then says what is missing, and judging that is the executor's business.
+ * {@code Protected} when block safety refuses (a claim, a bed, a job site); {@code MissingInput} when the body does not
+ * hold the count. A container with no room takes what it can and the task completes: the postcondition then says what
+ * is missing, and judging that is the executor's business.
+ *
+ * <p><b>Block safety.</b> Block safety is asked before the lid is touched, as it is for every container the body uses
+ * ({@link WithdrawTask}). The goal names this container, and that is the owner's word for it for this goal, so the
+ * question is asked with an {@link Allowance} that covers exactly that container (both halves of a double chest) open for
+ * the length of the question, which passes the container rule for those blocks. A claim, and a
+ * villager job site such as a barrel that the body did not place, still refuse: the allowance never lifts those, so a
+ * barrel is stocked after the owner names it with {@code use chest at}. The allowance is closed before the lid is
+ * touched, so no path search can take it for leave to break the chest.
  *
  * <p>Whichever way the task ends, the menu is closed, which hands whatever the cursor held back to the inventory.
  */
@@ -152,6 +165,8 @@ final class DepositTask extends BodyTask {
             return end(body, TickResult.failed(new Failure.TargetGone("container at " + containerPos.encode(),
                 "no container stands at " + containerPos.encode() + " in " + dimension)));
         }
+        Verdict verdict = askSafety(body, level, pos);
+        if (!verdict.allowed()) return end(body, TickResult.failed(verdict.toFailure(pos)));
         BodyInteractionManager use = (BodyInteractionManager) body.getInteractionManager();
         use.interactBlock(body, level, body.getMainHandItem(), InteractionHand.MAIN_HAND, hitOn(body, pos));
         if (body.containerMenu == body.inventoryMenu) {
@@ -161,6 +176,16 @@ final class DepositTask extends BodyTask {
         openMenu = body.containerMenu;
         phase = Phase.TRANSFERRING;
         return TickResult.RUNNING;
+    }
+
+    /** May the body use this container? Asked with the goal's own word for it open: see the class comment. */
+    private Verdict askSafety(BotPlayer body, ServerLevel level, BlockPos pos) {
+        SupplyChests.Spot spot = SupplyChests.find(level, pos);
+        BlockSafety safety = BlockSafety.of(level.getServer());
+        try (Allowance goalsWord = safety.allow(body, "stockpile target",
+            at -> at.equals(pos) || (spot != null && (at.equals(spot.pos()) || at.equals(spot.other()))))) {
+            return safety.mayUseContainer(body, level, pos);
+        }
     }
 
     /** A use-block click on the face of the container that looks toward the body's eyes. */

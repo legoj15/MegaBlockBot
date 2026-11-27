@@ -1781,6 +1781,28 @@ final class SolverPlannerTest {
     }
 
     @Test
+    void aContainerWhoseWithdrawSourceAFailureRuledOutIsNotCounted() {
+        // A container that is there and may be used but would not open fails its leaf with NO_SOURCE, which excludes the
+        // leaf's own source id: the next plan has to gather or craft instead of walking back to the same lid.
+        Goal goal = new Goal.HaveItem(CHEST, 1);
+        Snapshot snapshot = snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(OAK_PLANKS, 12)));
+        Plan first = planned(planner(), request(goal, snapshot, Exclusions.NONE));
+        assertEquals(1, withdrawals(first).size(), leaves(first).toString());
+        String source = withdrawals(first).get(0).source();
+        assertFalse(source.isEmpty(), "the leaf says which source it is, or no failure could rule it out");
+
+        Exclusions noSource = new Exclusions(Set.of(source), Set.of(), List.of());
+        Plan plan = planned(planner(), request(goal, snapshot, noSource));
+        assertTrue(withdrawals(plan).isEmpty(), "the replan after a NO_SOURCE must not take from the same container");
+        assertEquals(3, gathered(plan, OAK_LOG, "mine"));
+
+        // Only that container: another one that holds planks is still a supply.
+        Snapshot two = snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(OAK_PLANKS, 12)), supplyBox(SHELF_B, Map.of(OAK_PLANKS, 12)));
+        Plan other = planned(planner(), request(goal, two, noSource));
+        assertEquals(List.of(SHELF_B.encode()), withdrawals(other).stream().map(leaf -> leaf.params().get("container")).toList());
+    }
+
+    @Test
     void aStockpileGoalsOwnContainerIsNotItsSupplyButAnotherOneIs() {
         Goal.Stockpile goal = new Goal.Stockpile(OAK_PLANKS, 8, "minecraft:overworld", SHELF_A);
         ContainerSight target = new ContainerSight(SHELF_A, "minecraft:chest", true, false, true, false, Map.of(OAK_PLANKS, 3));
@@ -1868,6 +1890,81 @@ final class SolverPlannerTest {
                 "a container the body may not take from is not read");
         assertEquals(base, instance.inputFingerprint(goal, snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of()))),
                 "an empty container adds nothing");
+    }
+
+    @Test
+    void theFingerprintReadsATakeableContainersToolThatThePlanMayRelyOn() {
+        // Cobblestone needs a wooden pickaxe; the stone pickaxe in the container serves, so the plan takes it, though no
+        // recipe on the way to cobblestone names a stone pickaxe. Its removal has to move the fingerprint.
+        SolverPlanner instance = planner();
+        Goal goal = new Goal.HaveItem(COBBLESTONE, 3);
+        Snapshot withTool = snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(STONE_PICKAXE, 1)));
+        Plan plan = planned(instance, request(goal, withTool, Exclusions.NONE));
+        assertEquals(1, withdrawn(plan, STONE_PICKAXE), "setup: the plan relies on the container's better pickaxe: " + leaves(plan));
+
+        long base = instance.inputFingerprint(goal, EMPTY);
+        assertNotEquals(base, instance.inputFingerprint(goal, withTool), "the pickaxe the plan relies on is not read");
+        assertEquals(plan.inputFingerprint(), instance.inputFingerprint(goal, withTool));
+        assertNotEquals(instance.inputFingerprint(goal, withTool),
+                instance.inputFingerprint(goal, snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(DIAMOND_PICKAXE, 1)))),
+                "which tool it may take is read, not only that there is one");
+
+        // A tool of a class nothing on the way needs, or one the body may not take, is not read.
+        assertEquals(base, instance.inputFingerprint(goal,
+                snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(ItemKey.of("diamond_shovel"), 1)))));
+        assertEquals(base, instance.inputFingerprint(goal,
+                snapshotWith(Map.of(), strangersBox(SHELF_A, Map.of(STONE_PICKAXE, 1)))));
+    }
+
+    @Test
+    void aStockpileTargetInAnotherDimensionIsNotExemptedFromTheFingerprintsTake() {
+        // The target is where a deposit goes, in that dimension. A container at the same coordinates in the body's own
+        // dimension is an ordinary supply, which the plan counts, so the fingerprint has to read it too.
+        SolverPlanner instance = planner();
+        Goal.Stockpile goal = new Goal.Stockpile(OAK_PLANKS, 8, "minecraft:the_nether", SHELF_A);
+        Snapshot supplied = snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(OAK_PLANKS, 5)));
+        assertEquals(5, withdrawn(planned(instance, request(goal, supplied, Exclusions.NONE)), OAK_PLANKS), "setup: the plan counts it");
+        assertNotEquals(instance.inputFingerprint(goal, supplied),
+                instance.inputFingerprint(goal, snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(OAK_PLANKS, 6)))),
+                "how many it may take is read");
+    }
+
+    @Test
+    void theLookInsideGoalIsOneLeafOfItsOwnAndOnlyForItsOwnKind() {
+        // The body's look at a container its owner named (design 3.5): walk there, open it, note what is in it.
+        Goal.Custom goal = LookInside.goal("minecraft:overworld", SHELF_A);
+        Plan plan = planned(planner(new LookInside()), request(goal, snapshotWith(Map.of()), Exclusions.NONE));
+        assertEquals(1, leaves(plan).size(), leaves(plan).toString());
+        NodeSpec leaf = leaves(plan).get(0);
+        assertEquals(LookInside.TASK, leaf.taskKind());
+        assertEquals(SHELF_A.encode(), leaf.params().get(LookInside.PARAM_CONTAINER));
+        assertEquals("minecraft:overworld", leaf.params().get(LookInside.PARAM_DIMENSION));
+        assertEquals(goal, leaf.goal());
+        assertTrue(plan.inputFingerprint() == planner(new LookInside()).inputFingerprint(goal, snapshotWith(Map.of())), "the plan carries the fingerprint of its inputs");
+
+        // Another custom goal is not this strategy's: the planner finds no way to it.
+        PlanOutcome other = planner(new LookInside()).plan(request(new Goal.Custom("something_else", Map.of()), snapshotWith(Map.of()), Exclusions.NONE));
+        assertTrue(other instanceof PlanOutcome.Unplannable, "a strategy planned a goal that is not its own: " + other);
+    }
+
+    @Test
+    void theLookInsideGoalIsMetOnlyWhenTheBodyHasANoteOfTheContainer() {
+        Goal.Custom goal = LookInside.goal("minecraft:overworld", SHELF_A);
+        var met = LookInside.postcondition(goal);
+        // Named and never opened: nothing noted, so nothing is known of it, in range or not.
+        assertFalse(met.evaluate(snapshotWith(Map.of(), new ContainerSight(SHELF_A, "minecraft:chest", false, false, true, false, Map.of()))).isSatisfied());
+        // Opened: whatever the note says, even that it is empty, is known; in sight or out of it.
+        assertTrue(met.evaluate(snapshotWith(Map.of(), new ContainerSight(SHELF_A, "minecraft:chest", false, false, true, true, Map.of()))).isSatisfied());
+        assertTrue(met.evaluate(snapshotWith(Map.of(), new ContainerSight(SHELF_A, "minecraft:chest", true, false, true, true, Map.of(OAK_PLANKS, 3)))).isSatisfied());
+        // Nobody names a container there any more (taken back, or replaced): nothing is left to look at.
+        assertTrue(met.evaluate(snapshotWith(Map.of())).isSatisfied());
+        // Another container's note is not this one's.
+        assertTrue(met.evaluate(snapshotWith(Map.of(), new ContainerSight(SHELF_B, "minecraft:chest", true, false, true, true, Map.of()))).isSatisfied(),
+                "an unrelated container is no reason to look at this one");
+        // In another dimension the body cannot look, whatever it has noted.
+        Snapshot nether = Snapshot.builder().gameTime(0).dimension("minecraft:the_nether").pos(new Pos(0, 64, 0))
+                .container(new ContainerSight(SHELF_A, "minecraft:chest", true, false, true, true, Map.of())).build();
+        assertFalse(met.evaluate(nether).isSatisfied());
     }
 
     // ─── What the body can see (issue #27; design 3.4 Snapshot, 4.1) ─────────────────────────────

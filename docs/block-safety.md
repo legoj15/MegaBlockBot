@@ -25,8 +25,15 @@ body may then *use* it (open it, take from it, put into it) as it may its own, a
 subject to the protected radius (only breaking is), so a named chest inside the radius is used too; a claim still refuses
 it. Naming lifts the container rule and the workstation rule for that block, not the bed rule (a bed holds nothing to take
 and cannot be named). A double chest is named as one inventory (both halves), and a half joined to it later is not named:
-using needs both halves, so the pair is refused. Naming is the owner's word for a position: a task that finds no container
-there drops it.
+using needs both halves, so the pair is refused until the owner names it again. Naming is the owner's word for a block at
+a position: a task that finds another block there (either half of a pair) drops the word, and one that finds the position
+not loaded decides nothing and drops nothing.
+
+Putting into a container asks the same question. The `deposit` task asks `mayUseContainer` before it opens the container,
+with an `Allowance` that covers exactly that container (both halves of a double chest) open for the length of the question:
+the stockpile goal names the container, which is the owner's word for it for that goal. The allowance lifts only the
+container rule (as it always did), so a claim, a bed, or a job site such as a barrel the body did not place still refuse;
+name such a barrel with `use chest at` to stock it. Nothing in `game.safety` changed for this.
 
 ## Threads
 
