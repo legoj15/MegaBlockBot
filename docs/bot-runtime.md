@@ -220,8 +220,10 @@ inside it): `SolverPlanner.stockpilePlan` plans the look and nothing else (`Look
 `for=stockpile`: there, no sight at all means "not looked at yet", not "nobody names it"), and the container is the goal's
 word for the look as it is for the deposit. With the note made the goal is judged (a chest that already holds enough ends
 it), and when it is not met the tree has run out unsatisfied, so the executor replans and the deposit is planned knowing what
-is in the container. Without this the postcondition of a container nobody has opened is UNKNOWN for ever (the executor's one
-`Reach` does not tell the body what is inside), and no deposit starts.
+is in the container. A container that needs nothing moved into it plans no leaf at all: `stockpilePlan` asks for what is
+left to move, and with none left it returns an empty plan rather than a `deposit` of zero, which the task would refuse (its
+`count` must be positive). Without this the postcondition of a container nobody has opened is UNKNOWN for ever (the
+executor's one `Reach` does not tell the body what is inside), and no deposit starts.
 
 `BotMemory` keeps the list (saved with the body, the `supply` list of its compound, each entry with its block; an entry
 with no block is skipped on load; saves from before the list load as none). Notes of what a container held are per
@@ -239,8 +241,12 @@ about the same inventory (its postcondition, its plan, the exemption of its own 
 fingerprint all use that one lookup). What a sight holds is the body's note, never read from the world, and it is `remembered` (in range or out of
 it) until the body opens the container again. A named container the body has not opened is listed with nothing and not
 `remembered`. A container whose chunk is loaded and no longer holds that block (both blocks, for a pair) is shown with
-nothing and may not be taken from. The planner (`SolverPlanner`, "Containers the body may take from") counts what such a
-container holds before anything is gathered or crafted and puts one `withdraw` leaf per container and item in front of the
+nothing and may not be taken from, and the same question is asked of a named container the body has no note of at all
+(`SupplyChests.stand`, one rule for the owner's word and the note alike): named and never opened, it is one the body may
+take from only while the block that was named stands there. A position that is not loaded decides nothing against a
+container, so a named one there is still listed as take-able, until the body can see it. The planner (`SolverPlanner`,
+"Containers the body may take from") counts what such a container holds before anything is gathered or crafted and puts one
+`withdraw` leaf per container and item in front of the
 plan, nearest container first, never more than the container is known to hold and never more than the plan needs after
 what the body carries; a container ruled out by a `PROTECTED` failure or by a `NO_SOURCE` failure of its own leaf (its
 source id, `withdraw:<container>`), and a stockpile goal's own target, are not counted. The fingerprint of a plan reads the
@@ -276,6 +282,12 @@ the menu and closes it, and moves nothing.
   (holds fewer; takes none), `NoProgress` (no room in the inventory; what fitted was taken).
 - A goal that already holds when a `withdraw` starts (a restart after part of it was taken) completes without opening
   anything.
+- `deposit` asks what stands at the position before it opens anything, by the one rule for every record of a container
+  (`SupplyChests.stand(level, memory, pos)`, as `ContainerTask` above): another block where the container the goal was
+  judged against was recorded drops what the body holds of the position (the word, the note, the claim on the spot:
+  `SupplyChests.forget`) and fails `TargetGone`, and a position that is not loaded fails `Unreachable` and drops nothing, so
+  the executor goes there again. Nothing goes into a block the plan was never about
+  (`MoveAndMineGameTests.depositIntoAContainerThatIsAnotherBlockNowFailsTargetGone`).
 - `deposit` asks block safety before it opens the container too (`DepositTask`, "Block safety"): the stockpile goal's target
   is the owner's word for that goal, which reaches the check as an `Allowance` over exactly that container (both halves)
   open for the one question (`ContainerAccess.askAsGoalsWord`, which the look a stockpile plan makes of its target uses
@@ -292,7 +304,8 @@ the menu and closes it, and moves nothing.
   was inside, replaced by another container, is not opened and is forgotten; a stockpile goal fills its own chest (one the
   body has not been inside: it looks first) and is refused by a claim; a stockpile goal naming the other half of a double
   chest than the one noted fills the one inventory; what the world says of a named container (stands, another block, not
-  loaded).
+  loaded); a container named and never opened is listed as take-able only while the block named stands, and a position that
+  is not loaded decides nothing against it.
 - `WithdrawGameTests` (in `game.task`, as it drives `WithdrawTask`'s clicks on a menu the test opened): a partial take
   from a furnace's result slot leaves the cursor empty, loses nothing, and counts what the inventory gained, with the
   ground getting only what a full inventory cannot hold.
@@ -302,6 +315,11 @@ the menu and closes it, and moves nothing.
 Takes an `Equip` goal and puts each slot's item in place through `player.inventoryMenu`, one slot per tick. Armor and the
 off hand: shift-click the old piece out, pick up the wanted item, right-click it into the slot (one item of a stack), put
 the cursor back. Main hand: select the hotbar slot that holds it, or swap it in with a `SWAP` click.
+
+The plan behind the goal counts a slot as one unit to hold (`SolverPlanner.equipPlan`, which asks for one of the item per
+slot and reserves it against the other slots' asks): a slot that already holds the wanted item is asked for nothing, and two
+slots naming the same item (planks in the main hand and in the off hand) is an ask for two planks, relied on twice over and
+never for one plank held in both.
 
 ## Not done here
 

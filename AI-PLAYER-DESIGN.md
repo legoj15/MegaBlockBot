@@ -799,8 +799,16 @@ Each adapter turns one recipe family into `RecipeInfo` for the solver:
 - **Vanilla crafting:** exists (SprawlCrafting's `CraftPlanner` adapters; lift the
   Minecraft→solver adaptation, not the UI).
 - **Vanilla smelting/blasting/smoking/campfire, stonecutting, smithing:** generic, from the
-  server `RecipeManager`. Fuel is modelled as an extra slot whose alternatives come from the
-  fuel registry.
+  server `RecipeManager`. Smelting, blasting and smoking are in (#14, `CookingRecipeSource`),
+  and fuel is modelled as one `RecipeDef` per fuel class, in whole runs: a furnace recipe has
+  no fixed fuel cost per item (one coal smelts eight, one plank one and a half) and a slot
+  counts whole items, so with cooking time `c` and a burn time `b`, `b/c` in lowest terms
+  `p/q` gives a variant whose run takes `p` of the ingredient and `q` of the fuel and makes
+  `p` results, id `recipe#class` (`minecraft:iron_ingot_from_smelting_raw_iron#coal`). The
+  classes are a fixed list (coal, planks, logs, sticks) whose burn times are asked from the
+  game; the solver chooses between variants by cost, as between any two recipes that make one
+  item, and the task that runs a `smelt` leaf comes later. Campfire cooking, stonecutting and
+  smithing are not in yet.
 - **Modded machine recipes:** there is no single place to read them from. Some mods register
   custom recipe types in `RecipeManager`, each with its own serializer and fields. Others keep
   recipes in their own registry entirely: BuildCraft's assembly table recipes live in a static

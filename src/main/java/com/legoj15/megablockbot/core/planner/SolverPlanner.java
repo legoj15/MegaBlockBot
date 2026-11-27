@@ -81,11 +81,15 @@ import java.util.TreeSet;
  *       comes before the leaf.</li>
  *   <li>craft (the recipe's {@code kind}, {@code craft} for the grid): {@code recipe} (id), {@code times},
  *       {@code station} (the station item or empty) and {@code layout}, the item the solver chose for each slot of
- *       each craft, in the form {@link CraftLayout} documents, so a task follows it instead of re-deciding.</li>
+ *       each craft, in the form {@link CraftLayout} documents, so a task follows it instead of re-deciding. A
+ *       {@code smelt} leaf (a furnace recipe, one variant per fuel class) carries the same params with an empty
+ *       {@code layout}: there is no grid to lay out, and the recipe's id names the fuel class its run is sized
+ *       for.</li>
  *   <li>{@code equip}: none; the goal names the slots. Equipping leaves the working stock as it is: the snapshot
  *       counts worn items.</li>
  *   <li>{@code deposit}: {@code item}, {@code container}, {@code dimension}, and {@code count}, which is how many
- *       to move now: the goal asked for, minus what the container is known to hold. The node's goal is the
+ *       to move now: the goal asked for, minus what the container is known to hold. When that leaves nothing to move the
+ *       goal plans no leaf at all, since a deposit of zero is a task that throws rather than work. The node's goal is the
  *       {@link Goal.Stockpile} itself and carries the total the container should hold. The moved items leave the
  *       working stock. A container the snapshot has no sight of at all has never been opened, so the plan for the
  *       goal is one {@code look_inside} leaf ({@link LookInside#leafBeforeDeposit}) and nothing else: the goal is
@@ -113,10 +117,11 @@ import java.util.TreeSet;
  * chest is one sight whichever half a goal names ({@link ContainerSight#covers}), so it is a stockpile goal's own target
  * whichever half that goal names.
  *
- * <p>An {@code equip} goal's requirements are items to hold when it is done. Each one met is reserved from the
- * requirements after it (the solver is not offered the unit), so that a stick crafted for the off hand is not crafted
- * from the planks the main hand is to hold, and the unit stays among what the plan relies on holding, however much of the
- * stock a later requirement's draw used up in the books: the containers give what the draws and the held units add up to.
+ * <p>An {@code equip} goal's requirements are items to hold when it is done, one unit for every slot that names them: an
+ * item two slots are to hold is two units. Each one met is reserved from the requirements after it (the solver is not
+ * offered the unit), so that a stick crafted for the off hand is not crafted from the planks the main hand is to hold, and
+ * the units stay among what the plan relies on holding, however much of the stock a later requirement's draw used up in the
+ * books: the containers give what the draws and the held units add up to.
  */
 public final class SolverPlanner implements Planner {
     /** Solver budgets, SprawlCrafting's pins (docs/handoff/solver-core.md): depth and attempt caps per solve. */
@@ -267,8 +272,9 @@ public final class SolverPlanner implements Planner {
         private final TreeMap<ItemKey, Long> drawn = new TreeMap<>();
         private final TreeMap<ItemKey, Long> relied = new TreeMap<>();
         /**
-         * What the requirements of an equip goal planned so far are to hold when it is done, one unit of each item. The
-         * solver is not offered these units: a later requirement plans around what an earlier one holds, not out of it.
+         * What the requirements of an equip goal planned so far are to hold when it is done, one unit for every slot that
+         * names the item. The solver is not offered these units: a later requirement plans around what an earlier one
+         * holds, not out of it.
          */
         private final TreeMap<ItemKey, Long> reserved = new TreeMap<>();
         /**
@@ -590,10 +596,6 @@ public final class SolverPlanner implements Planner {
                         layouts == null || i >= layouts.size() ? List.of() : layouts.get(i);
                 Failure broken = advance(recipe, step, stepLayouts);
                 if (broken != null) return Step.fail(broken);
-                if (!RecipeDef.CRAFT.equals(recipe.kind())) {
-                    note("recipe " + recipe.id() + " runs as task kind '" + recipe.kind()
-                            + "', which no task implements yet");
-                }
                 long after = held(recipe.result());
                 if (after > Integer.MAX_VALUE) {
                     return Step.fail(internal("the stock of " + recipe.result().id() + " exceeds what a goal can count"));
@@ -602,7 +604,9 @@ public final class SolverPlanner implements Planner {
                 params.put("recipe", recipe.id());
                 params.put("times", Long.toString(step.crafts()));
                 params.put("station", recipe.station() == null ? "" : recipe.station().id());
-                params.put("layout", CraftLayout.encode(stepLayouts));
+                // A smelt leaf carries no layout: there is no grid to lay out, and the recipe's id already names the
+                // fuel class its run is sized for.
+                params.put("layout", RecipeDef.CRAFT.equals(recipe.kind()) ? CraftLayout.encode(stepLayouts) : "");
                 nodes.add(NodeSpec.leaf(new Goal.HaveItem(recipe.result(), (int) after), recipe.kind(), params, ""));
             }
             return Step.ok(nodes);
@@ -946,10 +950,11 @@ public final class SolverPlanner implements Planner {
         }
 
         /**
-         * An item plan for every slot's item not worn or held, then one equip leaf (brief P12). Every requirement is
-         * an item to hold when the goal is done, so once one is met its unit is kept from the requirements after it:
-         * they plan around it (a stick crafted from the planks the main hand is to hold would leave it empty-handed),
-         * and the unit stays among what the plan relies on holding, however much of the stock a later draw used up.
+         * An item plan for every slot's item not worn or held, then one equip leaf (brief P12). Every requirement is an
+         * item to hold when the goal is done, one unit per slot that names it, so once one is met its unit is kept from
+         * the requirements after it: they plan around it (a stick crafted from the planks the main hand is to hold would
+         * leave it empty-handed), and the units stay among what the plan relies on holding, however much of the stock a
+         * later draw used up. An item two slots name is relied on twice: MAINHAND and OFFHAND can hold the same thing.
          */
         Step equipPlan(Goal.Equip goal) {
             List<NodeSpec> nodes = new ArrayList<>();
@@ -961,10 +966,11 @@ public final class SolverPlanner implements Planner {
                     Step step = itemPlan(slot.getValue(), 1);
                     if (step.failure() != null) return step;
                     nodes.addAll(step.nodes());
-                    if (!reserved.containsKey(slot.getValue())) {
-                        reserved.put(slot.getValue(), 1L);
-                        mine.put(slot.getValue(), 1L);
-                    }
+                    // One unit for this slot, counted with the earlier slots' rather than instead of them. A unit an
+                    // enclosing equip goal already holds is not this goal's to count.
+                    if (outer.containsKey(slot.getValue())) continue;
+                    mine.merge(slot.getValue(), 1L, Long::sum);
+                    reserved.merge(slot.getValue(), 1L, Long::sum);
                 }
                 mine.forEach((item, count) -> relied.merge(item, count, (a, b) -> Math.max(a, b)));
             } finally {
@@ -989,8 +995,10 @@ public final class SolverPlanner implements Planner {
 
         /**
          * An item plan for what the container is not known to hold already, then one deposit leaf (brief P12). The
-         * leaf's {@code count} is that same number, how many to move; its goal is the whole stockpile goal. A container
-         * the snapshot says nothing of is looked into first and nothing else is planned (see {@link LookInside}).
+         * leaf's {@code count} is that same number, how many to move; its goal is the whole stockpile goal. Nothing left
+         * to move is nothing to plan: the goal is met, and a deposit of zero would fail in its task, which asks for a
+         * positive count. A container the snapshot says nothing of is looked into first and nothing else is planned (see
+         * {@link LookInside}).
          */
         Step stockpilePlan(Goal.Stockpile goal) {
             ContainerSight sight = snapshot.containerAt(goal.container());
@@ -1008,12 +1016,11 @@ public final class SolverPlanner implements Planner {
             }
             long already = sight != null && sight.contentsKnown() ? sight.count(goal.key()) : 0;
             long need = Math.max(0, goal.count() - already);
+            if (need == 0) return Step.ok(List.of()); // the container holds all the goal asks for: nothing to move
             List<NodeSpec> nodes = new ArrayList<>();
-            if (need > 0) {
-                Step step = itemPlan(goal.key(), (int) need);
-                if (step.failure() != null) return step;
-                nodes.addAll(step.nodes());
-            }
+            Step step = itemPlan(goal.key(), (int) need);
+            if (step.failure() != null) return step;
+            nodes.addAll(step.nodes());
             Map<String, String> params = new TreeMap<>();
             params.put("item", goal.key().id());
             params.put("count", Long.toString(need));

@@ -136,6 +136,40 @@ public final class PlanInputGameTests {
     }
 
     /**
+     * The furnace family, one variant per fuel class: smelting cooks in 200 ticks and a coal burns 1600, so the
+     * coal variant's run is eight raw iron and one coal for eight ingots; blasting cooks in 100, so the same coal
+     * is sixteen and one, at a blast furnace.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void furnaceRecipesCarryTheirFuelAndStation(GameTestHelper helper) {
+        RecipeDef smelt = recipe(helper, "minecraft:iron_ingot_from_smelting_raw_iron#coal");
+        helper.assertTrue(RecipeDef.SMELT.equals(smelt.kind()), "kind is " + smelt.kind());
+        helper.assertTrue(ItemKey.of("minecraft:furnace").equals(smelt.station()), "station is " + smelt.station());
+        helper.assertTrue(ItemKey.of("minecraft:iron_ingot").equals(smelt.result()) && smelt.resultCount() == 8,
+            "makes " + smelt.resultCount() + " of " + smelt.result());
+        helper.assertTrue(smelt.slots().size() == 2, "has " + smelt.slots().size() + " slots: " + smelt.slots());
+        RecipeDef.Slot ingredient = smelt.slots().get(0);
+        helper.assertTrue(ingredient.count() == 8
+            && ingredient.alternatives().equals(List.of(ItemKey.of("minecraft:raw_iron"))),
+            "the ingredient slot is " + ingredient);
+        RecipeDef.Slot fuel = smelt.slots().get(1);
+        helper.assertTrue(fuel.count() == 1
+            && fuel.alternatives().equals(List.of(ItemKey.of("minecraft:coal"), ItemKey.of("minecraft:charcoal"))),
+            "the fuel slot is " + fuel);
+
+        RecipeDef blast = recipe(helper, "minecraft:iron_ingot_from_blasting_raw_iron#coal");
+        helper.assertTrue(RecipeDef.SMELT.equals(blast.kind()), "kind is " + blast.kind());
+        helper.assertTrue(ItemKey.of("minecraft:blast_furnace").equals(blast.station()),
+            "station is " + blast.station());
+        helper.assertTrue(ItemKey.of("minecraft:iron_ingot").equals(blast.result()) && blast.resultCount() == 16,
+            "makes " + blast.resultCount() + " of " + blast.result());
+        helper.assertTrue(blast.slots().size() == 2 && blast.slots().get(0).count() == 16
+            && blast.slots().get(0).alternatives().equals(List.of(ItemKey.of("minecraft:raw_iron")))
+            && blast.slots().get(1).count() == 1, "the slots are " + blast.slots());
+        helper.succeed();
+    }
+
+    /**
      * Every recipe in the book is one the game has, with one slot per ingredient the game reports (a blank cell of a
      * shaped grid is not one), and everything it names exists. The slot count is what a source can get wrong without
      * {@code RecipeDef}'s own checks noticing: a lost or an invented ingredient still leaves a valid recipe.

@@ -27,8 +27,27 @@ Everything runs on the server thread; every product is immutable and published a
   slot list, blank cells dropped), so a shaped recipe's grid positions are not in a `RecipeDef`. The task looks the
   recipe up again in the game by `RecipeDef.id()` (the game recipe's id, `RecipeManager.byKey`) and takes the layout
   from that recipe. A shapeless recipe has none to take.
-- Other recipe types (smelting, blasting, smoking, campfire, stonecutting, smithing) are unread until a source claims
-  them. The summary line counts them, for example `{minecraft:smelting=70, ...}`.
+- `CookingRecipeSource` claims `minecraft:smelting`, `minecraft:blasting` and `minecraft:smoking`: every recipe of
+  those types becomes one `RecipeDef` per fuel class, kind `smelt`, station `minecraft:furnace`,
+  `minecraft:blast_furnace` or `minecraft:smoker`. A furnace recipe has no fixed fuel cost per item (one coal smelts
+  eight, one plank one and a half) and a slot counts whole items, so the variant is sized to the class's burn time:
+  with cooking time `c` and a burn time `b`, `b / c` in lowest terms `p / q` gives a run of `p` of the ingredient and
+  `q` of the fuel making `p` times the recipe's result, id the game recipe's id, `#` and the class
+  (`minecraft:iron_ingot_from_smelting_raw_iron#coal`). The slots are the ingredient first (its alternatives from the
+  recipe's one ingredient, read as the crafting source reads them) and the class's items. The burn times are asked
+  from the game (`AbstractFurnaceBlockEntity.getFuel()`); an item of a class the map does not hold, or holds with a
+  different time from the class's first item, is left out of the class and noted, and a class with no item left is
+  skipped. A recipe whose result is empty, whose ingredient no registered item satisfies or whose cooking time is not
+  positive is skipped and noted, the way the crafting source skips and notes.
+- The fuel classes are a fixed list in the source: `coal` (coal, charcoal), `planks` (the `minecraft:planks` item
+  tag), `logs` (`minecraft:logs_that_burn`), `sticks` (stick). Other fuels (blaze rods, coal blocks, dried kelp
+  blocks, lava buckets) are not classes yet, so no variant is sized for them and they cannot be planned as fuel.
+- A variant is an ordinary recipe to the planner: a `smelt` leaf carries the craft leaf's params with an empty
+  `layout`, and the solver chooses between variants by cost, as between any two recipes that make one item. The task
+  that runs a `smelt` leaf is not written yet; `CookingRecipeSource.variantOf` reads a variant id back into the game
+  recipe and the fuel class, which is how that task will know what to run and what to feed it.
+- Other recipe types (campfire cooking, stonecutting, smithing) are unread until a source claims them. The summary
+  line counts them, for example `{minecraft:campfire_cooking=..., ...}`.
 
 ## Snapshot
 
@@ -57,8 +76,11 @@ container, moves an item or loads a chunk.
   such a container out of sight, or in range with its chunk not loaded, the contents are the remembered ones, so that the
   plan can walk over and count on them; one whose chunk is loaded and no longer holds the block (both blocks, for a double
   chest) is shown with nothing and may not be taken from; "no longer holds the block" is `SupplyChests.stand`, one rule for
-  the owner's word and the note alike (each is held to its block). A double chest is one sight, at the half with the lower
-  position hash and carrying the other half (`ContainerSight.other`), and one note: a note is per inventory.
+  the owner's word and the note alike (each is held to its block). The rule is asked of an owner's word that has no note
+  under it, a container named and never opened, as well: it is listed as one the body may take from only while the block
+  that was named stands at the position. A position that is not loaded decides nothing against a container, in either loop:
+  a named one there is still listed as take-able, until the body can see it. A double chest is one sight, at the half with
+  the lower position hash and carrying the other half (`ContainerSight.other`), and one note: a note is per inventory.
   `Snapshot.containerAt` answers for either half, so a goal that names the far half finds the same sight.
 - `nearbyBlocks` (the sight, `BodySight`): block id to the horizontal distance of the nearest such block, for the blocks
   `AcquisitionIndex.sourceBlocks()` names (every mining or harvesting source's block). A scan reads the chunks that
@@ -130,12 +152,12 @@ owner's word. The registry is cleared when the server stops.
 
 ## Checks
 
-`PlanInputGameTests` (`scripts/gametest.ps1 -Node 1.21.1`): recipe shapes against vanilla data, every recipe's slot
-count against the game's ingredients, the book rebuilt after a real reload (proved by a probe source read only by the
-later build), the builder isolating a throwing source and a duplicate id, snapshot contents with a real body (offhand
-counted once, two stacks of one item as two entries), tool classes and tiers, a tool known only by its data component,
-a tool with two denying rules, the memory save round trip through `restore` (the owner's list of named containers and the
-note of a double chest included).
+`PlanInputGameTests` (`scripts/gametest.ps1 -Node 1.21.1`): recipe shapes against vanilla data, the furnace recipes
+with their fuel classes and stations, every recipe's slot count against the game's ingredients, the book rebuilt
+after a real reload (proved by a probe source read only by the later build), the builder isolating a throwing source
+and a duplicate id, snapshot contents with a real body (offhand counted once, two stacks of one item as two entries),
+tool classes and tiers, a tool known only by its data component, a tool with two denying rules, the memory save round
+trip through `restore` (the owner's list of named containers and the note of a double chest included).
 
 `SightGameTests` (same run): the nearest block of each kind at its horizontal distance (a block in the body's column is
 0 away, a 3-4-5 triangle is 5, a block no source names is absent); a block in a chunk nobody has loaded is absent and

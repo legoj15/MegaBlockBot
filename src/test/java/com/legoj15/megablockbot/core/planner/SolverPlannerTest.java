@@ -57,6 +57,8 @@ final class SolverPlannerTest {
     private static final ItemKey COBBLESTONE = ItemKey.of("cobblestone");
     private static final ItemKey DIAMOND = ItemKey.of("diamond");
     private static final ItemKey FURNACE = ItemKey.of("furnace");
+    private static final ItemKey RAW_IRON = ItemKey.of("raw_iron");
+    private static final ItemKey IRON_INGOT = ItemKey.of("iron_ingot");
     private static final ItemKey CHEST = ItemKey.of("chest");
     private static final ItemKey TORCH = ItemKey.of("torch");
     private static final ItemKey COAL = ItemKey.of("coal");
@@ -87,6 +89,10 @@ final class SolverPlannerTest {
 
     private static RecipeDef recipe(String id, ItemKey result, int resultCount, ItemKey station, RecipeDef.Slot... slots) {
         return new RecipeDef(id, RecipeDef.CRAFT, List.of(slots), station, result, resultCount);
+    }
+
+    private static RecipeDef smelt(String id, ItemKey result, int resultCount, ItemKey station, RecipeDef.Slot... slots) {
+        return new RecipeDef(id, RecipeDef.SMELT, List.of(slots), station, result, resultCount);
     }
 
     private static RecipeDef.Slot one(ItemKey item) {
@@ -367,7 +373,7 @@ final class SolverPlannerTest {
                 }
                 gain(stock, tools, ItemKey.of(params.get("item")), trades);
             }
-            case "craft" -> {
+            case "craft", "smelt" -> {
                 RecipeDef recipe = book.byId(params.get("recipe")).orElse(null);
                 if (recipe == null) return "leaf plans unknown recipe " + params.get("recipe");
                 long times = Long.parseLong(params.get("times"));
@@ -412,11 +418,13 @@ final class SolverPlannerTest {
     /**
      * Takes exactly the items the leaf's layout names, slot by slot, craft by craft: what an executor that follows
      * it does. A leaf with no layout is run the way an executor without one would, taking the first alternative in
-     * stock for each slot; the layout tests check that every craft leaf has one.
+     * stock for each slot; the layout tests check that every craft leaf has one. A smelt leaf carries an empty
+     * layout (there is no grid to lay out), so it always runs that way.
      */
     private static String craftByLayout(RecipeDef recipe, Map<String, String> params, long times,
                                         Map<ItemKey, Integer> stock) {
-        if (params.get("layout") == null) return craftGreedily(recipe, times, stock);
+        String layout = params.get("layout");
+        if (layout == null || layout.isEmpty()) return craftGreedily(recipe, times, stock);
         List<CraftLayout.Run> runs = CraftLayout.decode(params.get("layout"));
         long covered = 0;
         for (CraftLayout.Run run : runs) covered += run.crafts();
@@ -899,12 +907,13 @@ final class SolverPlannerTest {
         Executed executed = run(blind, Map.of(), Map.of());
         assertNull(executed.failure(), executed.failure());
 
+        // Nothing left to move is nothing to plan: a deposit of zero is not a task that does nothing, it is a task that
+        // throws, and the goal holds of the snapshot the plan was made from already.
         Snapshot.Builder knownFullBuilder = Snapshot.builder().gameTime(0);
         knownFullBuilder.container(new ContainerSight(CONTAINER, "minecraft:chest", true, false, Map.of(OAK_PLANKS, 8)));
         Plan knownFull = planned(planner(), request(goal, knownFullBuilder.build(), Exclusions.NONE));
-        assertEquals(1, leaves(knownFull).size(), "the container is known to hold the stock already");
-        assertEquals("deposit", leaves(knownFull).get(0).taskKind());
-        assertEquals("0", leaves(knownFull).get(0).params().get("count"), "nothing is left to move");
+        assertTrue(knownFull.roots().isEmpty(), "the container holds the stock already, so no leaf is planned: "
+            + leaves(knownFull));
 
         // Known to hold three: five are moved, and the goal still says eight.
         Snapshot.Builder partialBuilder = Snapshot.builder().gameTime(0).item(OAK_PLANKS, 5);
@@ -1593,6 +1602,121 @@ final class SolverPlannerTest {
         assertRunsToTheGoal(second, book(), charcoalOnly, Map.of(), TORCH, 8);
     }
 
+    // ─── Furnace recipes are planned with their fuel and station (issue #14) ─────────────────────
+
+    /** The base book plus one smelting recipe in the three fuel-class variants the cooking source writes. */
+    private static SimpleRecipeBook ironBook() {
+        return bookWith(
+                smelt("minecraft:iron_ingot_from_smelting_raw_iron#coal", IRON_INGOT, 8, FURNACE,
+                        of(RAW_IRON, 8), either(COAL, CHARCOAL)),
+                smelt("minecraft:iron_ingot_from_smelting_raw_iron#planks", IRON_INGOT, 3, FURNACE,
+                        of(RAW_IRON, 3), of(OAK_PLANKS, 2)),
+                smelt("minecraft:iron_ingot_from_smelting_raw_iron#sticks", IRON_INGOT, 1, FURNACE,
+                        one(RAW_IRON), of(STICK, 2)));
+    }
+
+    /** The base index plus raw iron, mined with a pickaxe the start stock already holds. */
+    private static AcquisitionIndex ironIndex() {
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(RAW_IRON).addItem(IRON_INGOT);
+        builder.addSource(new Source.MineBlock("mine:minecraft:raw_iron_ore", RAW_IRON, "minecraft:raw_iron_ore",
+                ToolClass.PICKAXE, ToolTier.STONE, true, false, false, 1.0, false,
+                new Source.OreRange(0, 96, 16)));
+        return builder.build();
+    }
+
+    /**
+     * Mining costs 1000 a block whatever the depth, so one coal — one mined block — is the cheapest fuel per ingot
+     * (125 against a plank variant's 166 2/3) and the coal variant is the one planned; with the defaults' depth
+     * charge on ores, wood would win instead.
+     */
+    private static PlannerConfig flatMining() {
+        PlannerConfig defaults = PlannerConfig.defaults();
+        return new PlannerConfig(1000, 0, 0, defaults.harvest(), defaults.kill(), defaults.fish(),
+                defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(), defaults.maxTotalReplans(),
+                defaults.toolItems());
+    }
+
+    private static SolverPlanner ironPlanner() {
+        return new SolverPlanner(ironBook(), ironIndex(), flatMining(), List.of());
+    }
+
+    /** What every iron plan starts from: a stone pickaxe in the stock, so no tool prerequisite is planned. */
+    private static final Map<ItemKey, Integer> IRON_STOCK = Map.of(STONE_PICKAXE, 1);
+    private static final Map<ToolClass, ToolTier> IRON_TOOLS = Map.of(ToolClass.PICKAXE, ToolTier.STONE);
+
+    /** The plan's one smelt leaf. */
+    private static NodeSpec smeltLeaf(Plan plan) {
+        List<NodeSpec> smelts = leaves(plan).stream().filter(leaf -> leaf.taskKind().equals("smelt")).toList();
+        assertEquals(1, smelts.size(), leaves(plan).toString());
+        return smelts.get(0);
+    }
+
+    @Test
+    void aFurnaceRecipeIsPlannedWithItsFuelAndItsStation() {
+        // One coal smelts eight (1600 burn ticks over a 200-tick recipe), so the coal variant's run is eight raw
+        // iron and one coal for eight ingots: a goal of eight is one whole run, and the ore, the coal and the
+        // furnace are got before it.
+        Plan plan = planned(ironPlanner(), request(new Goal.HaveItem(IRON_INGOT, 8),
+                snapshot(IRON_STOCK, Map.of()), Exclusions.NONE));
+
+        List<NodeSpec> planLeaves = leaves(plan);
+        NodeSpec smelt = smeltLeaf(plan);
+        assertEquals(planLeaves.size() - 1, planLeaves.indexOf(smelt), "the smelt runs last: " + planLeaves);
+        assertEquals("minecraft:iron_ingot_from_smelting_raw_iron#coal", smelt.params().get("recipe"));
+        assertEquals("1", smelt.params().get("times"), "eight ingots are one run of eight");
+        assertEquals("minecraft:furnace", smelt.params().get("station"));
+        assertEquals("", smelt.params().get("layout"), "a smelt leaf carries no layout");
+
+        assertEquals(8, gathered(plan, RAW_IRON, "mine"), planLeaves.toString());
+        assertEquals(1, gathered(plan, COAL, "mine"), planLeaves.toString());
+        assertTrue(craftedRecipes(plan).contains("furnace_from_cobblestone"), "the furnace is crafted: " + planLeaves);
+        assertRunsToTheGoal(plan, ironBook(), IRON_STOCK, IRON_TOOLS, IRON_INGOT, 8);
+    }
+
+    @Test
+    void threeTimesTheResultIsThreeWholeRuns() {
+        Plan plan = planned(ironPlanner(), request(new Goal.HaveItem(IRON_INGOT, 24),
+                snapshot(IRON_STOCK, Map.of()), Exclusions.NONE));
+
+        NodeSpec smelt = smeltLeaf(plan);
+        assertEquals("3", smelt.params().get("times"), "24 ingots are three runs of eight");
+        assertEquals(24, gathered(plan, RAW_IRON, "mine"));
+        assertEquals(3, gathered(plan, COAL, "mine"));
+        assertRunsToTheGoal(plan, ironBook(), IRON_STOCK, IRON_TOOLS, IRON_INGOT, 24);
+    }
+
+    @Test
+    void withNoCoalThePlanSmeltsOverWoodAndGathersFuelForWholeRuns() {
+        // The coal source is excluded and charcoal has none, so the coal variant's fuel cannot be had and the wood
+        // variants are left, of which the planks one is the cheaper: a run takes three raw iron and two planks for
+        // three ingots, so eight ingots are three whole runs (nine made) of nine raw iron and six planks of fuel;
+        // the sticks variant would need eight runs and sixteen sticks for the same nine.
+        Plan plan = planned(ironPlanner(), request(new Goal.HaveItem(IRON_INGOT, 8), snapshot(IRON_STOCK, Map.of()),
+                without("mine:minecraft:coal_ore")));
+
+        NodeSpec smelt = smeltLeaf(plan);
+        assertEquals("minecraft:iron_ingot_from_smelting_raw_iron#planks", smelt.params().get("recipe"));
+        assertEquals("3", smelt.params().get("times"), "eight ingots are ceil(8/3) = 3 runs of the planks variant");
+        assertEquals(9, gathered(plan, RAW_IRON, "mine"), "three runs of three");
+        assertRunsToTheGoal(plan, ironBook(), IRON_STOCK, IRON_TOOLS, IRON_INGOT, 8);
+    }
+
+    @Test
+    void anyIngotCountIsCoveredByWholeRunsOfTheCheapestVariant() {
+        // A run of the coal variant makes eight, so whatever count is asked for the plan runs only as many whole
+        // runs as cover it — one for seven, two for nine — and never ends with fewer ingots than the goal asks.
+        for (int count : List.of(1, 7, 8, 9, 16, 17, 25)) {
+            Plan plan = planned(ironPlanner(), request(new Goal.HaveItem(IRON_INGOT, count),
+                    snapshot(IRON_STOCK, Map.of()), Exclusions.NONE));
+            long runs = leaves(plan).stream().filter(leaf -> leaf.taskKind().equals("smelt"))
+                    .mapToLong(leaf -> Long.parseLong(leaf.params().get("times"))).sum();
+            assertEquals((count + 7) / 8, runs, count + " ingots are whole runs of eight");
+            assertTrue(runs * 8 >= count, count + " ingots are covered by " + runs + " runs");
+            assertRunsToTheGoal(plan, ironBook(), IRON_STOCK, IRON_TOOLS, IRON_INGOT, count);
+        }
+    }
+
     // ─── Leaf params (items 13 and 15) ───────────────────────────────────────────────────────────
 
     @Test
@@ -1903,6 +2027,20 @@ final class SolverPlannerTest {
         assertNull(ran.failure(), ran.failure() + " after " + ran.ran());
         assertTrue(ran.stock().getOrDefault(OAK_PLANKS, 0) >= 1 && ran.stock().getOrDefault(STICK, 0) >= 1,
                 "ended with " + ran.stock() + " after " + ran.ran());
+    }
+
+    @Test
+    void anEquipGoalNamingOneItemInTwoSlotsReliesOnTwoOfIt() {
+        // Two slots can hold the same thing, and a slot is one unit to hold: naming planks for the main hand and the off
+        // hand is an ask for two planks, not for one plank counted twice over.
+        Goal.Equip goal = new Goal.Equip(Map.of(EquipSlot.MAINHAND, OAK_PLANKS, EquipSlot.OFFHAND, OAK_PLANKS));
+        Plan plan = planned(planner(), request(goal, snapshotWith(Map.of(), supplyBox(SHELF_A, Map.of(OAK_PLANKS, 5))),
+                Exclusions.NONE));
+        assertEquals(2, withdrawn(plan, OAK_PLANKS), leaves(plan).toString());
+        Shelved shelved = runWithContainers(plan, Map.of(), Map.of(SHELF_A, Map.of(OAK_PLANKS, 5)));
+        assertNull(shelved.executed().failure(), shelved.executed().failure() + " after " + shelved.executed().ran());
+        assertTrue(shelved.executed().stock().getOrDefault(OAK_PLANKS, 0) >= 2,
+                "ended with " + shelved.executed().stock() + " after " + shelved.executed().ran());
     }
 
     @Test

@@ -21,6 +21,7 @@ import com.legoj15.megablockbot.game.body.DeathRecord;
 import com.legoj15.megablockbot.game.gametest.BotNavGameTests.NavRun;
 import com.legoj15.megablockbot.game.nav.BodyInteractionManager;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
+import com.legoj15.megablockbot.game.plan.BotMemory;
 import com.legoj15.megablockbot.game.safety.BlockSafety;
 import com.legoj15.megablockbot.game.task.BreakRules;
 import com.legoj15.megablockbot.game.task.MineTask;
@@ -43,6 +44,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.entity.BarrelBlockEntity;
 import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
@@ -1004,6 +1006,41 @@ public final class MoveAndMineGameTests {
             if (job.task.state() != TaskState.FAILED) return;
             helper.assertTrue(job.task.failure() instanceof Failure.TargetGone, "failed as " + job.task.failure());
             helper.assertTrue(job.body().getInventory().countItem(Items.COBBLESTONE) == 5, "the body's cobblestone changed");
+            assertNoMenuOpen(helper, job.body());
+            job.run.pass();
+        });
+    }
+
+    /**
+     * Another block stands where the container the deposit was counted against was: the task asks what stands at the
+     * position before it opens anything, as the tasks that take items out do, so it fails TargetGone, lets go of what the
+     * body holds of the spot, and puts nothing anywhere (design 3.5: every record of a container is held to its block).
+     *
+     * <p>The task and not the goal, because the executor retries a TARGET_GONE leaf once (GoalExecutor.routeFailure) and
+     * the record is dropped by the first try: a goal-level test of this would end with the cobblestone in the barrel.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 1200)
+    public static void depositIntoAContainerThatIsAnotherBlockNowFailsTargetGone(GameTestHelper helper) {
+        room(helper, 3);
+        BlockPos chestPos = new BlockPos(10, FLOOR_Y + 1, 10);
+        helper.setBlock(chestPos, Blocks.CHEST);
+        Job job = Job.start(helper, "mdep6", new Vec3(3.5, FLOOR_Y + 1, 3.5), 1200, depositLeaf(helper, chestPos, "cobblestone", 5));
+        // Set-up, not the body's doing: the five the leaf moves, and a note of the chest's inside, which is what
+        // ContainerAccess.note leaves of a container the body has been inside and nobody named.
+        job.body().getInventory().setItem(0, new ItemStack(Items.COBBLESTONE, 5));
+        BotMemory memory = BotMemory.of(job.run.id);
+        job.run.atEnd(() -> BotMemory.forget(job.run.id));
+        memory.noteContainer(dimension(helper), helper.absolutePos(chestPos), "minecraft:chest", Map.of());
+        // The chest is taken away and an empty barrel set in its place while the body is on its way.
+        helper.setBlock(chestPos, Blocks.BARREL);
+        job.run.each(1050, () -> {
+            helper.assertTrue(job.task.state() != TaskState.COMPLETED, "deposited into a block the plan was not about");
+            if (job.task.state() != TaskState.FAILED) return;
+            helper.assertTrue(job.task.failure() instanceof Failure.TargetGone, "failed as " + job.task.failure());
+            helper.assertTrue(((BarrelBlockEntity) helper.getBlockEntity(chestPos)).isEmpty(), "something is in the barrel");
+            helper.assertTrue(job.body().getInventory().countItem(Items.COBBLESTONE) == 5, "the body's cobblestone changed");
+            helper.assertTrue(memory.containerAt(dimension(helper), helper.absolutePos(chestPos)) == null,
+                "the body still holds a note of the chest: " + memory.containers());
             assertNoMenuOpen(helper, job.body());
             job.run.pass();
         });

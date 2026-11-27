@@ -263,8 +263,12 @@ public final class SnapshotCollector {
         for (BotMemory.SupplyContainer entry : memory.supply()) {
             if (!entry.dimension().equals(dimension) || listed.contains(entry.pos())
                 || (entry.other() != null && listed.contains(entry.other()))) continue;
+            // The owner's word is of a block, as a note is: named and never opened, the container is one the body may
+            // take from only while it still stands as named. A position that is not loaded is not decided against it,
+            // as in the loop above.
             builder.container(new ContainerSight(pos(entry.pos()), entry.other() == null ? null : pos(entry.other()), entry.block(), false,
-                memory.isPlaced(dimension, entry.pos()), true, false, Map.of()));
+                memory.isPlaced(dimension, entry.pos()),
+                SupplyChests.stand(level, entry.pos(), entry) != SupplyChests.Stand.CHANGED, false, Map.of()));
         }
     }
 

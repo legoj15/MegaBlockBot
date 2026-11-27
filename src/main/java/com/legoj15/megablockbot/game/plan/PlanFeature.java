@@ -11,9 +11,10 @@ public final class PlanFeature {
     private PlanFeature() {}
 
     public static void init() {
-        // The crafting source is this feature's own. Other features add theirs (smelting, a mod's machines) with
+        // The crafting source is this feature's own. Other features add theirs (a mod's machines) with
         // RecipeSources.register during their init; the book is built after all of them ran, at server start.
         RecipeSources.register(new CraftingRecipeSource());
+        RecipeSources.register(new CookingRecipeSource());
 
         // Once at server start and after every /reload, after the loader's own data hooks, like the acquisition index.
         Platform.loader().onServerDataLoaded(RecipeBookBuilder::rebuild);

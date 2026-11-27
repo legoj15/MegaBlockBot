@@ -21,6 +21,9 @@ public record RecipeDef(String id, String kind, List<Slot> slots, ItemKey statio
     /** The kind of a recipe run in a crafting grid, the inventory's or a table's. */
     public static final String CRAFT = "craft";
 
+    /** The kind of a recipe run in a furnace, a blast furnace or a smoker, with its fuel beside the ingredient. */
+    public static final String SMELT = "smelt";
+
     public RecipeDef {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(kind, "kind");

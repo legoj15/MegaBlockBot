@@ -796,6 +796,43 @@ public final class SupplyChestGameTests {
         helper.succeed();
     }
 
+    /**
+     * What the snapshot says of a container the owner named and the body has never opened: one the body may take from
+     * while the block that was named stands at the position, and not after another block was put there (design 3.5: the
+     * owner's word is of a block, held to it as a note of what is inside is, {@link SupplyChests#stand}). A position that
+     * is not loaded decides nothing either way, so a named container there is still one to take from until the body can
+     * see it; only what is loaded and differs is taken off the list.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
+    public static void aNamedContainerIsListedAsTakeableOnlyWhileTheBlockNamedStands(GameTestHelper helper) {
+        room(helper, 3);
+        ServerLevel level = helper.getLevel();
+        String dimension = dimension(helper);
+        BlockPos at = helper.absolutePos(CHEST);
+        helper.setBlock(CHEST, Blocks.CHEST);
+        Rig rig = Rig.spawnOwned(helper, "listed", 100);
+        BotMemory memory = BotMemory.of(rig.id());
+        rig.say("use chest at " + at(helper, CHEST));
+        helper.assertTrue(memory.isSupply(dimension, at), "setup: the chest was not named");
+
+        // Named and never opened: the look inside that naming queues has not run, so the contents are unknown, not empty.
+        rig.assertNothingKnownOfTheInside(CHEST);
+
+        helper.setBlock(CHEST, Blocks.BARREL);
+        ContainerSight replaced = SnapshotCollector.collect(rig.body()).containerAt(corePos(at));
+        helper.assertTrue(replaced != null && !replaced.mayTakeFrom(),
+            "a barrel where the owner named a chest is listed as one the body may take from: " + replaced);
+
+        // The command refuses a position that is not loaded, so the entry goes in as the memory holds it.
+        BlockPos far = at.offset(1_000_000, 0, 0);
+        helper.assertTrue(!level.isLoaded(far), "setup: the far position is loaded");
+        memory.addSupply(new BotMemory.SupplyContainer(dimension, far, null, "minecraft:chest"));
+        ContainerSight unseen = SnapshotCollector.collect(rig.body()).containerAt(corePos(far));
+        helper.assertTrue(unseen != null && unseen.mayTakeFrom(),
+            "a named container whose position is not loaded is not listed as one the body may take from: " + unseen);
+        rig.pass();
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------------------------------------

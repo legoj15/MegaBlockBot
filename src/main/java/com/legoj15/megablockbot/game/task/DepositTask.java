@@ -1,5 +1,6 @@
 package com.legoj15.megablockbot.game.task;
 
+import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.goal.Goal;
@@ -9,6 +10,8 @@ import com.legoj15.megablockbot.core.task.TickResult;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BodyInteractionManager;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
+import com.legoj15.megablockbot.game.plan.BotMemory;
+import com.legoj15.megablockbot.game.plan.SupplyChests;
 import com.legoj15.megablockbot.game.safety.Verdict;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
@@ -36,8 +39,10 @@ import net.minecraft.world.phys.Vec3;
  * <p>The goal names the item, the container and its dimension; the {@code count} parameter is how many to move (the
  * goal's count is what the container should end up holding, which may include what it held already).
  *
- * <p>Failures: {@code Unreachable} when the body cannot get to the container, or the container will not open (blocked
- * above, locked, in another dimension); {@code TargetGone} when no container stands at the position;
+ * <p>Failures: {@code Unreachable} when the body cannot get to the container, the container will not open (blocked
+ * above, locked, in another dimension), or its position is not loaded; {@code TargetGone} when no container stands at
+ * the position, or another block stands where the container the goal was judged against was recorded (what the body
+ * holds of it is then dropped, as it is for a withdraw: {@link ContainerTask});
  * {@code Protected} when block safety refuses (a claim, a bed, a job site); {@code MissingInput} when the body does not
  * hold the count. A container with no room takes what it can and the task completes: the postcondition then says what
  * is missing, and judging that is the executor's business.
@@ -162,6 +167,21 @@ final class DepositTask extends BodyTask {
     private TickResult open(BotPlayer body) {
         ServerLevel level = body.serverLevel();
         BlockPos pos = blockPos(containerPos);
+        BotMemory memory = BotMemory.of(body.getUUID());
+        // The container the goal was judged against is the one to put into, so the records of it are held to the block
+        // that stands here, as they are when the body takes items out (ContainerTask). A position nothing is recorded
+        // for stands, and what is there decides, as below.
+        switch (SupplyChests.stand(level, memory, pos)) {
+            case NOT_LOADED -> {
+                // Nothing is known of an unloaded position, so nothing is forgotten: the executor goes there again.
+                return end(body, TickResult.failed(unreachable(containerPos.encode(), "not loaded",
+                    "the position of the container at " + containerPos.encode() + " is not loaded, so I cannot tell what stands there")));
+            }
+            case CHANGED -> {
+                return end(body, TickResult.failed(gone(body, memory, pos)));
+            }
+            case STANDS -> { }
+        }
         BlockEntity entity = level.isLoaded(pos) ? level.getBlockEntity(pos) : null;
         if (!(entity instanceof Container) && !(entity instanceof MenuProvider)) {
             return end(body, TickResult.failed(new Failure.TargetGone("container at " + containerPos.encode(),
@@ -178,6 +198,20 @@ final class DepositTask extends BodyTask {
         openMenu = body.containerMenu;
         phase = Phase.TRANSFERRING;
         return TickResult.RUNNING;
+    }
+
+    /**
+     * What the body holds of this position (the owner's word, the note of what is inside, its claim on the spot) is
+     * dropped: another block stands where the container the goal was counted against was, so the deposit would go into
+     * something the plan never asked about.
+     */
+    private Failure gone(BotPlayer body, BotMemory memory, BlockPos pos) {
+        if (SupplyChests.forget(memory, dimension, pos)) {
+            MegaBlockBot.LOGGER.info("{} found another block where a container was named at {} in {} and no longer puts anything in it",
+                body.getGameProfile().getName(), pos.toShortString(), dimension);
+        }
+        return new Failure.TargetGone("container at " + containerPos.encode(), "another block stands where the container was "
+            + "recorded at " + containerPos.encode() + " in " + dimension);
     }
 
     /** A use-block click on the face of the container that looks toward the body's eyes. */
