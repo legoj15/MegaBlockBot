@@ -1072,15 +1072,20 @@ final class SolverPlannerTest {
     void aNotedOfferThatSatisfiesTheCheckMakesTheTradeAndIsItsPayment() {
         // The body has noted a librarian's window: a mending book for 12 emeralds. The sampled source carries no
         // enchantments of its own, so the note is what makes the trade satisfy the check — and the payment is the
-        // note's charge, not the sample's 30: paying the sample would not buy the book the goal asks for.
+        // note's charge, not the sample's 30: paying the sample would not buy the book the goal asks for. The leaf
+        // names the villager and where it stood, so the task goes back to that one, and no lectern is planned: a
+        // villager that showed the offer already has the profession.
         AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
-        builder.addItem(EMERALD);
+        builder.addItem(EMERALD).addItem(LECTERN);
+        builder.addSource(new Source.MineBlock("mine:minecraft:lectern", LECTERN, "minecraft:lectern",
+                null, ToolTier.HAND, false, false, false, 1.0, false, null));
         builder.addSource(new Source.KillMob("kill:minecraft:witch", EMERALD, "minecraft:witch", false, 1.0, true));
         builder.addSource(new Source.Trade("trade:minecraft:librarian#enchanted_book", ENCHANTED_BOOK,
-                "minecraft:librarian", 1, Map.of(EMERALD, 30), Map.of(), 1.0));
+                "minecraft:librarian", 1, Map.of(EMERALD, 30), Map.of(), 1.0, LECTERN));
         Snapshot.Builder seen = Snapshot.builder().gameTime(0)
                 .dimension("minecraft:overworld").pos(new Pos(0, 64, 0));
-        seen.offer(new NotedOffer(UUID.randomUUID(), new Pos(3, 64, 3), ENCHANTED_BOOK,
+        UUID librarian = UUID.randomUUID();
+        seen.offer(new NotedOffer(librarian, new Pos(3, 64, 3), ENCHANTED_BOOK,
                 new StackFacts(1, Map.of("minecraft:mending", 1), "", Map.of()), Map.of(EMERALD, 12), 0));
         SolverPlanner planner = planner(book(), builder.build());
 
@@ -1089,7 +1094,37 @@ final class SolverPlannerTest {
         NodeSpec trade = leaves(plan).stream().filter(leaf -> leaf.taskKind().equals("trade")).findFirst().orElseThrow();
         assertEquals("minecraft:emerald=12", trade.params().get("cost"));
         assertEquals(12, gathered(plan, EMERALD, "kill"), "the payment is the satisfying note's charge");
+        assertEquals(librarian.toString(), trade.params().get("villager"), "the leaf names the villager whose price it pays");
+        assertEquals(new Pos(3, 64, 3).encode(), trade.params().get("at"));
+        assertEquals(0, gathered(plan, LECTERN, "mine"), "no lectern for a villager that already offers the book");
+        // The plan was made from the note, so a snapshot without it is another input: the plan is not kept for it.
+        Snapshot unseen = Snapshot.builder().gameTime(0).dimension("minecraft:overworld").pos(new Pos(0, 64, 0)).build();
+        assertNotEquals(planner.inputFingerprint(goal, unseen, Exclusions.NONE),
+                planner.inputFingerprint(goal, seen.build(), Exclusions.NONE));
         assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), ENCHANTED_BOOK, 1);
+    }
+
+    @Test
+    void aCheckedGoalAsksTheTradeOnlyForWhatTheStacksThatPassDoNotCover() {
+        // The body holds an enchanted book that is not a mending book. One mending book is asked for: one trade,
+        // paid once, and the leaf's goal is the one book that passes the check, not the two books held after it.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(LECTERN).addItem(EMERALD);
+        builder.addSource(new Source.MineBlock("mine:minecraft:lectern", LECTERN, "minecraft:lectern",
+                null, ToolTier.HAND, false, false, false, 1.0, false, null));
+        builder.addSource(new Source.KillMob("kill:minecraft:witch", EMERALD, "minecraft:witch", false, 1.0, true));
+        builder.addSource(new Source.Trade("trade:minecraft:librarian#enchanted_book", ENCHANTED_BOOK,
+                "minecraft:librarian", 1, Map.of(EMERALD, 20), Map.of("minecraft:mending", 1), 0.1, LECTERN));
+        SolverPlanner planner = planner(book(), builder.build());
+        Snapshot plainBook = Snapshot.builder().gameTime(0).item(ENCHANTED_BOOK, 1)
+                .facts(ENCHANTED_BOOK, StackFacts.plain(1)).build();
+
+        Goal.HaveItem goal = new Goal.HaveItem(ENCHANTED_BOOK, 1, ComponentCheck.enchantment("minecraft:mending", 1));
+        Plan plan = planned(planner, request(goal, plainBook, Exclusions.NONE));
+        NodeSpec trade = leaves(plan).stream().filter(leaf -> leaf.taskKind().equals("trade")).findFirst().orElseThrow();
+        assertEquals(goal, trade.goal(), "the leaf asks for one book that passes the check");
+        assertEquals("1", trade.params().get("count"));
+        assertEquals(20, gathered(plan, EMERALD, "kill"), "one trade is paid for");
     }
 
     @Test

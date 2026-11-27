@@ -189,6 +189,36 @@ public final class TradeGameTests {
     }
 
     /**
+     * The same unemployed villager and lectern, but the body holds no emeralds (set-up): the rolls go on until the
+     * villager offers the bookshelf, and the leaf then ends {@code MissingInput} naming the emeralds — with the
+     * lectern still standing and remembered. The offer is what the rolls were for, and a villager that has not traded
+     * loses it with its job site: taking the lectern up here would throw the offer away before the plan could pay.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = REROLL_TICKS, batch = "trade_arolledofferkeepsitssite")
+    public static void aRolledVillagerThatOffersTheItemKeepsItsJobSiteWhenTheBodyCannotPay(GameTestHelper helper) {
+        room(helper);
+        Rig rig = Rig.spawn(helper, "keeps", REROLL_TICKS);
+        Villager villager = rig.villager(null, null);
+        rig.give(Items.LECTERN, 1);
+        TaskRun run = new TaskRun(tradeTask(null, Items.BOOKSHELF));
+        rig.onEachTick(() -> {
+            if (!run.tick(rig.body())) return;
+            helper.assertTrue(run.failure() instanceof Failure.MissingInput missing
+                    && missing.key().id().equals("minecraft:emerald"), "the trade ended " + run.result);
+            List<BlockPos> lecterns = lecternsIn(helper);
+            helper.assertTrue(lecterns.size() == 1, "expected the lectern to stand, found " + lecterns);
+            helper.assertTrue(villager.getVillagerData().getProfession() == VillagerProfession.LIBRARIAN,
+                "the villager is no librarian any more");
+            if (!lecterns.isEmpty()) {
+                helper.assertTrue(BotMemory.of(rig.id()).isPlaced(helper.getLevel().dimension().location().toString(),
+                    helper.absolutePos(lecterns.get(0))), "the standing lectern is not remembered as the body's");
+            }
+            rig.assertWindowClosed();
+            rig.pass();
+        });
+    }
+
+    /**
      * No villager anywhere near, strict profile: {@code NoSource} naming the item and the source, within a bound. The
      * search is the short one the task takes from its constructor (as a mine or kill task's search is narrowed), so the
      * bound the test waits for is the task's own, not the default search's six rounds.

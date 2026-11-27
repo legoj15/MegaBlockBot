@@ -635,9 +635,16 @@ that undercuts the trade still winning as it always did. The leaf's source id ri
   to the result stack through the same facts the snapshot reads — `SnapshotCollector.factsOf`), the task selects the
   offer the way the client's select-trade packet does (`MerchantMenu.setSelectionHint` then `tryMoveItems`, which moves
   the payment from the inventory into the payment slots) and takes the result out of the result slot (menu slot 2) by a
-  click through `MenuHand`, once per trade, until the inventory holds the goal's count. What the body cannot pay ends
-  the leaf `MissingInput` naming the first missing item and the count the offer charges; an offer that is out of stock
-  ends it `NoProgress` saying so; no room for the result is the no-room failure.
+  click through `MenuHand`, once per trade, until the inventory holds the goal's count. The price is the one the
+  window asks now (`MerchantOffer.getCostA`: the base price with the villager's demand and any discount), which is
+  what is noted and what the body is checked against. A villager whose charge the body cannot pay is passed by while
+  another is still to be looked at; when none is left the leaf ends `MissingInput` with the cheapest charge seen
+  (the first missing item and its count), and no roll is begun for an item somebody already offers. An offer that
+  is out of stock ends it `NoProgress` saying so; no room for the result is the no-room failure.
+- **A noted villager**: a leaf whose price the plan took from a noted offer carries `villager` and `at` (see
+  docs/plan-inputs.md). The task walks back to that place first (`goToXZ`, over once within 24 blocks) and looks at
+  that villager before any other, so the price the plan gathered is the price it is asked. A noted villager that is
+  not in the world when its place is loaded is forgotten (`BotMemory.forgetOffers`).
 - **Rerolling** (a librarian for a book of mending): when no villager within the radius offers the item and the body
   carries the job-site item, the task puts it down within 3 blocks of an adult villager with no profession (not a
   nitwit), at a place found the way a crafting table's place is found (`TableSites`, asked with the job-site block),
@@ -655,15 +662,24 @@ that undercuts the trade still winning as it always did. The leaf's source id ri
   looked at, none offers the item and no job-site item is carried (and none of the body's stands): `MissingInput`
   naming the job-site item, without exploring first — the missing thing is an item, not a villager further away.
 - Nobody within the radius: in the `ASSISTED` profile the game is asked for the nearest village
-  (`findNearestMapStructure` with the village structure tag, within 256 blocks) and the body walks there; in
-  `STRICT_SURVIVAL` it explores for a bounded number of rounds (`TradeTask.Search`, six rounds of 100 ticks by
-  default, as the mine and kill tasks take their search bounds — a test can ask for a short one through the task's
-  constructor). Then `NoSource` with the leaf's item and source. **The profile is a setting**: `/aiplayer profile
-  <name> strict|assisted` (whoever may command the body), saved with the brain; the default stays strict survival.
+  (`findNearestMapStructure` with the village structure tag, within 100 chunks, the locate command's own bound) and
+  the body walks there. The call holds the server thread for a second or two, so it is made once for a goal: the
+  answer rides in the task's checkpoint, and a village with nobody to trade with is not asked for again. After
+  that, and in `STRICT_SURVIVAL` from the start, the task explores for a bounded number of rounds
+  (`TradeTask.Search`, six rounds of 100 ticks by default, as the mine and kill tasks take their search bounds — a
+  test can ask for a short one through the task's constructor). Then `NoSource` with the leaf's item and source.
+  **The profile is a setting**: `/aiplayer profile <name> strict|assisted` (whoever may command the body), saved
+  with the brain; the default stays strict survival.
 - Other villagers' job sites are never touched (only one the body put down itself is taken up), and a villager is never
-  moved, hurt, cured or bred. On every exit the window is closed and the cursor emptied; a job site put down for a
-  villager that has traded stays where it is (the villager needs it to restock) and stays remembered, and one put down
-  for a villager that never traded is taken up again first.
+  moved, hurt, cured or bred. On every exit the window is closed and the cursor emptied. A job site put down for a
+  villager that then showed the offer the goal asks for stays where it is and stays remembered, whether the body
+  could pay at once or not: the offer is what the rolls were for, and a villager that has not traded loses it with
+  its job site (before 2026-11-27 a body that could not pay took the lectern up and threw the offer away). One put
+  down for a villager that never showed the offer is taken up again first, on every exit including the search's own
+  failures. A later task never takes up a job site of this body that a villager who has traded works at (the
+  villager's own `JOB_SITE` memory says which block that is), nor one this task already failed to take up; a second
+  trade of the same profession that needs a roll of its own therefore ends `MissingInput` for the job-site item and
+  the next plan brings one.
 - `progress()` says what it is doing: looking for a villager, looking at offers, the roll it is on, paying.
 
 ## Supply containers, `look_inside` and `withdraw`

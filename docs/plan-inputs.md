@@ -178,11 +178,18 @@ forgets what was noted of the container). `BotMemory.peek(uuid)` reads without m
 malformed parts) and installs it as that body's memory, replacing what was there, which is how a body gets its memory
 back at spawn (`BotRuntime` installs a loaded memory when it first attaches to the body). `StationTask` notes the station it
 places (the craft task's table, the smelt task's furnace, the stonecut task's stonecutter, the smith task's table); the tasks that open a container (`withdraw`, `look_inside`) note what they find in it, and `use chest at` records the
-owner's word. The registry is cleared when the server stops.
-back at spawn (`BotRuntime` installs a loaded memory when it first attaches to the body). `CraftTask` notes the table it
-places; the tasks that open a container (`withdraw`, `look_inside`) note what they find in it, and `use chest at` records the
 owner's word. The trade task notes the offers of every villager whose window it opens (`noteOffers`, one note per
-villager, replaced at each fresh look). The registry is cleared when the server stops.
+villager, replaced at each fresh look; notes older than the snapshot would read, three game days, are dropped as new
+ones come in). The registry is cleared when the server stops.
+
+The snapshot carries a note while its villager may still be there: a villager that is not in the world although the
+place it was noted at is loaded is gone, and its note is withheld; one in chunks that are not loaded is only out of
+sight, and its note stays, so a plan made away from the village still knows the price it went to gather. The planner
+prices a trade by the cheapest note of the item (for a checked goal, the cheapest whose result passes the check) and
+then the trade is a trade with that villager: the leaf carries `villager` (its id) and `at` (where it stood), and no
+job-site item is planned, since a villager that showed the offer has the profession. The notes are part of the plan's
+input fingerprint (villager, result, enchantments, charge; not the time of the look). A checked goal buys only what
+the stacks that pass its check do not cover, and its leaf's count is the count of passing stacks.
 
 ## Job sites
 

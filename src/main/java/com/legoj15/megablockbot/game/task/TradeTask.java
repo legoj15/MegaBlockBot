@@ -2,6 +2,7 @@ package com.legoj15.megablockbot.game.task;
 
 import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.core.ItemKey;
+import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.goal.ComponentCheck;
 import com.legoj15.megablockbot.core.goal.Goal;
 import com.legoj15.megablockbot.core.plan.NodeSpec;
@@ -21,19 +22,26 @@ import com.legoj15.megablockbot.game.safety.Verdict;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.GlobalPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.StructureTags;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.npc.Villager;
 import net.minecraft.world.entity.npc.VillagerData;
@@ -76,9 +84,17 @@ import net.minecraft.world.phys.BlockHitResult;
  * missing thing is an item, not a villager further away.
  *
  * <p>Other villagers' job sites are never touched (only one the body put down itself is taken up), and a villager is
- * never moved, hurt, cured or bred. A job site the task put down for a villager that has now traded stays where it is
- * (the villager needs it to restock) and stays remembered; one put down for a villager that never traded is taken up
- * again on every exit. Whichever way the task ends, the window is closed and the cursor empty.
+ * never moved, hurt, cured or bred. A job site the task put down for a villager that then showed the offer the goal
+ * asks for stays where it is and stays remembered, whether the body could pay at once or not: the offer is what the
+ * rolls were for, and a villager that has not traded loses it with its job site. One put down for a villager that
+ * never showed the offer is taken up again on every exit. A job site of this body that a villager who has traded
+ * works at is never taken up by a later task. Whichever way the task ends, the window is closed and the cursor empty.
+ *
+ * <p><b>A noted villager.</b> A leaf whose price the plan took from a noted offer names that villager and where it
+ * stood ({@code villager}, {@code at}): the task goes there first and looks at that one first, so the price the plan
+ * gathered is the price it is asked. A villager whose charge the body cannot pay does not end the task while another
+ * is still to be looked at; when none is left the cheapest charge seen is the answer ({@code MissingInput}), and no
+ * roll is begun for an item somebody already offers.
  */
 public final class TradeTask extends BodyTask {
     public static final String KIND = "trade";
@@ -105,8 +121,19 @@ public final class TradeTask extends BodyTask {
     static final int MAX_ROLLS = 200;
     /** How often a window that would not open is tried before that villager is skipped for a while. */
     private static final int MAX_OPENS = 3;
-    /** How far the game is asked for the nearest village, in the ASSISTED profile (design 4.5). */
-    private static final int VILLAGE_RADIUS = 256;
+    /**
+     * How far the game is asked for the nearest village, in chunks, in the ASSISTED profile (design 4.5): the bound
+     * the game's own locate command searches to. The call holds the server thread for a second or two, so it is made
+     * once for a goal: the answer rides in the task's checkpoint.
+     */
+    private static final int VILLAGE_RADIUS = 100;
+    /** Within this many blocks, level, of where it was sent (a village, a noted villager's place) the walk there is over. */
+    private static final double ARRIVED_WITHIN = 24.0;
+    /**
+     * Ticks a villager that has just taken the job is tried for its window before the roll gives that villager up:
+     * five seconds, longer than it is busy walking to its new job site, shorter than a night's sleep.
+     */
+    private static final int WINDOW_WAIT_TICKS = 100;
 
     /**
      * How hard the task looks for a villager when none is known: rounds of exploring, each one followed by another
@@ -136,6 +163,12 @@ public final class TradeTask extends BodyTask {
     private final int goalCount;
     private final int moreCount;
     @Nullable private final ItemKey jobSiteKey;
+    /** The villager whose noted offer set the plan's price, and where it stood; null when the plan had no note. */
+    @Nullable private final UUID notedVillager;
+    @Nullable private final Pos notedAt;
+    /** The village an earlier task for this node was told of, and the dimension it was in (a checkpoint's hint). */
+    @Nullable private final Pos hintVillage;
+    private final String hintDimension;
 
     private Item item;
     @Nullable private Item jobSiteItem;
@@ -154,9 +187,33 @@ public final class TradeTask extends BodyTask {
     @Nullable private UUID rolled;
     @Nullable private MerchantMenu menu;
     private int opens;
-    /** The job site this task put down, and whether the villager it was put down for has traded. */
+    /**
+     * The job site this task put down, and whether the villager it was put down for showed the offer the goal asks
+     * for: such a site stays down, paid for now or by a later plan.
+     */
     @Nullable private BlockPos site;
-    private boolean traded;
+    private boolean siteEarned;
+    /** Job sites of this body that this task could not take up: not adopted again, or the task would circle them. */
+    private final Set<BlockPos> leftStanding = new HashSet<>();
+    /** Whether the walk to the noted villager's place was begun, and whether the note was checked on arriving. */
+    private boolean wentToNoted;
+    private boolean notedChecked;
+    /** Whether the game was asked for a village, what it answered, and whether the body has been sent there. */
+    private boolean villageAsked;
+    @Nullable private BlockPos villageAt;
+    private boolean villageVisited;
+    /** Where a walk in the VILLAGE phase is headed, and what to call it in a failure. */
+    @Nullable private BlockPos walkTo;
+    private String walkToName = "the village";
+    /** The cheapest charge a villager asked that the body could not pay, and its total: the answer when nobody is left. */
+    @Nullable private Failure.MissingInput shortfall;
+    private int shortfallTotal;
+    private int windowTicks;
+    /**
+     * Villagers that took the job and then would not open their window: not rolled again by this task. Not the
+     * same as {@link #skipped}: an unemployed villager's window never opens, and that one is exactly who is rolled.
+     */
+    private final Set<UUID> unrollable = new HashSet<>();
     private int rolls;
     private int phaseTicks;
     private int exploreRounds;
@@ -182,6 +239,30 @@ public final class TradeTask extends BodyTask {
         this.moreCount = intParam(leaf.params(), "count", 1);
         String siteText = leaf.params().get("jobSite");
         this.jobSiteKey = siteText == null || siteText.isBlank() ? null : ItemKey.of(siteText);
+        this.notedVillager = uuidOf(leaf.params().get("villager"));
+        this.notedAt = posOf(leaf.params().get("at"));
+        this.hintVillage = posOf(hints.get("village"));
+        this.hintDimension = hints.getOrDefault("dim", "");
+    }
+
+    @Nullable
+    private static UUID uuidOf(@Nullable String text) {
+        if (text == null || text.isBlank()) return null;
+        try {
+            return UUID.fromString(text);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    @Nullable
+    private static Pos posOf(@Nullable String text) {
+        if (text == null || text.isBlank()) return null;
+        try {
+            return Pos.parse(text);
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -200,6 +281,11 @@ public final class TradeTask extends BodyTask {
             jobSiteItem = itemOf(jobSiteKey);
             if (jobSiteItem instanceof BlockItem blockItem) jobSiteBlock = blockItem.getBlock();
         }
+        if (hintVillage != null && hintDimension.equals(dimension)) {
+            // The game was asked once for this goal already: its answer is taken, not asked for again.
+            villageAsked = true;
+            villageAt = blockPos(hintVillage);
+        }
         int held = held(body);
         target = goalCount > 0 ? goalCount : held + Math.max(1, moreCount);
         if (held >= target) alreadyDone = true; // nothing to do, and nothing is touched: the first tick says so
@@ -210,8 +296,15 @@ public final class TradeTask extends BodyTask {
         // A resumed task looks again from the top with what it has noted: the villager may be gone, its window was
         // closed by the pause, and the count the body holds is counted anew. A villager mid-roll is kept — the roll
         // goes on with it (checked against the world) rather than starting over at another.
-        if (rolled == null) villager = null;
-        phase = site != null ? Phase.WAITING_JOB : Phase.LOOKING;
+        // A payment that was under way goes on with its villager, and so does a villager whose job site stands: to
+        // drop either would leave the site this task put down standing with nobody to answer for it.
+        boolean paying = phase == Phase.TRADING && villager != null && villager.isAlive() && offerIndex >= 0;
+        if (rolled == null && site == null && !paying) villager = null;
+        menu = null;
+        opens = 0;
+        windowTicks = 0;
+        phaseTicks = 0;
+        phase = paying ? Phase.TRADING : site != null ? Phase.WAITING_JOB : Phase.LOOKING;
     }
 
     private int held(BotPlayer body) {
@@ -259,6 +352,30 @@ public final class TradeTask extends BodyTask {
 
     /** Finds a villager to talk to: one of the leaf's profession first, then one to make take the job. */
     private TickResult look(BotPlayer body) {
+        if (notedVillager != null && notedAt != null) {
+            Entity known = body.serverLevel().getEntity(notedVillager);
+            boolean here = known != null && known.isAlive()
+                && known.distanceToSqr(body) <= SEARCH_RADIUS * SEARCH_RADIUS;
+            if (!wentToNoted) {
+                wentToNoted = true;
+                if (!here) {
+                    // The plan gathered this villager's price: the body goes back to it before it looks at anyone.
+                    BlockPos at = known != null && known.isAlive() ? known.blockPosition() : blockPos(notedAt);
+                    MegaBlockBot.LOGGER.info("{} walks back to the {} it noted at {}", body.getGameProfile().getName(),
+                        profession, at.toShortString());
+                    return walkToward(body, at, "the villager whose offer was noted");
+                }
+            }
+            if (!notedChecked) {
+                notedChecked = true;
+                if (known == null && body.serverLevel().isLoaded(blockPos(notedAt))) {
+                    // The place is loaded and the villager is not in the world: the note is of nobody.
+                    MegaBlockBot.LOGGER.info("{}: the {} noted at {} is gone; its offers are forgotten",
+                        body.getGameProfile().getName(), profession, blockPos(notedAt).toShortString());
+                    BotMemory.of(body.getUUID()).forgetOffers(notedVillager);
+                }
+            }
+        }
         List<Villager> candidates = villagers(body);
         for (Villager candidate : candidates) {
             if (skipped.containsKey(candidate.getUUID()) || inspected.contains(candidate.getUUID())) continue;
@@ -270,7 +387,10 @@ public final class TradeTask extends BodyTask {
             phaseTicks = 0;
             return TickResult.RUNNING;
         }
-        // Nobody's window is left to look at. A reroll needs the job-site item in hand and a villager to take the job.
+        // Nobody's window is left to look at. Somebody offered the item and asked more than the body carries: that
+        // is the answer, and the next plan brings the price. No roll is begun for an item a villager already offers.
+        if (shortfall != null) return tidy(body, TickResult.failed(shortfall));
+        // A reroll needs the job-site item in hand and a villager to take the job.
         if (jobSiteBlock != null && jobSiteItem != null && MenuHand.carriedCount(body, jobSiteItem) >= 1) {
             Villager unemployed = rerollee(body, candidates);
             if (unemployed != null) {
@@ -311,6 +431,7 @@ public final class TradeTask extends BodyTask {
         for (BlockPos at : BotMemory.of(body.getUUID()).placedIn(dimension)) {
             if (!body.serverLevel().isLoaded(at)) continue; // a read never loads a chunk
             if (!body.serverLevel().getBlockState(at).is(jobSiteBlock)) continue;
+            if (leftStanding.contains(at) || keptByATrader(body.serverLevel(), at)) continue;
             double distance = at.distSqr(body.blockPosition());
             if (distance < nearestDistance) {
                 nearestDistance = distance;
@@ -320,7 +441,25 @@ public final class TradeTask extends BodyTask {
         return nearest;
     }
 
-    /** The adult villagers within the radius, of the leaf's profession first, then the rest, nearest first. */
+    /**
+     * Whether a villager that has traded works at this job site. Such a site stays: the villager restocks at it, and
+     * the trades it has made are why it was put down. The villager's own brain says which block is its job site.
+     */
+    private static boolean keptByATrader(ServerLevel level, BlockPos at) {
+        AABB box = new AABB(at).inflate(SEARCH_RADIUS);
+        for (Villager worker : level.getEntitiesOfClass(Villager.class, box, Villager::isAlive)) {
+            if (worker.getVillagerXp() <= 0) continue;
+            if (!worker.getBrain().hasMemoryValue(MemoryModuleType.JOB_SITE)) continue;
+            Optional<GlobalPos> job = worker.getBrain().getMemory(MemoryModuleType.JOB_SITE);
+            if (job.isPresent() && job.get().pos().equals(at)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * The adult villagers within the radius: the one the plan's price was noted at first, then those of the leaf's
+     * profession, then the rest, nearest first.
+     */
     private List<Villager> villagers(BotPlayer body) {
         List<Villager> ofProfession = new ArrayList<>();
         List<Villager> all = new ArrayList<>();
@@ -333,7 +472,11 @@ public final class TradeTask extends BodyTask {
         Comparator<Villager> near = Comparator.comparingDouble(v -> v.distanceToSqr(body));
         ofProfession.sort(near);
         all.sort(near);
-        List<Villager> ordered = new ArrayList<>(ofProfession);
+        List<Villager> ordered = new ArrayList<>();
+        for (Villager candidate : all) {
+            if (candidate.getUUID().equals(notedVillager)) ordered.add(candidate);
+        }
+        ordered.addAll(ofProfession);
         ordered.addAll(all);
         return ordered;
     }
@@ -342,6 +485,9 @@ public final class TradeTask extends BodyTask {
     @Nullable
     private Villager rerollee(BotPlayer body, List<Villager> candidates) {
         for (Villager candidate : candidates) {
+            // One that has traded keeps its offers whatever job it takes, and one whose window would not open is
+            // not asked again by this task: neither is a villager to roll.
+            if (candidate.getVillagerXp() > 0 || unrollable.contains(candidate.getUUID())) continue;
             if (professionOf(candidate).equals("minecraft:none")) return candidate; // takes the first job it finds
         }
         // One of the leaf's profession that has never traded can be rerolled too: the villager this task is already
@@ -362,24 +508,26 @@ public final class TradeTask extends BodyTask {
     /** No villager is known: look further, by the profile's means, or say there is none. */
     private TickResult noneKnown(BotPlayer body) {
         BotRuntime runtime = BotRuntime.of(body);
-        if (runtime != null && runtime.profile() == Profile.ASSISTED) {
-            ServerLevel level = body.serverLevel();
+        if (runtime != null && runtime.profile() == Profile.ASSISTED && !villageAsked) {
             // The game's own locate, as a player's map or a command gives it (design 4.5): the nearest village.
-            BlockPos found = level.findNearestMapStructure(StructureTags.VILLAGE, body.blockPosition(), VILLAGE_RADIUS, false);
-            if (found != null) {
-                BlockPos at = found;
-                MegaBlockBot.LOGGER.info("{} walks to the village at {} to look for a {}",
-                    body.getGameProfile().getName(), at.toShortString(), profession);
-                nav(body).goTo(at, 16);
-                phase = Phase.VILLAGE;
-                return TickResult.RUNNING;
+            // Asked once: the call holds the server thread, and a village with nobody to trade with is still the
+            // nearest the next time.
+            villageAsked = true;
+            villageAt = body.serverLevel().findNearestMapStructure(StructureTags.VILLAGE, body.blockPosition(),
+                VILLAGE_RADIUS, false);
+        }
+        if (villageAt != null && !villageVisited) {
+            villageVisited = true;
+            if (!arrivedAt(body, villageAt)) {
+                MegaBlockBot.LOGGER.info("{} walks to the village at {} {} to look for a {}",
+                    body.getGameProfile().getName(), villageAt.getX(), villageAt.getZ(), profession);
+                return walkToward(body, villageAt, "the village");
             }
         }
         if (++exploreRounds > search.exploreRounds()) {
-            release(body);
-            return TickResult.failed(new Failure.NoSource(itemKey, sourceId,
+            return tidy(body, TickResult.failed(new Failure.NoSource(itemKey, sourceId,
                 "found no villager to get " + itemKey.id() + " from within " + (int) SEARCH_RADIUS + " blocks in "
-                    + search.exploreRounds() + " looks"));
+                    + search.exploreRounds() + " looks")));
         }
         nav(body).explore(body.blockPosition());
         phase = Phase.EXPLORING;
@@ -387,8 +535,33 @@ public final class TradeTask extends BodyTask {
         return TickResult.RUNNING;
     }
 
+    /**
+     * Sends the body to a place known only by its column: the game's locate answers with no height, and a villager
+     * noted long ago has walked. The walk is over once the body is near (see {@link #village}).
+     */
+    private TickResult walkToward(BotPlayer body, BlockPos at, String name) {
+        walkTo = at;
+        walkToName = name;
+        nav(body).goToXZ(at.getX(), at.getZ());
+        phase = Phase.VILLAGE;
+        phaseTicks = 0;
+        return TickResult.RUNNING;
+    }
+
+    private static boolean arrivedAt(BotPlayer body, BlockPos at) {
+        double dx = body.getX() - (at.getX() + 0.5);
+        double dz = body.getZ() - (at.getZ() + 0.5);
+        return dx * dx + dz * dz <= ARRIVED_WITHIN * ARRIVED_WITHIN;
+    }
+
     private TickResult village(BotPlayer body) {
         BotNavigator nav = nav(body);
+        // Near enough to look: the exact column may be a roof or a well, and nothing is to be done at it.
+        if (walkTo == null || arrivedAt(body, walkTo)) {
+            stopOurCommand(nav);
+            phase = Phase.LOOKING;
+            return TickResult.RUNNING;
+        }
         switch (nav.state()) {
             case DONE, IDLE -> {
                 phase = Phase.LOOKING;
@@ -396,9 +569,8 @@ public final class TradeTask extends BodyTask {
             }
             case FAILED -> {
                 String reason = nav.failure();
-                release(body);
-                return TickResult.failed(unreachable("the village", reason,
-                    "could not walk to the village to look for a " + profession + ": " + reason));
+                return tidy(body, TickResult.failed(unreachable(walkToName, reason,
+                    "could not walk to " + walkToName + " to look for a " + profession + ": " + reason)));
             }
             default -> { return TickResult.RUNNING; }
         }
@@ -408,7 +580,7 @@ public final class TradeTask extends BodyTask {
         BotNavigator nav = nav(body);
         if (nav.state() == BotNavigator.State.FAILED) {
             TickResult notTheSource = exploreFailure(body, nav, "a villager");
-            if (notTheSource != null) return notTheSource;
+            if (notTheSource != null) return tidy(body, notTheSource);
             // Nowhere unexplored to walk: this round is spent; another look follows, to the search's own bound.
         } else if (nav.state() == BotNavigator.State.WORKING && phaseTicks < search.exploreStepTicks()) {
             return TickResult.RUNNING;
@@ -508,9 +680,7 @@ public final class TradeTask extends BodyTask {
         for (MerchantOffer offer : open.getOffers()) {
             ItemStack result = offer.getResult();
             if (result.isEmpty()) continue;
-            Map<ItemKey, Integer> charge = new TreeMap<>();
-            addCost(charge, offer.getBaseCostA());
-            addCost(charge, offer.getCostB());
+            Map<ItemKey, Integer> charge = chargesOf(offer);
             offers.add(new NotedOffer(who.getUUID(), corePos(who.blockPosition()), ItemKeys.of(result.getItem()),
                 SnapshotCollector.factsOf(result), charge, body.level().getGameTime()));
             if (what.length() > 0) what.append(", ");
@@ -557,15 +727,35 @@ public final class TradeTask extends BodyTask {
     /** At a villager whose window offered the item: end now when the body cannot pay; otherwise pay and take. */
     private TickResult pay(BotPlayer body, Villager who, int index) {
         MerchantOffer offer = who.getOffers().get(index);
+        // The villager this task gave the job shows the offer the rolls were for: its site stays down from here on,
+        // whether the body can pay now or a later plan brings the price.
+        boolean ours = site != null;
+        if (ours) siteEarned = true;
+        int total = 0;
+        Failure.MissingInput missing = null;
         for (Map.Entry<ItemKey, Integer> charge : chargesOf(offer).entrySet()) {
             Item charged = itemOf(charge.getKey());
             int carries = charged == null ? 0 : MenuHand.carriedCount(body, charged);
-            if (carries < charge.getValue()) {
-                // The body cannot pay: the next plan has the noted price, and gathers what is missing first.
-                return tidy(body, TickResult.failed(new Failure.MissingInput(charge.getKey(), charge.getValue(),
-                    "the " + profession + " charges " + charge.getValue() + " " + charge.getKey().id()
-                        + " for " + itemKey.id() + " and the body carries " + carries)));
+            total += charge.getValue();
+            if (carries < charge.getValue() && missing == null) {
+                missing = new Failure.MissingInput(charge.getKey(), charge.getValue(),
+                    "the " + profession + " at " + who.blockPosition().toShortString() + " charges "
+                        + charge.getValue() + " " + charge.getKey().id() + " for " + itemKey.id()
+                        + " and the body carries " + carries);
             }
+        }
+        if (missing != null) {
+            // The body cannot pay. The price is noted, so the next plan gathers it and names this villager.
+            MegaBlockBot.LOGGER.info("{}: cannot pay: {}", body.getGameProfile().getName(), missing.detail());
+            if (shortfall == null || total < shortfallTotal) {
+                shortfall = missing;
+                shortfallTotal = total;
+            }
+            if (ours) return tidy(body, TickResult.failed(shortfall));
+            // Another villager may ask less: this one is passed by, and its charge is the answer if nobody does.
+            villager = null;
+            phase = Phase.LOOKING;
+            return TickResult.RUNNING;
         }
         villager = who;
         rolled = null; // a trade begun is not a roll any more: its site stays down and the villager keeps its job
@@ -620,7 +810,6 @@ public final class TradeTask extends BodyTask {
         MenuHand hand = new MenuHand(body, menu);
         hand.click(RESULT_SLOT, 0, ClickType.PICKUP);
         hand.putBack();
-        traded = true;
         if (held(body) <= before) {
             // A take that brought nothing in (the game refused it): a few more, then the step is given up.
             if (++takeTicks > MAX_OPENS) {
@@ -633,10 +822,14 @@ public final class TradeTask extends BodyTask {
         return TickResult.RUNNING;
     }
 
-    /** What one use of the offer charges, by item: the game's own stacks, merged. */
+    /**
+     * What one use of the offer charges now, by item: the game's own stacks, merged. The first is the price the
+     * window moves into the payment slot (the base price with the villager's demand and any discount applied), which
+     * is what the body must carry; the base price alone is not what is asked after a few trades.
+     */
     private static Map<ItemKey, Integer> chargesOf(MerchantOffer offer) {
         Map<ItemKey, Integer> charge = new TreeMap<>();
-        addCost(charge, offer.getBaseCostA());
+        addCost(charge, offer.getCostA());
         addCost(charge, offer.getCostB());
         return charge;
     }
@@ -734,12 +927,21 @@ public final class TradeTask extends BodyTask {
     /** Waits for the villager to take the profession of the job site; visible on it. Then its window says the offers. */
     private TickResult waitForJob(BotPlayer body) {
         Villager who = villager;
-        if (who == null || !who.isAlive() || site == null
-            || !body.serverLevel().getBlockState(site).is(jobSiteBlock)) {
-            // The site is gone, or the villager with it. A look from the top finds the villager again (it keeps its
-            // place in the roll until it trades) and a site of this kind that still stands, and takes the roll on.
-            if (site != null) forgetSite(body);
+        if (site == null) {
             phase = Phase.LOOKING;
+            return TickResult.RUNNING;
+        }
+        if (!body.serverLevel().getBlockState(site).is(jobSiteBlock)) {
+            // The site is gone: there is nothing of it to remember. A look from the top finds the villager again (it
+            // keeps its place in the roll until it trades) and takes the roll on.
+            forgetSite(body);
+            phase = Phase.LOOKING;
+            return TickResult.RUNNING;
+        }
+        if (who == null || !who.isAlive()) {
+            // The villager is gone and the site stands: it comes up, as it does after any roll that found nothing.
+            phase = Phase.TAKING_SITE;
+            phaseTicks = 0;
             return TickResult.RUNNING;
         }
         if (!professionOf(who).equals(profession)) {
@@ -762,8 +964,22 @@ public final class TradeTask extends BodyTask {
                 return TickResult.RUNNING;
             }
             body.interactOn(who, InteractionHand.MAIN_HAND);
-            if (!(body.containerMenu instanceof MerchantMenu open)) return TickResult.RUNNING;
+            if (!(body.containerMenu instanceof MerchantMenu open)) {
+                if (++windowTicks > WINDOW_WAIT_TICKS) {
+                    // Its window will not open (asleep, trading with someone else): the roll ends, the site comes
+                    // up, and this villager is not rolled again by this task.
+                    MegaBlockBot.LOGGER.info("{}: the {} at {} would not open its window in {} ticks; the roll ends",
+                        body.getGameProfile().getName(), profession, who.blockPosition().toShortString(),
+                        WINDOW_WAIT_TICKS);
+                    unrollable.add(who.getUUID());
+                    windowTicks = 0;
+                    phase = Phase.TAKING_SITE;
+                    phaseTicks = 0;
+                }
+                return TickResult.RUNNING;
+            }
             menu = open;
+            windowTicks = 0;
         }
         note(body, who);
         int offer = offerFor(who);
@@ -780,6 +996,7 @@ public final class TradeTask extends BodyTask {
             phase = Phase.WAITING_RESET;
             phaseTicks = 0;
         } else if (phaseTicks > PROFESSION_WAIT_TICKS) {
+            leftStanding.add(site);
             site = null; // the break never finished; it stands on, remembered, and the roll ends here
             phase = Phase.WAITING_RESET;
             phaseTicks = 0;
@@ -803,6 +1020,7 @@ public final class TradeTask extends BodyTask {
         if (phaseTicks > bound) {
             MegaBlockBot.LOGGER.info("{} stops breaking the {} at {} and leaves it standing",
                 body.getGameProfile().getName(), jobSiteKey.id(), site.toShortString());
+            leftStanding.add(site);
             site = null;
             return true;
         }
@@ -813,13 +1031,15 @@ public final class TradeTask extends BodyTask {
         }
         Verdict verdict = BlockSafety.of(level.getServer()).mayBreak(body, level, site, state);
         if (!verdict.allowed()) {
+            leftStanding.add(site);
             site = null; // not the body's to break after all: leave it, remembered, and end the roll
             return true;
         }
         BodyInteractionManager hand = (BodyInteractionManager) body.getInteractionManager();
         if (!hand.isMining()) {
             if (MenuHand.roomFor(body, new ItemStack(jobSiteItem)) == 0) {
-                site = null; // would only be dropped and lost; the tidy step takes it up once there is room
+                leftStanding.add(site);
+                site = null; // would only be dropped and lost: it stays, remembered, for a task with room for it
                 return true;
             }
             StationTask.selectBreakingTool(body, state);
@@ -850,10 +1070,17 @@ public final class TradeTask extends BodyTask {
         Villager who = villager;
         String still = who == null || !who.isAlive() ? "minecraft:none" : professionOf(who);
         boolean reset = still.equals("minecraft:none") || still.equals("minecraft:nitwit");
-        boolean pickedUp = jobSiteItem == null || MenuHand.carriedCount(body, jobSiteItem) >= 1 || traded;
+        boolean pickedUp = jobSiteItem == null || MenuHand.carriedCount(body, jobSiteItem) >= 1 || siteEarned;
         // The item of the broken site may lie out of reach: walk to it, as the body walks to any drop.
         if (!pickedUp && phaseTicks > 20) walkToSiteDrop(body);
-        if (reset && pickedUp) return roll(body);
+        if (reset && pickedUp) {
+            if (who != null && unrollable.contains(who.getUUID())) {
+                rolled = null;
+                villager = null;
+                return look(body);
+            }
+            return roll(body);
+        }
         if (phaseTicks <= PROFESSION_WAIT_TICKS) return TickResult.RUNNING;
         // The profession did not go, or the item did not come in: the roll waits no longer than its own bound.
         MegaBlockBot.LOGGER.info("{}: gives up rolling the {} (its profession is still {}, and the site's item {}) after"
@@ -903,13 +1130,13 @@ public final class TradeTask extends BodyTask {
     // ---------------------------------------------------------------------------------------------------------
 
     /**
-     * Every exit goes through here. A job site the task put down for a villager that has now traded stays where it is
-     * (the villager needs it to restock) and stays remembered; one put down for a villager that never traded is taken
-     * up again before the task's answer is given.
+     * Every exit goes through here. A job site the task put down for a villager that showed the offer the goal asks
+     * for stays where it is and stays remembered (the villager keeps the offer only while it keeps the job); one put
+     * down for a villager that never showed it is taken up again before the task's answer is given.
      */
     private TickResult tidy(BotPlayer body, TickResult answer) {
         close(body);
-        if (site != null && !traded) {
+        if (site != null && !siteEarned) {
             pending = answer; // the answer waits until the site is up
             phase = Phase.TIDYING;
             phaseTicks = 0;
@@ -946,6 +1173,20 @@ public final class TradeTask extends BodyTask {
         body.input().reset();
     }
 
+    /**
+     * The village the game answered with, so a task that takes this node up again does not ask a second time (the
+     * call holds the server thread). A hint only: the next task walks there and looks for itself.
+     */
+    @Override
+    public Map<String, String> checkpoint() {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (villageAt != null) {
+            out.put("dim", dimension);
+            out.put("village", corePos(villageAt).encode());
+        }
+        return out;
+    }
+
     /** What the task is doing now, for the status line. */
     @Override
     public String progress() {
@@ -960,7 +1201,7 @@ public final class TradeTask extends BodyTask {
                 + itemKey.id().replace("minecraft:", "");
             case PLACING, WAITING_JOB, TAKING_SITE, WAITING_RESET -> "rerolling a "
                 + profession.replace("minecraft:", "") + " (roll " + rolls + " of " + MAX_ROLLS + ")";
-            case VILLAGE -> "walking to a village";
+            case VILLAGE -> "walking to " + walkToName;
             case EXPLORING -> "exploring for a villager";
             case TIDYING -> "taking up the job site it put down";
         };

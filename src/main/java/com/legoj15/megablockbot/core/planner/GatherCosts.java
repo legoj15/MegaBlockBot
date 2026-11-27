@@ -261,6 +261,10 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
      */
     private long jobSiteCost(Source.Trade trade) {
         if (paymentPrice == null || trade.jobSite() == null || snapshot.count(trade.jobSite()) > 0) return 0;
+        // A villager the body has seen offer the item has the profession: the plan asks for no job site then.
+        for (NotedOffer offer : snapshot.offers()) {
+            if (offer.result().equals(trade.item())) return 0;
+        }
         return paymentPrice.applyAsLong(trade.jobSite());
     }
 

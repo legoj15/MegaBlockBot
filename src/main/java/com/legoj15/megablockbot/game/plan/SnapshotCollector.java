@@ -129,7 +129,10 @@ public final class SnapshotCollector {
         long now = level.getGameTime();
         for (BotMemory.VillagerOffers noted : memory.notedOffers()) {
             if (!noted.dimension().equals(dimension)) continue;
-            if (level.getEntity(noted.villager()) == null) continue; // the villager is gone
+            // Gone means not in the world where it was noted and that place is loaded. A villager in chunks that
+            // are not loaded is only out of sight: its note stays, or a plan made away from the village would
+            // forget the price it went to gather and the villager it means to pay.
+            if (level.getEntity(noted.villager()) == null && level.isLoaded(noted.pos())) continue;
             for (NotedOffer offer : noted.offers()) {
                 if (now - offer.gameTime() > OFFER_AGE_TICKS) continue;
                 builder.offer(offer);

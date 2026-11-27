@@ -824,28 +824,37 @@ public final class SolverPlanner implements Planner {
          * executor verifies when the leaf ends. On a failure the stock may be part way: the caller restores it.
          */
         private Step planSource(ItemKey item, long demand, Source source) {
-            return planSource(item, demand, source, null);
+            return planSource(item, demand, source, null, -1);
         }
 
         /**
          * As above, for a goal whose component check the trade's result must satisfy: the leaf carries the check, and
          * the payment is the charge of a noted offer that satisfies it — a real villager's price for exactly that
          * book — not the cheapest note of the item, which may be another book's price. {@code check} is null for a
-         * goal without one.
+         * goal without one. {@code checkedTarget} is the leaf's count for a checked goal: how many stacks that pass
+         * the check the body is to hold, which the working stock cannot say (it counts every stack of the item).
+         *
+         * <p>A trade priced by a noted offer is a trade with that villager: the leaf names it and where it stood,
+         * so the task goes back to the one whose price the plan gathered, and no job-site item is planned for it —
+         * a villager that showed the offer has the profession already.
          */
-        private Step planSource(ItemKey item, long demand, Source source, ComponentCheck check) {
+        private Step planSource(ItemKey item, long demand, Source source, ComponentCheck check, int checkedTarget) {
             List<NodeSpec> nodes = new ArrayList<>();
             Step tool = prerequisite(source);
             if (tool.failure() != null) return tool;
             nodes.addAll(tool.nodes());
             Map<ItemKey, Integer> charged = Map.of();
+            NotedOffer noted = null;
             if (source instanceof Source.Trade trade) {
-                // The lectern that makes a librarian where none stands: planned and held like a rod is, and paid for
-                // first, since no payment matters without a villager of the profession to pay it to.
-                Step site = jobSite(item, trade);
-                if (site.failure() != null) return site;
-                nodes.addAll(site.nodes());
-                charged = check == null ? costs.chargedFor(trade) : checkedCharge(trade, check);
+                noted = notedFor(trade, check);
+                if (noted == null) {
+                    // The lectern that makes a librarian where none stands: planned and held like a rod is, and paid
+                    // for first, since no payment matters without a villager of the profession to pay it to.
+                    Step site = jobSite(item, trade);
+                    if (site.failure() != null) return site;
+                    nodes.addAll(site.nodes());
+                }
+                charged = noted == null ? trade.cost() : noted.charge();
                 Step payment = payment(item, trade, charged, demand);
                 if (payment.failure() != null) return payment;
                 nodes.addAll(payment.nodes());
@@ -854,12 +863,16 @@ public final class SolverPlanner implements Planner {
                 }
             }
             addStock(item, demand);
-            long absolute = held(item);
+            long absolute = check == null ? held(item) : checkedTarget;
             if (absolute > Integer.MAX_VALUE) {
                 return Step.fail(internal("the demand for " + item.id() + " exceeds what a goal can count"));
             }
-            nodes.add(NodeSpec.leaf(new Goal.HaveItem(item, (int) absolute, check), taskKind(source),
-                    gatherParams(source, demand, charged), source.id()));
+            Map<String, String> params = gatherParams(source, demand, charged);
+            if (noted != null) {
+                params.put("villager", noted.villager().toString());
+                params.put("at", noted.pos().encode());
+            }
+            nodes.add(NodeSpec.leaf(new Goal.HaveItem(item, (int) absolute, check), taskKind(source), params, source.id()));
             return Step.ok(nodes);
         }
 
@@ -1059,17 +1072,23 @@ public final class SolverPlanner implements Planner {
             State afterTrade = null;
             long tradeCost = CostModel.UNOBTAINABLE;
             Failure tradeFailure = null;
+            // Only what the stacks that pass the check do not cover is bought: a book that fails the check is in
+            // the stock and is no part of the goal.
+            long shortBy = have.count() - checked(have);
             for (Source source : costs.ranked(have.key())) {
                 if (!(source instanceof Source.Trade candidate) || !satisfiesCheck(candidate, have.check())) continue;
-                Step planned = planSource(have.key(), have.count(), source, have.check());
+                Step planned = planSource(have.key(), shortBy, source, have.check(), have.count());
                 if (planned.failure() == null) {
                     // The sources are in cost order, so the first satisfying trade that can be paid for is the cheapest.
                     trade = planned;
                     afterTrade = mark();
-                    if (!strategies.isEmpty()) tradeCost = gatherTotal(source, have.count(), false);
+                    if (!strategies.isEmpty()) tradeCost = gatherTotal(source, shortBy, false);
                     break;
                 }
                 if (tradeFailure == null) tradeFailure = planned.failure();
+                // A candidate that failed part way (its lectern planned, its payment not) leaves nothing behind
+                // for the next one to rely on.
+                restore(base);
             }
             restore(base);
             Candidate winner = null;
@@ -1109,18 +1128,21 @@ public final class SolverPlanner implements Planner {
         }
 
         /**
-         * What one use of the trade charges when the goal's check must be satisfied: the cheapest noted offer whose
-         * result satisfies it, else the index's sample — a note of the item that fails the check is another book's
-         * price, and paying it would not buy the book the goal asks for.
+         * The noted offer that prices one use of the trade, or null when the body has noted none (the index's
+         * sample prices it then): the cheapest offer of the item and, for a checked goal, only one whose result
+         * satisfies the check — a note of the item that fails it is another book's price, and paying it would not
+         * buy the book the goal asks for. The cost model picks by the same order ({@code GatherCosts.chargedFor}).
          */
-        private Map<ItemKey, Integer> checkedCharge(Source.Trade trade, ComponentCheck check) {
+        private NotedOffer notedFor(Source.Trade trade, ComponentCheck check) {
             List<NotedOffer> seen = new ArrayList<>();
             for (NotedOffer offer : snapshot.offers()) {
-                if (offer.result().equals(trade.item()) && check.test(offer.facts())) seen.add(offer);
+                if (!offer.result().equals(trade.item())) continue;
+                if (check == null || check.test(offer.facts())) seen.add(offer);
             }
-            if (seen.isEmpty()) return trade.cost();
-            seen.sort(Comparator.comparingLong(SolverPlanner::totalCharge).thenComparing(offer -> offer.charge().toString()));
-            return seen.get(0).charge();
+            if (seen.isEmpty()) return null;
+            seen.sort(Comparator.comparingLong(SolverPlanner::totalCharge).thenComparing(offer -> offer.charge().toString())
+                    .thenComparing(offer -> offer.villager().toString()));
+            return seen.get(0);
         }
 
         /** How many units of the goal's item sit in stacks that pass its check (Postconditions' own count). */
@@ -1634,6 +1656,18 @@ public final class SolverPlanner implements Planner {
             if (count > 0) text.append(item.id()).append(':').append(count).append(',');
         }
         text.append(sightText(snapshot, everything ? null : read));
+        if (!snapshot.offers().isEmpty()) {
+            // A trade is priced by a noted offer and sent to the villager that made it, so a plan made from one set
+            // of notes is not the plan for another. When the window was looked at is no part of it: the same
+            // offers seen again are the same input.
+            List<String> offers = new ArrayList<>();
+            for (NotedOffer offer : snapshot.offers()) {
+                offers.add(offer.villager() + "|" + offer.result().id() + "|" + new TreeMap<>(offer.facts().enchantments())
+                        + "|" + new TreeMap<>(offer.charge()));
+            }
+            Collections.sort(offers);
+            text.append(";offers=").append(offers);
+        }
         if (goal instanceof Goal.HaveItem have && have.check() != null) {
             // A checked goal is decided on the facts of the stacks held (which enchantments the book carries), which
             // the item counts above do not say.

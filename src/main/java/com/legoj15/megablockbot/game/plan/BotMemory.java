@@ -279,7 +279,20 @@ public final class BotMemory {
      * per villager, not per window: opening the same one again is a fresh look, not a second opinion.
      */
     public void noteOffers(String dimension, UUID villager, BlockPos pos, List<NotedOffer> offers) {
+        // What is older than the snapshot would read is dropped as new notes come in, so a body that trades in
+        // many villages does not carry, and save, every window it ever opened.
+        long newest = Long.MIN_VALUE;
+        for (NotedOffer offer : offers) newest = Math.max(newest, offer.gameTime());
+        if (newest != Long.MIN_VALUE) {
+            long oldestKept = newest - SnapshotCollector.OFFER_AGE_TICKS;
+            villagerOffers.values().removeIf(old -> old.offers().stream().allMatch(offer -> offer.gameTime() < oldestKept));
+        }
         villagerOffers.put(villager, new VillagerOffers(dimension, villager, pos, offers));
+    }
+
+    /** Drops what was noted of a villager that is no longer in the world. */
+    public void forgetOffers(UUID villager) {
+        villagerOffers.remove(villager);
     }
 
     /** Everything remembered, in the order it was first noted. */
