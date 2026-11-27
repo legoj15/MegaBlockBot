@@ -85,6 +85,7 @@ public final class BotSpeech {
             case Failure.Died f -> "died at " + position(f.deathPos());
             case Failure.PreemptStalled f -> "was held up too long by " + f.reflexCause();
             case Failure.NoPlace f -> "found nowhere within " + f.radius() + " blocks to " + f.what();
+            case Failure.NoRoom f -> "has no room in the inventory for " + item(f.key());
             case Failure.Internal f -> "hit an internal error";
         };
         String detail = failure.detail();

@@ -111,6 +111,7 @@ final class ResultText {
                 fields.put("what", f.what());
                 fields.put("radius", f.radius());
             }
+            case Failure.NoRoom f -> fields.put("key", f.key());
             // Only the exception's class: its message and stack trace are for logs, not for a model.
             case Failure.Internal f -> fields.put("exception",
                     f.exception() == null ? "none" : f.exception().getClass().getSimpleName());
@@ -156,6 +157,7 @@ final class ResultText {
             case Failure.PreemptStalled f ->
                     "I kept being interrupted by " + f.reflexCause() + " and could not get back to it";
             case Failure.NoPlace f -> "I found nowhere within " + f.radius() + " blocks to " + f.what();
+            case Failure.NoRoom f -> "I had no room in my inventory for " + item(f.key(), false);
             case Failure.Internal f -> "something went wrong on my side";
         };
     }

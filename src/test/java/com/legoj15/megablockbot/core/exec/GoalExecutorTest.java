@@ -378,6 +378,24 @@ class GoalExecutorTest {
         assertFalse(exec.active());
     }
 
+    /**
+     * A full inventory is like nowhere to stand: a retry would break the same block for the same lost drop, and a replan
+     * would plan the same step into the same full inventory, so the executor must not loop on it.
+     */
+    @Test
+    void noRoomGivesUpTheGoalAtOnceWithThatFailureAndNeitherRetriesNorReplans() {
+        Failure noRoom = new Failure.NoRoom(diamond, "no free slot");
+        host.tasks.add(Fakes.FakeTask.failing(noRoom));
+        runToActive(diamondLeaf("mine:ore"));
+        tick();
+        assertEquals(1, host.taskRequests.size()); // no retry
+        assertEquals(1, host.planRequests.size()); // no replan: the first plan is the only one
+        assertEquals(1, host.published.size());
+        assertEquals(GoalResult.Status.FAILED, host.published.get(0).status());
+        assertEquals(noRoom, host.published.get(0).failure());
+        assertFalse(exec.active());
+    }
+
     @Test
     void aThrowingTaskFailsWithInternalThatCarriesTheExceptionAndGivesUp() {
         host.tasks.add(Fakes.FakeTask.throwingOnTick());

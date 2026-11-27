@@ -119,7 +119,8 @@ Leaf params: `recipe` (the game recipe id), `times`, `station` (empty or `minecr
 - The result is taken whole or not at all. A shift click on the result slot moves what fits, consumes the ingredients and
   drops the rest at the body's feet (1.21.1's `quickMoveStack`: nothing is destroyed, but the old task counted the craft as
   made, `aResultThatDoesNotFitIsNotTakenAtAll`). `MenuHand.roomFor` says what carried storage can take; short of that the
-  task fails `NoProgress` with the ingredients given back from the grid.
+  task fails `NoRoom` naming the result item, with the ingredients given back from the grid and nothing taken from the
+  result slot, so nothing is lost and nothing lies on the floor.
 - No station: the inventory's 2x2 grid (`player.inventoryMenu`, grid slots 1 to 4).
 - Table: use one within reach (`canInteractWithBlock`); otherwise put the table item down where a player could
   (`TableSites`). A spot is usable when it is replaceable, no entity that blocks building is in it, and a neighbour that is not
@@ -148,7 +149,10 @@ Leaf params: `recipe` (the game recipe id), `times`, `station` (empty or `minecr
   is not 17 blocks long" in a 16-block arena that way; the arenas of other tests stand five blocks off).
 - The table is opened with a use, the craft made, the menu closed, and the table broken the way a client does (with the hotbar slot
   that breaks it fastest, else one that cannot wear out, so the pickaxe just made keeps its durability;
-  `START_DESTROY_BLOCK`, per-tick progress, `STOP_DESTROY_BLOCK` at 1.0), then up to 200 ticks for the item. The item hops
+  `START_DESTROY_BLOCK`, per-tick progress, `STOP_DESTROY_BLOCK` at 1.0), then up to 200 ticks for the item. Before the
+  break starts, carried storage must have room for the table's item (`MenuHand.roomFor` again): with none the table is not
+  broken -- it stays standing and remembered as the body's, and the tidy step or the next craft takes it up once there is
+  room -- because the item of a table broken into a full inventory would lie on the floor for good. The item hops
   about and now and then rests outside the body's pickup box (a block on each side), so from 20 ticks after the break the
   body goes to a table item within `CraftTask.DROP_SEARCH_RADIUS` (12) blocks of where the table stood: through
   `BotNavigator.goTo` while the item is more than `NEAR_DROP` (2.5) away, by its movement input for the last steps (or all of
@@ -164,17 +168,23 @@ Leaf params: `recipe` (the game recipe id), `times`, `station` (empty or `minecr
   table while it is being broken is walked back the same way. Covered by `aCraftInterruptedAtItsTableWalksBackToIt`,
   `aTableBeingTakenUpWhenTheBodyIsCarriedOffIsWalkedBackTo` and `aTableItemFarFromTheBodyIsWalkedTo` (the goal is paused at the
   moment, the body walked off through its input until the table is out of reach, the goal resumed).
-- A break the rules refuse (`BlockSafety.mayBreak` now says no: a claim arrived while the craft ran) does not fail the craft:
-  the craft's result is what the goal asked for, so the task completes, the table stays standing and stays in `BotMemory` as
-  the body's, and the log says why (`MegaBlockBot` info line "leaves the crafting table at ... standing"). The tidy step and the
-  next craft that finds it try again. Covered by `aRefusedTableBreakStillCompletesTheCraft`.
-- Failures: `MissingInput` (an ingredient or the table item is not carried), `TargetGone` (unknown recipe id; a table that
-  would not open), `NoPlace` (the body found nowhere to put the table down: no place within the radius, none out of a protected
-  area within the wide radius, or the walks it allows all failed; the failure carries `what` ("put a crafting table down") and
-  the widest `radius` looked over), `Unreachable` (the game refused every click that would put the table down, it could not walk
-  back to the table it had put down, or the game would not start breaking it), `NoProgress` (no room for the whole result),
-  `TimedOut` (the break or the pickup). A failure with a table placed leaves the table standing, remembered; the next craft
-  that needs one finds it. Every exit, a completion included, goes through `BodyTask.release`.
+- A break the rules refuse (`BlockSafety.mayBreak` now says no: a claim arrived while the craft ran), a take-up the inventory
+  has no room for, and a break or a pick-up that runs out of its ticks (400 for the break, 200 for the item) do not fail the
+  craft: the craft's result is what the goal asked for, so the task completes, the table stays standing and stays in
+  `BotMemory` as the body's, and the log says why (`MegaBlockBot` info line "leaves the crafting table at ... standing"). A
+  broken table's item that never comes back is nothing the code can remember, so only the log names it. The tidy step and the
+  next craft that finds it try again. Covered by `aRefusedTableBreakStillCompletesTheCraft` and
+  `aTakenUpTableWhoseItemDoesNotFitIsLeftStanding`.
+- Failures: `MissingInput` (an ingredient or the table item is not carried), `TargetGone` (unknown recipe id), `Protected`
+  (a table that stands within reach and will not open: the failure names the table's position, the executor excludes that
+  block, and the next plan's craft puts its own table elsewhere), `NoPlace` (the body found nowhere to put the table down: no
+  place within the radius, none out of a protected area within the wide radius, or the walks it allows all failed; the failure
+  carries `what` ("put a crafting table down") and the widest `radius` any of its searches looked over, not only the last
+  call's), `Unreachable` (the game refused every click that would put the table down, it could not walk back to the table it
+  had put down, or the game would not start breaking it), `NoProgress` (the body would not sneak to place the table, or the
+  table could not be taken into the hand: conditions of the world, not bugs), `NoRoom` (no room for the whole result). A
+  failure with a table placed leaves the table standing, remembered; the next craft that needs one finds it. Every exit, a
+  completion included, goes through `BodyTask.release`.
 - Why `NoPlace` gives up at once. The executor's answer to `Unreachable`, `TargetGone`, `NoProgress`, `TimedOut` is one retry
   with a fresh task and then a replan; to `MissingInput`, `MissingTool`, `NoSource`, `Protected`, `Hazard` a replan. Nothing in
   a craft leaf, in `Exclusions` or in the snapshot tells the planner where a table fits, so every one of those replans is the
@@ -182,7 +192,8 @@ Leaf params: `recipe` (the game recipe id), `times`, `station` (empty or `minecr
   and then the world spawn's protected square) with the same failure. `NoPlace` (`Failure.Kind.NO_PLACE`, design 3.4) is the
   kind for "the body looked for somewhere to do this within `radius` blocks and found nowhere, and a new plan would find the
   same": the executor gives the goal up at once with it as the result's reason, no retry and no replan, like `PreemptStalled`.
-  `Internal` means a bug again, and `BotSpeech` says so.
+  `NoRoom` gives up the same way: the inventory cannot take what the step produces, and a replan would plan the same step into
+  the same full inventory. `Internal` means a bug again, and `BotSpeech` says so.
 
 ### A table left standing
 
@@ -194,6 +205,16 @@ placed. Found, it runs `CraftTask.takeUp(pos)` (the craft's own break and pickup
 ticked again, so the next plan sees the table in the inventory. A failure there is logged, not a goal's failure; the table
 stays, remembered. A table the rules do not let the body break stays standing and remembered too (the tidy task completes,
 and looks again at the next goal's end). Covered by `BotRuntimeGameTests.aTableLeftStandingByALogoutIsTakenUp`.
+
+## `mine`
+
+Breaks blocks through the navigator until the body holds the leaf's count of the item (`game.task.MineTask`; the search, the
+set-aside blocks and the wet-target rules belong to the navigation work). What this change adds here: carried storage must be
+able to take one more of the item — `MenuHand.roomFor`, the same question the craft asks of its result — before the mine
+command starts, and again whenever a block was broken and the held count has not risen (a drop that cannot be picked up). No
+room ends the step `NoRoom` naming the item (`mineWithAFullInventoryFailsNoRoom`), and the executor gives the goal up at once
+like `NoPlace`: no block is broken for a drop that would be lost, and a replan would plan the same step into the same full
+inventory.
 
 ## Supply containers, `look_inside` and `withdraw`
 

@@ -210,6 +210,41 @@ public final class BotRuntimeGameTests {
         });
     }
 
+    /**
+     * Seen on a live server: the table stood in a dip one block deep, its top level with the ground, and the body stood on
+     * it at the dip's edge. Broken, the table's item lies in the dip, straight under the body (the ground beside the dip
+     * holds it up) and a quarter block below its pickup box, so walking at it gets nowhere: the body must step down to
+     * it. The item was left lying, and the next craft made a second table.
+     *
+     * <p>Set-up, not the body's doing: the second layer of ground with its dip, the table in it, the body's memory of
+     * having put it there, and where the body is spawned. A goal that already holds ends at once, which is when the
+     * runtime looks for a table the body left standing and takes it up.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600)
+    public static void aTableDropInADipUnderTheBodyIsSteppedDownTo(GameTestHelper helper) {
+        floor(helper);
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) helper.setBlock(x, FLOOR_Y + 1, z, Blocks.STONE);
+        }
+        BlockPos dip = new BlockPos(8, FLOOR_Y + 1, 8);
+        helper.setBlock(dip, Blocks.CRAFTING_TABLE);
+        // On the table, a hand's width from the dip's western edge: the body's box reaches 0.22 over the ground there.
+        Rig rig = Rig.spawnAt(helper, "dip", 600, new Vec3(8.08, FLOOR_Y + 2.0, 8.5));
+        BotMemory.of(rig.id()).notePlaced(helper.getLevel().dimension().location().toString(), helper.absolutePos(dip));
+        rig.give(Items.STICK, 1);
+        rig.runtime().submit(new Goal.HaveItem(ItemKey.of("stick"), 1));
+        int[] ticks = {0};
+        rig.onEachTick(() -> {
+            if (rig.count(Items.CRAFTING_TABLE) == 1) {
+                helper.assertTrue(rig.tablesInArena().isEmpty(), "a crafting table still stands at " + rig.tablesInArena());
+                rig.pass();
+                return;
+            }
+            helper.assertTrue(++ticks[0] < 500, "the table's item was not taken: the body is at " + rig.body().position()
+                + ", tables standing " + rig.tablesInArena());
+        });
+    }
+
     /** A table that stands beside the body is used where it is and left standing; the bot placed none of its own. */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = PICKAXE_TICKS)
     public static void usesTheTableThatStandsBeside(GameTestHelper helper) {
@@ -526,8 +561,8 @@ public final class BotRuntimeGameTests {
      * logs. A craft takes its result whole or not at all. Taking it partly would count the craft as made, use up its log,
      * and leave the other planks lying at the feet of a body with no room to pick them up; and the log the grid is given
      * back must find its way home, not onto the floor. Two fills: room for two of the four planks (the stack stands at 62),
-     * and room for none (it stands at 64). After the craft has failed, every slot holds what it held and nothing of any
-     * kind lies near the body.
+     * and room for none (it stands at 64). After the craft has failed with {@code NoRoom} naming the planks, every slot
+     * holds what it held and no item of any kind lies in the arena.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
     public static void aResultThatDoesNotFitIsNotTakenAtAll(GameTestHelper helper) {
@@ -552,15 +587,16 @@ public final class BotRuntimeGameTests {
         rig.onEachTick(() -> {
             if (!run[0].tick(rig.body())) return;
             String state = "fill " + fill[0] + ": planks " + rig.count(Items.OAK_PLANKS) + ", logs " + rig.count(Items.OAK_LOG);
-            helper.assertTrue(run[0].failure() instanceof Failure.NoProgress, "the craft ended " + run[0].result + " (" + state + ")");
+            helper.assertTrue(run[0].failure() instanceof Failure.NoRoom noRoom && noRoom.key().id().equals("minecraft:oak_planks"),
+                "the craft ended " + run[0].result + " (" + state + ")");
             Inventory after = rig.body().getInventory();
             for (int slot = 0; slot < after.getContainerSize(); slot++) {
                 helper.assertTrue(ItemStack.matches(before.get(slot), after.getItem(slot)),
                     "slot " + slot + " held " + before.get(slot) + " and holds " + after.getItem(slot) + " (" + state + ")");
             }
-            List<ItemEntity> onTheFloor = helper.getLevel().getEntitiesOfClass(ItemEntity.class, rig.body().getBoundingBox().inflate(6.0),
+            List<ItemEntity> onTheFloor = helper.getLevel().getEntitiesOfClass(ItemEntity.class, arenaBox(helper),
                 candidate -> !candidate.isRemoved());
-            helper.assertTrue(onTheFloor.isEmpty(), "items lie on the floor: " + onTheFloor + " (" + state + ")");
+            helper.assertTrue(onTheFloor.isEmpty(), "items lie in the arena: " + onTheFloor + " (" + state + ")");
             rig.assertHandsEmpty();
             if (++fill[0] == planksInTheStack.length) {
                 rig.pass();
@@ -625,6 +661,38 @@ public final class BotRuntimeGameTests {
             helper.assertTrue(tables.size() == 1, "expected the table to be left standing, found " + tables);
             helper.assertTrue(BotMemory.of(rig.id()).isPlaced(helper.getLevel().dimension().location().toString(), helper.absolutePos(tables.get(0))),
                 "the body no longer remembers the table it left standing");
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * A craft at a table the task placed, with the inventory filled so that the result fits and the table's item does not
+     * (set up once before the task starts): 34 unstackable pickaxes, a stack of 64 planks and the table. The bowls are
+     * taken from the middle of the planks stack, so no ingredient slot ever empties, and the craft's four bowls fill the
+     * one slot the table left when it went down -- after the craft there is no room for the table's item. The table is not
+     * broken: the craft completes, the table still stands, remembered as the body's, and no item entity lies in the arena.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 300)
+    public static void aTakenUpTableWhoseItemDoesNotFitIsLeftStanding(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawn(helper, "nofit", null, 300);
+        rig.give(Items.OAK_PLANKS, 64);
+        rig.give(Items.CRAFTING_TABLE, 1);
+        Inventory inventory = rig.body().getInventory();
+        for (int slot = 2; slot < 36; slot++) inventory.setItem(slot, new ItemStack(Items.STONE_PICKAXE));
+        TaskRun run = new TaskRun(craftTask("minecraft:bowl", 1, "minecraft:crafting_table", new Goal.HaveItem(ItemKey.of("bowl"), 4)));
+        rig.onEachTick(() -> {
+            if (!run.tick(rig.body())) return;
+            helper.assertTrue(run.result instanceof TickResult.Completed, "the craft ended " + run.result);
+            helper.assertTrue(rig.count(Items.BOWL) == 4, "no bowls in the inventory: " + rig.count(Items.BOWL));
+            List<BlockPos> tables = rig.tablesInArena();
+            helper.assertTrue(tables.size() == 1, "expected the table to be left standing, found " + tables);
+            helper.assertTrue(BotMemory.of(rig.id()).isPlaced(helper.getLevel().dimension().location().toString(),
+                helper.absolutePos(tables.get(0))), "the body no longer remembers the table it left standing");
+            List<ItemEntity> onTheFloor = helper.getLevel().getEntitiesOfClass(ItemEntity.class, arenaBox(helper),
+                candidate -> !candidate.isRemoved());
+            helper.assertTrue(onTheFloor.isEmpty(), "items lie in the arena: " + onTheFloor);
             rig.assertHandsEmpty();
             rig.pass();
         });

@@ -95,10 +95,14 @@ import net.minecraft.world.phys.Vec3;
  * nowhere out of a protected area within the wide radius, or no place it could get to in the walks it allows. Nothing a
  * replan can change would alter that (the planner does not see where a table fits), so the executor gives the goal up at
  * once, and every other kind that does not give up is answered by the same plan again, three times, before the goal ends
- * all the same. {@code Protected} is never the answer for "nowhere to put my own table". {@code Unreachable} when the game
- * would not let the body put the table down or it could not walk back to the table it had put down, {@code NoProgress}
- * when the result would not fit in the inventory, {@code TimedOut} when the table never comes back. The executor adds its
- * own budget.
+ * all the same. {@code Protected} is never the answer for "nowhere to put my own table", but it is the answer for a table
+ * that stands and will not open: the executor excludes that block, so the next plan's craft puts its own table elsewhere.
+ * {@code Unreachable} when the game would not let the body put the table down or it could not walk back to the table it had
+ * put down, {@code NoProgress} when the body would not sneak or the table could not be taken into the hand, {@code NoRoom}
+ * when the result would not fit in the inventory. The craft is done once its result is in the inventory, so what happens
+ * to the table afterwards cannot fail it: a break that runs out of time, a take-up the inventory has no room for and an
+ * item that never comes back all end the task as completed, with the table (or its item) left and remembered where the
+ * code can remember it, and a log line. The executor adds its own budget.
  */
 public final class CraftTask extends BodyTask {
     public static final String KIND = RecipeDef.CRAFT;
@@ -124,6 +128,13 @@ public final class CraftTask extends BodyTask {
     static final double DROP_SEARCH_RADIUS = 12.0;
     /** Within this many blocks of the body a drop is walked to by input; further off, by the navigator. */
     static final double NEAR_DROP = 2.5;
+    /**
+     * Ticks of walking at a near drop by input before the navigator is asked for the drop's own block instead: a second
+     * is several times what the last steps take, so a drop still not taken lies where walking at it does not bring the
+     * body (seen on a live server: in a dip one block deep, straight under the edge the body stood on, a quarter block
+     * below its pickup box).
+     */
+    static final int INPUT_STEPS_ALLOWED = 20;
     /**
      * How far from the body a table of this task's that stands out of reach is still walked back to: a reflex's retreat
      * is a dozen blocks, not a hundred. A table further off is no table of this craft's.
@@ -190,6 +201,8 @@ public final class CraftTask extends BodyTask {
     private boolean walking;
     /** The navigator would not take the body to the table's drop: the rest of the way is by input. */
     private boolean dropWalkFailed;
+    /** Ticks this pick-up has walked at a near drop by input without taking it. */
+    private int inputSteps;
 
     // Finding a place for the table, and walking to it or back to the table.
     /** Places the body stood at or walked to without finding a usable spot, so that they are not offered again. */
@@ -206,6 +219,11 @@ public final class CraftTask extends BodyTask {
     /** Why the last walk to a place for the table failed; null once a walk has succeeded. */
     @Nullable
     private String walkFailure;
+    /**
+     * The widest radius a search for a place to stand has reached, kept across the walks: what a {@link Failure.NoPlace}
+     * reports even when the walks, not the search, were what gave out.
+     */
+    private int lookedOut;
     /** This task holds the sneak key for the click. */
     private boolean sneaking;
     private int placeRounds;
@@ -502,7 +520,10 @@ public final class CraftTask extends BodyTask {
                 stand = TableSites.nearestStand(body, level, radius + 1, wide, triedStands, refusal);
             }
         }
-        if (stand == null) return stop(body, noSite(looked, refusal));
+        // The walks may have been to places a wide search found, so the failure names the radius actually searched, not
+        // only this call's: giving out on the walks is not giving out on a narrower search.
+        lookedOut = Math.max(lookedOut, looked);
+        if (stand == null) return stop(body, noSite(lookedOut, refusal));
         walks++;
         walkRestarts = 0;
         returning = false;
@@ -578,11 +599,12 @@ public final class CraftTask extends BodyTask {
     private TickResult place(BotPlayer body) {
         ServerLevel level = body.serverLevel();
         if (!body.isShiftKeyDown()) {
-            if (++phaseTicks > SNEAK_WAIT_TICKS) return stop(body, new Failure.Internal(null, "the body would not sneak to place the crafting table"));
+            // A condition of the world, not a bug: the retry and the replan the kind earns are the right answers.
+            if (++phaseTicks > SNEAK_WAIT_TICKS) return stop(body, new Failure.NoProgress(phaseTicks, "the body would not sneak to place the crafting table"));
             return TickResult.RUNNING;
         }
         if (!hold(body, tableItem)) {
-            return stop(body, new Failure.Internal(null, "the crafting table could not be taken into the hand"));
+            return stop(body, new Failure.NoProgress(0, "the crafting table could not be taken into the hand"));
         }
         BlockPos feet = body.blockPosition();
         // The eye of the look in seekSite, not whatever the pose has reached: the click is made sneaking.
@@ -645,8 +667,10 @@ public final class CraftTask extends BodyTask {
         }
         if (!(body.containerMenu instanceof CraftingMenu)) {
             if (++refusals > REFUSALS_ALLOWED) {
-                return stop(body, new Failure.TargetGone("the crafting table at " + table.toShortString(),
-                        "the game would not open it"));
+                // Protected, not TargetGone: the executor excludes this block, and the next plan's craft puts its own
+                // table elsewhere instead of being replanned into the same unopenable one.
+                return stop(body, new Failure.Protected(corePos(table), "the game would not open it",
+                        "the game would not open the crafting table at " + table.toShortString()));
             }
             cooldown = 1;
             return TickResult.RUNNING;
@@ -692,7 +716,13 @@ public final class CraftTask extends BodyTask {
             return TickResult.RUNNING;
         }
         if (++phaseTicks > BREAK_WAIT_TICKS) {
-            return stop(body, new Failure.TimedOut(phaseTicks, "breaking the crafting table took too long"));
+            // The craft is made, and that is what the goal asked for, so the table's fate cannot fail it. The break never
+            // finished, so the table stands on; it stays remembered as the body's, and the tidy step or the next craft
+            // takes it up (complete below releases the break in progress).
+            MegaBlockBot.LOGGER.info("{} stops breaking the crafting table at {} after {} ticks and leaves it standing: the craft is made",
+                body.getGameProfile().getName(), table.toShortString(), phaseTicks);
+            table = null;
+            return complete(body);
         }
         IInteractionManager hand = body.getInteractionManager();
         if (!body.canInteractWithBlock(table, 0.0)) {
@@ -704,6 +734,15 @@ public final class CraftTask extends BodyTask {
             return TickResult.RUNNING;
         }
         if (!hand.isMining()) {
+            if (MenuHand.roomFor(body, new ItemStack(tableItem)) == 0) {
+                // The craft is made, and that is what the goal asked for. The inventory cannot take the table's item, so
+                // breaking it would leave it on the floor of a body that cannot pick it up: the table stays standing and
+                // remembered as the body's, and the tidy step or the next craft takes it up once there is room.
+                MegaBlockBot.LOGGER.info("{} leaves the crafting table at {} standing: the inventory has no room for its item",
+                    body.getGameProfile().getName(), table.toShortString());
+                table = null;
+                return complete(body);
+            }
             Verdict verdict = BlockSafety.of(level.getServer()).mayBreak(body, level, table, state);
             if (!verdict.allowed()) {
                 // The craft is made, and that is what the goal asked for, so this is a success. The table stays where it is,
@@ -737,8 +776,15 @@ public final class CraftTask extends BodyTask {
             return complete(body);
         }
         if (++phaseTicks > PICKUP_WAIT_TICKS) {
-            return stop(body, new Failure.TimedOut(phaseTicks, "the broken crafting table's item did not come back"));
+            // The craft is made, and that is what the goal asked for, so the table's fate cannot fail it. Its item lies
+            // somewhere the body did not reach in time, and a drop is nothing the code can remember it by; the log says
+            // what was given up on.
+            MegaBlockBot.LOGGER.info("{} stops waiting for the broken crafting table's item after {} ticks: the craft is made",
+                body.getGameProfile().getName(), phaseTicks);
+            table = null;
+            return complete(body);
         }
+        if (phaseTicks == 1) inputSteps = 0; // every pick-up counts its own steps
         if (phaseTicks > PICKUP_PATIENCE_TICKS) goToDrop(body);
         return TickResult.RUNNING;
     }
@@ -764,8 +810,10 @@ public final class CraftTask extends BodyTask {
      * wide on each side, so now and then the table's item comes to rest just out of reach; and a reflex may have carried
      * the body a dozen blocks off before the item was taken. The body goes to it by the means a player has: through the
      * navigator while it is further than {@link #NEAR_DROP}, by plain input for the last steps (or all of them, when the
-     * navigator will not go). Nothing is moved or teleported. The input is reset the tick the item is in the inventory,
-     * and by {@link #letGo} on every other exit.
+     * navigator will not go). A near drop that {@link #INPUT_STEPS_ALLOWED} ticks of walking at it did not reach lies
+     * where input does not bring the body, below an edge or behind one: the navigator is then asked for the drop's own
+     * block, which makes the body step down to it. Nothing is moved or teleported. The input is reset the tick the item
+     * is in the inventory, and by {@link #letGo} on every other exit.
      */
     private void goToDrop(BotPlayer body) {
         ItemEntity nearest = nearestDrop(body);
@@ -776,7 +824,9 @@ public final class CraftTask extends BodyTask {
             if (nav.state() == BotNavigator.State.WORKING) nav.stop();
             return;
         }
-        if (!dropWalkFailed && nearest.distanceToSqr(body) > NEAR_DROP * NEAR_DROP) {
+        boolean far = nearest.distanceToSqr(body) > NEAR_DROP * NEAR_DROP;
+        boolean exact = !far && inputSteps > INPUT_STEPS_ALLOWED;
+        if (!dropWalkFailed && (far || exact)) {
             if (walking) body.input().reset();
             walking = false;
             switch (nav.state()) {
@@ -785,7 +835,9 @@ public final class CraftTask extends BodyTask {
                     nav.stop();
                     dropWalkFailed = true; // plain steps from the next tick
                 }
-                case IDLE, DONE -> nav.goTo(nearest.blockPosition(), 1);
+                // Within a block of a far drop is near enough for the last steps; a drop input could not reach is
+                // gone to exactly, since a goal a block wide is met from the edge above it.
+                case IDLE, DONE -> nav.goTo(nearest.blockPosition(), exact ? 0 : 1);
             }
             return;
         }
@@ -793,6 +845,7 @@ public final class CraftTask extends BodyTask {
         body.input().lookAt(nearest.position());
         body.input().forward = 1.0F;
         walking = true;
+        inputSteps++;
     }
 
     /**
@@ -866,7 +919,7 @@ public final class CraftTask extends BodyTask {
             int made = offered.getCount();
             int room = MenuHand.roomFor(body, offered);
             if (room < made) {
-                return new Failure.NoProgress(0, "there is no room in the inventory for the " + made + " "
+                return new Failure.NoRoom(ItemKeys.of(resultItem), "there is no room in the inventory for the " + made + " "
                         + ItemKeys.of(resultItem).id() + " this craft makes (room for " + room + ")");
             }
             int before = MenuHand.carriedCount(body, resultItem);

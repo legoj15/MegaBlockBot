@@ -217,6 +217,37 @@ public final class MoveAndMineGameTests {
         run.pass();
     }
 
+    /**
+     * A body whose carried storage is full of another item (set up once, before the task starts: every slot an
+     * unstackable pickaxe) is given a mine leaf for a log that stands beside it: the step ends {@code NoRoom} naming the
+     * log's item, and the log still stands. No block is broken for a drop the body could not pick up.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
+    public static void mineWithAFullInventoryFailsNoRoom(GameTestHelper helper) {
+        room(helper, 3, Blocks.BARRIER);
+        helper.setBlock(6, FLOOR_Y + 1, 5, Blocks.OAK_LOG);
+        NavRun run = NavRun.start(helper, "mfull", new Vec3(5.5, FLOOR_Y + 1, 5.5), 100);
+        try {
+            BotPlayer body = run.body();
+            for (int slot = 0; slot < 36; slot++) body.getInventory().setItem(slot, new ItemStack(Items.STONE_PICKAXE));
+            Task<BotPlayer> task = startedMine(body, "oak_log", "oak_log", Map.of());
+            helper.assertTrue(task.state() == TaskState.FAILED, "the task is " + task.state() + ", not FAILED");
+            if (!(task.failure() instanceof Failure.NoRoom noRoom)) {
+                helper.fail("failed as " + task.failure());
+                return;
+            }
+            helper.assertTrue(noRoom.key().equals(ItemKey.of("oak_log")), "NoRoom names " + noRoom.key());
+            helper.assertBlockPresent(Blocks.OAK_LOG, new BlockPos(6, FLOOR_Y + 1, 5));
+            BodyInteractionManager manager = (BodyInteractionManager) body.getInteractionManager();
+            helper.assertTrue(manager.blocksBroken() == 0, "broke " + manager.blocksBroken() + " blocks while failing for room");
+            helper.assertTrue(BotNavigator.of(body).state() == BotNavigator.State.IDLE, "the navigator was started");
+        } catch (RuntimeException | Error e) {
+            run.cleanup();
+            throw e;
+        }
+        run.pass();
+    }
+
     /** The goal's count is already held: the task completes on its first tick and touches nothing. */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
     public static void mineWhatIsAlreadyHeldCompletesAtOnce(GameTestHelper helper) {

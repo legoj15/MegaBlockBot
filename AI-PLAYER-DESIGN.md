@@ -456,6 +456,7 @@ renaming a message silently changes behaviour.)
 | `DIED` | drop positions, death time | abort the active task, if any; its node returns to PENDING; replan from the respawned inventory; if the drops can still be reached before they despawn (§3.1), a "recover drops" node goes in front of the new tree, otherwise the death record is dropped |
 | `PREEMPT_STALLED` | reflex cause | the reflex layer held the goal paused past its limit (see Preemption); give up the goal at once (the reflex layer still owns the body, so no replan can run) |
 | `NO_PLACE` | what, radius | the body looked within `radius` blocks for somewhere to do `what` (put a crafting table down, stand to work) and found nowhere, and nothing a planner can change would alter that (the planner does not see where a block fits): give up the goal at once, with this failure as the result's reason; no retry, no replan |
+| `NO_ROOM` | item key | the inventory cannot take what the step produces — a craft whose result does not fit, a mine step with no free slot and no stack of the item with room (no block is broken for a drop that would be lost): a replan would plan the same step into the same full inventory, so give up the goal at once, with this failure as the result's reason; no retry, no replan (#26) |
 | `INTERNAL` | exception | a bug: give up on the goal; report to the owner and the server log |
 
 **Retry, replan, give up.** The executor, not the task, decides. Budgets, based on AIBot's
@@ -637,10 +638,11 @@ above, these hold; the code is `core/exec`.**
   (`game.task.TableSites`, 12 blocks). It draws only from the main inventory and the hotbar, and takes its result whole or
   not at all. A table it may no longer break is left standing, remembered, and the craft still succeeds.
 - A plan can fail for a reason the planner cannot see or avoid: where a block fits is in the world, not in its snapshot. Every
-  kind in the table above except `PREEMPT_STALLED`, `NO_PLACE` and `INTERNAL` ends in a replan, and a replan only changes the
-  plan when the planner can see why the node failed (a source to exclude, a block to avoid); a craft with nowhere to put its
-  table would be replanned into the same craft three times. `NO_PLACE` is the kind for it, and the executor gives the goal up
-  at once. A craft inside a protected area (block safety would not let the body take the table up again) first walks out of it
+  kind in the table above except `PREEMPT_STALLED`, `NO_PLACE`, `NO_ROOM` and `INTERNAL` ends in a replan, and a replan only
+  changes the plan when the planner can see why the node failed (a source to exclude, a block to avoid); a craft with nowhere
+  to put its table would be replanned into the same craft three times. `NO_PLACE` is the kind for it, and the executor gives
+  the goal up at once, as it does for `NO_ROOM` (a full inventory is just as little something a replan can see, #26). A craft
+  inside a protected area (block safety would not let the body take the table up again) first walks out of it
   (`TableSites.WIDE_RADIUS`) and fails `NO_PLACE`, never `PROTECTED`, when it cannot (#27).
 - A look inside (`look_inside`, the one leaf of the small goal the body gives itself when its owner names a container:
   a `Goal.Custom` whose postcondition reads the snapshot) walks to the container, opens it with the real menu, notes

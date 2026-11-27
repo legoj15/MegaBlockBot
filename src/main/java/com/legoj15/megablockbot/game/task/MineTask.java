@@ -28,6 +28,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -47,6 +48,8 @@ import net.minecraft.world.phys.Vec3;
  * <ol>
  *   <li>is done at once when the body already holds the count, before it touches anything;</li>
  *   <li>fails {@code MissingTool} when a tool is required and the body carries none good enough;</li>
+ *   <li>fails {@code NoRoom} when carried storage cannot take one more of the item, before the command starts and again
+ *       when a broken block's drop did not reach the inventory: no block is broken for a drop that would be lost;</li>
  *   <li>mines through the navigator. When the navigator reports nothing to mine in range it looks further: first at the
  *       best height when the block has a height range (digging down is allowed), then outward from where the task
  *       started, in steps, mining again after each. The search is bounded by {@link Search}: past it the failure is
@@ -147,6 +150,8 @@ public final class MineTask extends BodyTask {
     /** Blocks the task will not head for again: the navigator reads it (from search threads too) and adds to it. */
     private final Set<BlockPos> setAside = ConcurrentHashMap.newKeySet();
     private int bestHeld;
+    /** The held count when the last broken block was noticed: whether that block's drop reached the inventory. */
+    private int heldAtBreak;
     private double bestTargetDistance = Double.POSITIVE_INFINITY;
     private int noGainTicks;
     private int stalledRounds;
@@ -256,6 +261,13 @@ public final class MineTask extends BodyTask {
                 + " or better, and the body carries none"));
             return;
         }
+        if (MenuHand.roomFor(body, new ItemStack(item)) == 0) {
+            // No block is broken for a drop that would be lost: carried storage has no free slot and no stack of the
+            // item with room, and a replan would plan the same step into the same full inventory.
+            fail(new Failure.NoRoom(itemKey, "the inventory cannot take one more " + itemKey.id()
+                + ": no free slot and no stack of it with room"));
+            return;
+        }
 
         boolean sameWorld = hintDimension.equals(dimension);
         origin = sameWorld && hintOrigin != null ? blockPos(hintOrigin) : body.blockPosition();
@@ -266,6 +278,7 @@ public final class MineTask extends BodyTask {
             for (Pos aside : hintSetAside) setAside.add(blockPos(aside));
         }
         bestHeld = held;
+        heldAtBreak = held;
         startMining(body);
     }
 
@@ -299,7 +312,8 @@ public final class MineTask extends BodyTask {
             release(body);
             return TickResult.COMPLETED;
         }
-        noteProgress(body);
+        TickResult lostDrop = noteProgress(body);
+        if (lostDrop != null) return lostDrop;
         BotNavigator nav = nav(body);
         waiting = nav.breaking();
         navWait = nav.waitState();
@@ -490,12 +504,32 @@ public final class MineTask extends BodyTask {
         return TickResult.failed(new Failure.NoSource(itemKey, sourceId, detail));
     }
 
-    private void noteProgress(BotPlayer body) {
+    /**
+     * Notices the blocks the body has broken and how far the search has reached, and ends the step {@code NoRoom} the
+     * moment carried storage can no longer take one more of the item: either a block was broken and the held count has
+     * not risen (its drop has not been, and cannot be, picked up), or a drop that landed took the last of the room
+     * while the count wanted is still short. No block is broken for a drop that would be lost. Null while the step
+     * goes on.
+     */
+    @Nullable
+    private TickResult noteProgress(BotPlayer body) {
         if (body.getInteractionManager() instanceof BodyInteractionManager manager && manager.blocksBroken() != seenBroken) {
             seenBroken = manager.blocksBroken();
             if (manager.lastBrokenPos() != null) lastMined = manager.lastBrokenPos();
+            int now = held(body);
+            boolean dropLost = now == heldAtBreak;
+            if (now > heldAtBreak) heldAtBreak = now;
+            // onTick has already checked the goal, so the count wanted here is still short of the target.
+            if (MenuHand.roomFor(body, new ItemStack(item)) == 0) {
+                release(body);
+                return TickResult.failed(new Failure.NoRoom(itemKey, (dropLost
+                    ? "a broken " + blockLabel + " dropped its " + itemKey.id() + " where the body could not pick it up"
+                    : "the inventory filled with the " + itemKey.id() + " it gathered and cannot take one more")
+                    + ": no free slot and no stack of it with room"));
+            }
         }
         lookedBlocks = Math.max(lookedBlocks, horizontal(body.position(), Vec3.atBottomCenterOf(origin)));
+        return null;
     }
 
     private static double horizontal(Vec3 a, Vec3 b) {

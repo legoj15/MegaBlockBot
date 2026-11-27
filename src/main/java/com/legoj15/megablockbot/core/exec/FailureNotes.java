@@ -28,6 +28,7 @@ final class FailureNotes {
                     detail);
             case Failure.PreemptStalled f -> new Failure.PreemptStalled(f.reflexCause(), detail);
             case Failure.NoPlace f -> new Failure.NoPlace(f.what(), f.radius(), detail);
+            case Failure.NoRoom f -> new Failure.NoRoom(f.key(), detail);
             case Failure.Internal f -> new Failure.Internal(f.exception(), detail);
         };
     }

@@ -847,9 +847,10 @@ public final class GoalExecutor<B> {
                 death(body, (Failure.Died) failure);
             }
             // Nothing a replan can change would alter the answer: the reflex layer still owns the body (PREEMPT_STALLED),
-            // the body found nowhere to do the work and the planner cannot see why (NO_PLACE), or the code has a bug
-            // (INTERNAL). A retry or a replan would only repeat the failure.
-            case PREEMPT_STALLED, NO_PLACE, INTERNAL -> giveUp(body, failure);
+            // the body found nowhere to do the work and the planner cannot see why (NO_PLACE), the inventory cannot take
+            // what the step produces and the same plan would put it into the same full inventory (NO_ROOM), or the code
+            // has a bug (INTERNAL). A retry or a replan would only repeat the failure.
+            case PREEMPT_STALLED, NO_PLACE, NO_ROOM, INTERNAL -> giveUp(body, failure);
         }
     }
 
