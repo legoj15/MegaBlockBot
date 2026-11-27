@@ -179,8 +179,8 @@ public final class AcquisitionIndexBuilder {
             boolean growable = isGrowable(block);
             LootEval.StateRule rule = growable ? LootEval.StateRule.HARVESTED : LootEval.StateRule.MINED;
             try {
-                // Both lookups run inside this guard: a registry or codec that throws for one block's table costs that
-                // block, not the whole section.
+                // Everything read of one block runs inside this guard (its table, the table's routes, its default state
+                // and tool tags): a registry, codec or modded block that throws costs that block, not the whole section.
                 String table = block.getLootTable().location().toString();
                 List<Route> routes = routesByTable.computeIfAbsent(new TableRule(table, rule),
                     k -> environment.table(k.table()) == null ? List.of()
@@ -208,7 +208,7 @@ public final class AcquisitionIndexBuilder {
                         route.expected(), route.random(), ores.get(blockId)));
                 }
             } catch (RuntimeException e) {
-                notes.skipped("blocks whose loot table could not be read", blockId + " (" + e.getClass().getSimpleName() + ")");
+                notes.skipped("blocks that threw while their loot table or their properties were read", blockId + " (" + e.getClass().getSimpleName() + ")");
             }
         }
     }

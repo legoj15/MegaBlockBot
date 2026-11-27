@@ -330,6 +330,33 @@ public final class LootEvalGameTests {
         helper.succeed();
     }
 
+    // A read the budget cut is not kept as if it were whole. The root names as many tables as a read can pay for, one
+    // stick each, so with the root itself the first read is cut one child short. The children it did read are kept, so
+    // a later read of the same table gets through and must then give every stick; a cut result served again from the
+    // memo would stay a stick short for good.
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
+    public static void aReadCutForSizeIsFinishedByALaterRead(GameTestHelper helper) {
+        int children = LootEval.MAX_TABLE_EVALUATIONS;
+        Map<String, JsonObject> byId = new HashMap<>();
+        String[] pools = new String[children];
+        for (int i = 0; i < children; i++) {
+            pools[i] = pool("{\"type\":\"minecraft:loot_table\",\"value\":\"test:wide/" + i + "\"}");
+            byId.put("test:wide/" + i, json(table(pool(certain("stick", 1)))));
+        }
+        byId.put("test:wide", json(table(pools)));
+        BuildNotes notes = new BuildNotes();
+        LootEval eval = new LootEval(tables(byId), notes);
+        double first = expected(helper, eval.routes("test:wide", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED), "minecraft:stick");
+        helper.assertTrue(first < children, "the first read was not cut: " + first + " sticks of " + children);
+        helper.assertTrue(notedFor(notes, "test:wide"), "the cut read is not named: " + notes.lines());
+        double last = first;
+        for (int read = 0; read < 3; read++) {
+            last = expected(helper, eval.routes("test:wide", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED), "minecraft:stick");
+        }
+        helper.assertTrue(Math.abs(last - children) < TOLERANCE, "a later read gives " + last + " sticks, expected " + children);
+        helper.succeed();
+    }
+
     // A table that nests another is rolled for the same block, so a state the nested one tests is one the block can be
     // in, and a pool of the nested table keyed on it is not dropped. The outer table tests the age for 3 (a stick); the
     // table it references tests the same property for 2 (an apple), which is a value only the nested table names.
@@ -389,11 +416,14 @@ public final class LootEvalGameTests {
 
     // A throw while a referenced table's state values are collected costs the referenced table, named by itself, and
     // not the table that references it: the referencer's own pool is still read. Here the referencer gives a stick of
-    // its own beside the reference to a table whose block the registry cannot look up.
+    // its own beside the reference to a table whose block the registry cannot look up. Its own block's default state
+    // is still known, so its own state-gated count is still read as placed: one leaf (the five need age 3), not five.
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
     public static void aReferencedTableWhoseStateLookupThrowsCostsOnlyItself(GameTestHelper helper) {
+        String leaf = "{\"type\":\"minecraft:item\",\"name\":\"minecraft:leaf\",\"functions\":[{\"function\":\"minecraft:set_count\",\"count\":5,"
+            + "\"conditions\":[{\"condition\":\"minecraft:block_state_property\",\"block\":\"test:bush\",\"properties\":{\"age\":\"3\"}}]}]}";
         Map<String, JsonObject> byId = Map.of(
-            "test:ref", json(table(pool(certain("stick", 1)), pool("{\"type\":\"minecraft:loot_table\",\"value\":\"test:bad\"}"))),
+            "test:ref", json(table(pool(certain("stick", 1)), pool(leaf), pool("{\"type\":\"minecraft:loot_table\",\"value\":\"test:bad\"}"))),
             "test:bad", json(table(pool(stateEntry("apple", "test:bad_block", "age", "3")))));
         LootEval.Environment env = new LootEval.Environment() {
             @Override
@@ -409,7 +439,12 @@ public final class LootEvalGameTests {
             @Override
             public List<String> stateValues(String block, String property) {
                 if (block.equals("test:bad_block")) throw new IllegalStateException("the registry has no such block");
-                return List.of();
+                return List.of("0", "1", "2", "3");
+            }
+
+            @Override
+            public String defaultStateValue(String block, String property) {
+                return "0";
             }
         };
         BuildNotes notes = new BuildNotes();
@@ -417,6 +452,9 @@ public final class LootEvalGameTests {
             .routes("test:ref", EnumSet.of(LootEval.Tool.PLAIN), false, LootEval.StateRule.MINED);
         double stick = expected(helper, routes, "minecraft:stick");
         helper.assertTrue(Math.abs(stick - 1.0) < TOLERANCE, "the referencer's own sticks are " + stick + ", expected 1.0");
+        double leaves = expected(helper, routes, "minecraft:leaf");
+        helper.assertTrue(Math.abs(leaves - 1.0) < TOLERANCE, "the referencer's own leaves are " + leaves
+            + ", expected 1.0 (its default state is still known)");
         helper.assertTrue(notedFor(notes, "test:bad"), "the referenced table is not named: " + notes.lines());
         helper.assertTrue(!notedFor(notes, "test:ref"), "the referencer is named for the referenced table's throw: " + notes.lines());
         helper.succeed();

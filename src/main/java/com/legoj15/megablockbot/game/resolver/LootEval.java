@@ -346,13 +346,14 @@ final class LootEval {
                     has = env.defaultStateValue(block, name);
                 } catch (RuntimeException e) {
                     // The property may have been named by a table this one references; the throw costs that table,
-                    // named by itself, and not the one being read. A property the table being read named itself still
-                    // costs it, as any other throw out of states() does.
+                    // named by itself, and not the one being read. The property is left unassigned, so the conditions on
+                    // it are read both ways like any other this class cannot judge, and what is known of the default
+                    // state of the table being read stands: its own yields are still read as placed. A property the
+                    // table being read named itself still costs it, as any other throw out of states() does.
                     String owner = sources.getOrDefault(property.getKey(), tableId);
                     if (owner.equals(tableId)) throw e;
                     notes.skipped("loot tables whose block states could not be looked up", owner + " (" + e.getClass().getSimpleName() + ")");
-                    all = List.of();
-                    has = null;
+                    continue;
                 }
                 if (all.isEmpty()) {
                     tried.addAll(property.getValue());
@@ -470,8 +471,10 @@ final class LootEval {
     // Each table is evaluated once for each scenario and each depth it is met at, however many references lead to it: a
     // web of tables that all reference the next, twice over, is as many evaluations as it has tables, not as many as it
     // has paths. The depth is part of the key because the result under a depth cut is not the same as without one. Each
-    // miss spends one unit of the budget of the routes() call in progress; past it the table yields nothing more, the
-    // miss is not memoized (a later call has a fresh budget) and routes() notes the table it was asked for.
+    // miss spends one unit of the budget of the routes() call in progress; past it the table yields nothing more and
+    // routes() notes the table it was asked for. Nothing that ends after the cut is memoized: the refused miss, and
+    // every table above it, whose result lacks what was refused. A later call has a fresh budget and reads them again,
+    // with the tables that did end before the cut already known.
     private Map<String, Drop> evalTableId(String id, Scenario s) {
         MemoKey key = new MemoKey(s, MAX_TABLE_DEPTH - depth);
         Map<MemoKey, Map<String, Drop>> byKey = memo.computeIfAbsent(id, k -> new HashMap<>());
@@ -506,7 +509,7 @@ final class LootEval {
             visiting.remove(id);
             current = outer;
         }
-        byKey.put(key, result);
+        if (!starved) byKey.put(key, result);
         return result;
     }
 
