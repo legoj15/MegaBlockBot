@@ -33,6 +33,7 @@ import com.legoj15.megablockbot.game.plan.SnapshotCollector;
 import com.legoj15.megablockbot.game.task.CraftTask;
 import com.legoj15.megablockbot.game.task.FishTask;
 import com.legoj15.megablockbot.game.task.TaskRegistry;
+import com.legoj15.megablockbot.game.task.UseOnTask;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -86,6 +87,14 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
      * bounds a smelt that has stopped for good.
      */
     static final int SMELT_BUDGET_TICKS = 72_000;
+
+    /**
+     * The {@code use_on} kind's own task budget. One use is one walk and one click, but the target may be nowhere
+     * near: the search explores as far as a mine's (twelve rounds of thirty seconds, 7200 ticks), and a goal of
+     * several units repeats the walk per unit. 24000 ticks — twenty minutes — covers that twice over and still bounds
+     * a task that has stopped for good.
+     */
+    static final int USE_ON_BUDGET_TICKS = 24_000;
 
     /**
      * The {@code build} kind's own tick budget. The default 12000 is a task that walks and mines; a build places or
@@ -176,7 +185,8 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
             defaults.totalReplanCeiling(), defaults.maxRepairReplans(), defaults.maxDeathsPerGoal(),
             defaults.deathExclusionRadius(), defaults.hazardExclusionRadius(), defaults.defaultTaskBudgetTicks(),
             Map.of(RecipeDef.SMELT, SMELT_BUDGET_TICKS, "build", BUILD_BUDGET_TICKS, FishTask.KIND, FISH_TASK_BUDGET_TICKS,
-                "trade", TRADE_BUDGET_TICKS), defaults.stuckTicks(), defaults.preemptMaxPausedTicks(),
+                "trade", TRADE_BUDGET_TICKS, UseOnTask.KIND, USE_ON_BUDGET_TICKS), defaults.stuckTicks(),
+            defaults.preemptMaxPausedTicks(),
             defaults.preemptMaxCount(), defaults.preemptWindowTicks(), defaults.planRerunLimit(),
             defaults.planTimeoutTicks());
     }

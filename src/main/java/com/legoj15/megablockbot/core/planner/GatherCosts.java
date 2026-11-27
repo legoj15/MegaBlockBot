@@ -37,7 +37,8 @@ import java.util.function.ToLongFunction;
  * <p>What the body can see (the snapshot's sight, design 4.1): once the snapshot holds any sight, a mining or
  * harvesting source whose block is in it costs {@link PlannerConfig#sightCharge} on top, growing with the block's
  * horizontal distance, and one whose block is not costs {@link PlannerConfig#unseenPenalty()} on top, which is more
- * than any seen block's charge. Every source whose block is out of sight is charged alike, so a snapshot that holds
+ * than any seen block's charge. A use-on source's fluid or block target is charged the same way. Every source whose
+ * block is out of sight is charged alike, so a snapshot that holds
  * none of the choices' blocks orders them as it always did. A snapshot with no sight at all adds nothing: charging
  * only block sources would move them against kills, fishing, trades, crafts and a strategy's proposal, and today's
  * choices would no longer be today's.
@@ -170,6 +171,20 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
         if (carries(mine.toolClass(), mine.minTier())) return true;
         ItemKey tool = config.toolItem(mine.toolClass(), mine.minTier());
         if (tool == null) return false;
+        return obtainableTool(tool);
+    }
+
+    /**
+     * Whether the tool a use-on source holds and uses can be had, as a mining source's tool is asked
+     * ({@link #toolObtainable(Source.MineBlock)}): carried, or an item a recipe makes or a usable source yields.
+     */
+    public boolean toolObtainable(Source.UseOn use) {
+        if (snapshot.count(use.tool()) > 0) return true;
+        return obtainableTool(use.tool());
+    }
+
+    /** The memoized answer to whether one tool item can be had at all. */
+    private boolean obtainableTool(ItemKey tool) {
         Boolean known = toolMemo.get(tool);
         if (known == null) {
             known = obtainable(tool, new HashSet<>());
@@ -188,18 +203,27 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
         return false;
     }
 
-    /** Held, made by a recipe, or yielded by a usable source whose own tool can be had; {@code chain} guards cycles. */
+    /**
+     * Held, made by a recipe, or yielded by a usable source whose own tool can be had; {@code chain} guards cycles. A
+     * use-on source yields its item only through the tool it holds and uses, so that tool is asked for in its turn
+     * (a bucket got by scooping needs the bucket).
+     */
     private boolean obtainable(ItemKey item, Set<ItemKey> chain) {
         if (snapshot.count(item) > 0 || !recipes.producers(item).isEmpty()) return true;
         if (!chain.add(item)) return false;
         try {
             for (Source source : index.sources(item)) {
                 if (!usable(source)) continue;
-                if (!(source instanceof Source.MineBlock mine) || !mine.toolRequired()) return true;
-                if (mine.toolClass() == null) continue;
-                if (carries(mine.toolClass(), mine.minTier())) return true;
-                ItemKey tool = config.toolItem(mine.toolClass(), mine.minTier());
-                if (tool != null && obtainable(tool, chain)) return true;
+                if (source instanceof Source.MineBlock mine && mine.toolRequired()) {
+                    if (mine.toolClass() == null) continue;
+                    if (carries(mine.toolClass(), mine.minTier())) return true;
+                    ItemKey tool = config.toolItem(mine.toolClass(), mine.minTier());
+                    if (tool != null && obtainable(tool, chain)) return true;
+                } else if (source instanceof Source.UseOn use) {
+                    if (snapshot.count(use.tool()) > 0 || obtainable(use.tool(), chain)) return true;
+                } else {
+                    return true;
+                }
             }
             return false;
         } finally {
@@ -220,6 +244,13 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
             return sighted(ceilDiv(config.harvest(), source.yield()), harvest.block());
         }
         if (source instanceof Source.KillMob kill) return ceilDiv(fightCost(kill), source.yield());
+        if (source instanceof Source.UseOn use) {
+            if (!toolObtainable(use)) return UNOBTAINABLE;
+            long cost = ceilDiv(config.useOn(), source.yield());
+            // A fluid or block target stands in the world like a mined block does, and is charged by the sight alike;
+            // a mob is nowhere to be seen.
+            return Source.UseOn.ENTITY.equals(use.targetKind()) ? cost : sighted(cost, use.target());
+        }
         if (source instanceof Source.Fishing) return ceilDiv(config.fish(), source.yield());
         if (source instanceof Source.Trade trade) {
             // One trade gives one item; a trade that comes up with chance p is tried 1/p times per success. What a

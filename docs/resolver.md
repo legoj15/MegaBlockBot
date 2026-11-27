@@ -6,8 +6,9 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
 ## Pieces
 
 - `core.acquire` (Minecraft-free, every node): `Source` (sealed: `MineBlock`, `KillMob`, `Fishing`, `Trade`,
-  `ChestLoot`, `Harvest`), `KnownWay` (a way a player has that no `Source` records), the immutable `AcquisitionIndex`
-  (item to sources, `knownWays()`, `items()`, `craftable()`, `unplannableRecipeTypes()`, `notes()`) and `LintReport`.
+  `ChestLoot`, `Harvest`, `UseOn`), `KnownWay` (a way a player has that no `Source` records), the immutable
+  `AcquisitionIndex` (item to sources, `knownWays()`, `items()`, `craftable()`, `unplannableRecipeTypes()`, `notes()`)
+  and `LintReport`.
 - `game.resolver`: `AcquisitionIndexBuilder.build(server)` (server thread), `AcquisitionIndexes.current()` (atomic
   holder; `AcquisitionIndex.EMPTY` before the first build and after the server stops), `ResolverFeature.init()` (rebuilds
   through `Platform.loader().onServerDataLoaded`, registers the command and `ResolverGameTests`).
@@ -114,6 +115,16 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
   an unplaced villager. Explorer-map listings are skipped (each roll would allocate a world map), a null listing is
   noted and skipped, and a listing that throws, while it offers or while its offer is read, is noted and skipped on its
   own: the rest of its level and the other professions are still sampled.
+- Use-on targets (issue #28), read off the item classes: every `BucketItem` holding a fluid is that fluid scooped with
+  an empty `minecraft:bucket` (target kind `fluid`, tool spent), the one `SolidBucketItem` (powder snow) is its block
+  scooped the same way (kind `block`), a `MobBucketItem` is its fish caught into a `minecraft:water_bucket` (kind
+  `entity` — the water it also holds is not the way), the milk bucket is an empty bucket on a cow, a mooshroom or a
+  goat (`Cow.mobInteract` and the goat's own class; one source each, only when the entity type is registered), and
+  wool is `minecraft:shears` on a sheep (one source per dye colour, `variant` the colour, tool kept, yield 2: the game
+  drops one to three). The entity type and the block behind a bucket are private fields with no getters, so each is
+  named the way the ids are laid out (`<fish>_bucket` for the fish `<fish>`); a bucket whose content cannot be named
+  that way is counted in the notes. A fluid or block target stands in the world like a mined block does (a lava source
+  is the block `minecraft:lava`), so the sight looks for it the same way; an entity target does not.
 - Recipes: every `RecipeManager` output is craftable; types other than crafting, smelting, blasting, smoking, campfire
   cooking, stonecutting and smithing are counted as unplannable.
 
@@ -130,15 +141,19 @@ its ways and is noted.
   mined state rule): every item one yields is a way `from` that table's id — `archaeology`, `barter`, `gift`,
   `shearing`, `equipment` for those types, `other_loot` for any other. A `generic` table is read only through the
   table that references it and is not read on its own.
-- Buckets, read off the item classes: a `BucketItem` holding a fluid that is not empty is `fill_bucket` from the
-  fluid's id; a `MobBucketItem` is `catch_in_bucket` from its entity type's id and never `fill_bucket` (the water it
-  also holds is not the way); the `SolidBucketItem` (powder snow) is `fill_bucket` from its block's id. The entity
-  type and the block are private fields with no getters, so each is named the way the ids are laid out
-  (`<fish>_bucket` for the fish `<fish>`); a bucket whose content cannot be named that way is counted in the notes.
 - Game code: a small named table in the builder, one row per drop the game's own code makes outside any loot table —
   the wither's nether star, a baby turtle's scute, an armadillo's scutes, dragon breath, an end ship's elytra, the
   dragon egg of the first dragon kill — each row commented with where in the game the drop happens. A row whose item
   is not in the registry (another game version) or is behind a disabled feature flag is skipped silently.
+
+What is left as a way, and why the bot cannot have it as a source yet: archaeology needs brushing a suspicious block
+(a brush, a dig that takes seconds, and not destroying the block — no task does that); barter needs giving gold to a
+piglin and waiting (no task hands items to a mob); a gift needs a tamed cat the body does not own; shearing a
+mooshroom out of its stew and equipment a mob spawns wearing both take from a mob something the mob is wearing, which
+is neither a fight nor a use the game gives an item (`ShearsItem` shears an `IShearable`, but a mooshroom's stew is
+its `shearing` loot table and a zombie's armour is picked up only by a player clicking an inventory the mob does not
+have). The use-on sources the builder once recorded as ways — the buckets and the shears on a sheep — are sources
+now (see above); the milk bucket, once a code row, is one of them.
 
 The lint has four lists: an item with a source counts as with a source; else a craftable one as craftable only; else
 an item with a known way is listed obtainable with no strategy yet (the file shows each such item with its ways,

@@ -19,6 +19,8 @@ import java.util.TreeMap;
  * @param toolStep        cost charged once per tool tier the bot's best tool of the class is below the required one
  * @param harvest         cost of one harvest attempt, before yield
  * @param kill            cost of one kill attempt, before yield
+ * @param useOn           cost of one use of a held tool on a fluid, a block or a mob, before yield — a kill's by
+ *                        default, since one use is one walk and one click the way one kill is one fight
  * @param fish            cost of one cast, before yield
  * @param trade           cost of one villager trade attempt: divided by the offer's chance, and added to the
  *                        unit cost of what the trade charges (a trade gives one item, so there is no yield)
@@ -30,7 +32,7 @@ import java.util.TreeMap;
  * @param maxTotalReplans the replan total a plan carries when no strategy declares a higher one (design 3.4)
  * @param toolItems       tool item per class and tier, keyed by {@link #toolKey}; see {@link #toolItem}
  */
-public record PlannerConfig(long mineBase, long deepOre, long toolStep, long harvest, long kill, long fish,
+public record PlannerConfig(long mineBase, long deepOre, long toolStep, long harvest, long kill, long useOn, long fish,
                             long trade, long sightStep, long unseenPenalty, int maxTotalReplans,
                             Map<String, ItemKey> toolItems) {
     /**
@@ -52,7 +54,7 @@ public record PlannerConfig(long mineBase, long deepOre, long toolStep, long har
      * reorders choices between alternatives without outweighing a missing tool.
      */
     public static PlannerConfig defaults() {
-        return new PlannerConfig(40, 600, 400, 200, 600, 1200, 3000, 1, 250, 12, vanillaToolItems());
+        return new PlannerConfig(40, 600, 400, 200, 600, 600, 1200, 3000, 1, 250, 12, vanillaToolItems());
     }
 
     /**
@@ -97,7 +99,7 @@ public record PlannerConfig(long mineBase, long deepOre, long toolStep, long har
 
     /** A copy of this config whose tool table is replaced, for a modded or test table. */
     public PlannerConfig withToolItems(Map<String, ItemKey> replacement) {
-        return new PlannerConfig(mineBase, deepOre, toolStep, harvest, kill, fish, trade, sightStep, unseenPenalty,
-                maxTotalReplans, replacement);
+        return new PlannerConfig(mineBase, deepOre, toolStep, harvest, kill, useOn, fish, trade, sightStep,
+                unseenPenalty, maxTotalReplans, replacement);
     }
 }

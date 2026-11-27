@@ -208,9 +208,9 @@ final class SolverPlannerTest {
 
     private static PlannerConfig dearMining(long toolStep) {
         PlannerConfig defaults = PlannerConfig.defaults();
-        return new PlannerConfig(1000, defaults.deepOre(), toolStep, defaults.harvest(), defaults.kill(), defaults.fish(),
-                defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(), defaults.maxTotalReplans(),
-                defaults.toolItems());
+        return new PlannerConfig(1000, defaults.deepOre(), toolStep, defaults.harvest(), defaults.kill(),
+                defaults.useOn(), defaults.fish(), defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(),
+                defaults.maxTotalReplans(), defaults.toolItems());
     }
 
     private static Exclusions without(String... sources) {
@@ -366,6 +366,18 @@ final class SolverPlannerTest {
                 gain(stock, tools, ItemKey.of(params.get("item")), Long.parseLong(params.get("count")));
             }
             case "kill" -> gain(stock, tools, ItemKey.of(params.get("item")), Long.parseLong(params.get("count")));
+            case "use_on" -> {
+                // A use-on leaf holds the tool and spends it when the tool becomes the result: as the task does.
+                ItemKey tool = ItemKey.of(params.get("tool"));
+                long count = Long.parseLong(params.get("count"));
+                boolean spent = "true".equals(params.get("spent"));
+                long held = stock.getOrDefault(tool, 0);
+                if (held < (spent ? count : 1)) {
+                    return "leaf " + node.source() + " uses the " + tool.id() + " with only " + held + " of it in stock";
+                }
+                if (spent) lose(stock, tools, tool, (int) count);
+                gain(stock, tools, ItemKey.of(params.get("item")), count);
+            }
             case "fish" -> {
                 // A fish leaf is fished with a rod: a plan that never provides one fails here, as the task would.
                 if (stock.getOrDefault(FISHING_ROD, 0) < 1) {
@@ -586,7 +598,7 @@ final class SolverPlannerTest {
     }
 
     private static long gathered(Plan plan, ItemKey item) {
-        return gathered(plan, item, "mine", "harvest", "kill", "fish", "trade");
+        return gathered(plan, item, "mine", "harvest", "kill", "fish", "trade", "use_on");
     }
 
     private static List<String> sources(Plan plan) {
@@ -1671,9 +1683,9 @@ final class SolverPlannerTest {
     /** Gathering and mining cost next to nothing, so a mining source beats any recipe unless it is priced out. */
     private static PlannerConfig freeMining() {
         PlannerConfig defaults = PlannerConfig.defaults();
-        return new PlannerConfig(1, defaults.deepOre(), 0, defaults.harvest(), defaults.kill(), defaults.fish(),
-                defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(), defaults.maxTotalReplans(),
-                defaults.toolItems());
+        return new PlannerConfig(1, defaults.deepOre(), 0, defaults.harvest(), defaults.kill(), defaults.useOn(),
+                defaults.fish(), defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(),
+                defaults.maxTotalReplans(), defaults.toolItems());
     }
 
     @Test
@@ -1791,6 +1803,113 @@ final class SolverPlannerTest {
                 snapshot(Map.of(STICK, 3), Map.of()), Exclusions.NONE));
         assertEquals(Failure.Kind.NO_SOURCE, failure.kind(), failure.toString());
         assertEquals(STRING, ((Failure.NoSource) failure).key(), "the failure names the item that cannot be had");
+    }
+
+    // ─── A tool used on something (issue #28) ───────────────────────────────────────────────────
+
+    private static final ItemKey BUCKET = ItemKey.of("bucket");
+    private static final ItemKey LAVA_BUCKET = ItemKey.of("lava_bucket");
+    private static final ItemKey WHITE_WOOL = ItemKey.of("white_wool");
+    private static final ItemKey SHEARS = ItemKey.of("shears");
+
+    /** The base book plus a bucket of three iron ingots at a table. */
+    private static SimpleRecipeBook bucketBook() {
+        return bookWith(recipe("bucket_from_iron", BUCKET, 1, CRAFTING_TABLE, of(IRON_INGOT, 3)));
+    }
+
+    /** The base index plus iron ore (a stone pickaxe mines it) and lava had by scooping with a bucket. */
+    private static AcquisitionIndex.Builder lavaIndex() {
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(BUCKET).addItem(LAVA_BUCKET).addItem(IRON_INGOT);
+        builder.addSource(new Source.MineBlock("mine:minecraft:iron_ore", IRON_INGOT, "minecraft:iron_ore",
+                ToolClass.PICKAXE, ToolTier.STONE, true, false, false, 1.0, false, new Source.OreRange(0, 96, 16)));
+        builder.addSource(new Source.UseOn("use:minecraft:bucket@fluid:minecraft:lava", LAVA_BUCKET, BUCKET, true,
+                Source.UseOn.FLUID, "minecraft:lava", null, 1.0, false));
+        return builder;
+    }
+
+    @Test
+    void twoLavaBucketsFromNothingPlanTwoBucketsAndOneSpentUseOnLeaf() {
+        RecipeBook book = bucketBook();
+        SolverPlanner planner = planner(book, lavaIndex().build());
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(LAVA_BUCKET, 2), EMPTY, Exclusions.NONE));
+        List<NodeSpec> planLeaves = leaves(plan);
+        List<NodeSpec> uses = planLeaves.stream().filter(leaf -> leaf.taskKind().equals("use_on")).toList();
+        assertEquals(1, uses.size(), "one use_on leaf for the whole demand: " + planLeaves);
+        NodeSpec use = uses.get(0);
+        assertEquals("2", use.params().get("count"), "the leaf covers both lava buckets");
+        assertEquals("minecraft:bucket", use.params().get("tool"));
+        assertEquals("true", use.params().get("spent"));
+        assertEquals("fluid", use.params().get("targetKind"));
+        assertEquals("minecraft:lava", use.params().get("target"));
+        assertFalse(use.params().containsKey("variant"), use.params().toString());
+        assertEquals("use:minecraft:bucket@fluid:minecraft:lava", use.source());
+
+        // Two buckets of three iron each: six iron mined and two bucket crafts, all before the leaf.
+        assertEquals(6, gathered(plan, IRON_INGOT, "mine"), planLeaves.toString());
+        long bucketsCrafted = planLeaves.stream().filter(leaf -> leaf.taskKind().equals("craft")
+                && "bucket_from_iron".equals(leaf.params().get("recipe")))
+                .mapToLong(leaf -> Long.parseLong(leaf.params().get("times"))).sum();
+        assertEquals(2, bucketsCrafted, "two buckets are planned, one per lava bucket: " + planLeaves);
+        for (int i = 0; i < planLeaves.indexOf(use); i++) {
+            assertFalse(planLeaves.get(i).taskKind().equals("use_on"), "the use runs last: " + planLeaves);
+        }
+
+        Executed executed = run(plan, book, Map.of(), Map.of());
+        assertNull(executed.failure(), "the plan must run to the end: " + executed.failure() + " after " + executed.ran());
+        assertEquals(2, executed.stock().getOrDefault(LAVA_BUCKET, 0));
+        assertEquals(0, executed.stock().getOrDefault(BUCKET, 0),
+                "the buckets are spent: a second goal for a bucket afterwards is not already held");
+    }
+
+    @Test
+    void whiteWoolWithShearsHeldIsOneKeptLeafAndTheShearsSurviveIt() {
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(WHITE_WOOL);
+        builder.addSource(new Source.UseOn("use:minecraft:shears@entity:minecraft:sheep#white", WHITE_WOOL, SHEARS,
+                false, Source.UseOn.ENTITY, "minecraft:sheep", "white", 2.0, false));
+        SolverPlanner planner = planner(book(), builder.build());
+        Map<ItemKey, Integer> stock = Map.of(SHEARS, 1);
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(WHITE_WOOL, 1), snapshot(stock, Map.of()),
+                Exclusions.NONE));
+        List<NodeSpec> planLeaves = leaves(plan);
+        assertEquals(1, planLeaves.size(), "one leaf, no second shears planned: " + planLeaves);
+        NodeSpec leaf = planLeaves.get(0);
+        assertEquals("use_on", leaf.taskKind());
+        assertEquals("minecraft:shears", leaf.params().get("tool"));
+        assertEquals("false", leaf.params().get("spent"));
+        assertEquals("entity", leaf.params().get("targetKind"));
+        assertEquals("minecraft:sheep", leaf.params().get("target"));
+        assertEquals("white", leaf.params().get("variant"));
+
+        Executed executed = run(plan, stock, Map.of());
+        assertNull(executed.failure(), executed.failure());
+        assertEquals(1, executed.stock().getOrDefault(WHITE_WOOL, 0));
+        assertEquals(1, executed.stock().getOrDefault(SHEARS, 0), "the shears are kept, still held after the leaf");
+    }
+
+    @Test
+    void aUseOnSourceWhoseToolHasNoSourceIsUnusableNamingTheTool() {
+        // A prize had only by using a tool nothing gives: the source is priced out, and the plan fails naming the
+        // tool, as a mining source whose pickaxe cannot be had fails naming the pickaxe.
+        ItemKey wonder = ItemKey.of("wonder");
+        ItemKey prize = ItemKey.of("prize");
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(wonder).addItem(prize);
+        Source.UseOn source = new Source.UseOn("use:minecraft:wonder@block:minecraft:wonder_block", prize, wonder,
+                true, Source.UseOn.BLOCK, "minecraft:wonder_block", null, 1.0, false);
+        builder.addSource(source);
+        AcquisitionIndex index = builder.build();
+        GatherCosts costs = new GatherCosts(book(), index, PlannerConfig.defaults(), Exclusions.NONE, EMPTY);
+        assertEquals(com.legoj15.solver.CostModel.UNOBTAINABLE, costs.costOf(source),
+                "a source whose tool cannot be had is unusable");
+
+        Failure failure = unplannable(planner(book(), index),
+                request(new Goal.HaveItem(prize, 1), EMPTY, Exclusions.NONE));
+        assertEquals(Failure.Kind.NO_SOURCE, failure.kind(), failure.toString());
+        assertEquals(wonder, ((Failure.NoSource) failure).key(), "the failure names the tool that cannot be had");
     }
 
     // ─── The item loop converges and does not eat its own goal (item 11) ─────────────────────────
@@ -1974,7 +2093,7 @@ final class SolverPlannerTest {
      */
     private static PlannerConfig flatMining() {
         PlannerConfig defaults = PlannerConfig.defaults();
-        return new PlannerConfig(1000, 0, 0, defaults.harvest(), defaults.kill(), defaults.fish(),
+        return new PlannerConfig(1000, 0, 0, defaults.harvest(), defaults.kill(), defaults.useOn(), defaults.fish(),
                 defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(), defaults.maxTotalReplans(),
                 defaults.toolItems());
     }

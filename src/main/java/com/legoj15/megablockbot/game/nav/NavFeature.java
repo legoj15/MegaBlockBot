@@ -6,6 +6,7 @@ import com.legoj15.megablockbot.game.gametest.KillHarvestGameTests;
 import com.legoj15.megablockbot.game.gametest.MoveAndMineGameTests;
 import com.legoj15.megablockbot.game.gametest.NavEngineGameTests;
 import com.legoj15.megablockbot.game.gametest.TradeGameTests;
+import com.legoj15.megablockbot.game.gametest.UseOnGameTests;
 import com.legoj15.megablockbot.game.task.TaskFeature;
 import com.legoj15.megablockbot.platform.Platform;
 
@@ -38,6 +39,6 @@ public final class NavFeature {
 
         // GameTests: a no-op unless a GameTest run enabled them.
         Platform.loader().registerGameTests(NavEngineGameTests.class, BotNavGameTests.class, MoveAndMineGameTests.class,
-                FishGameTests.class, KillHarvestGameTests.class, TradeGameTests.class);
+                FishGameTests.class, KillHarvestGameTests.class, TradeGameTests.class, UseOnGameTests.class);
     }
 }

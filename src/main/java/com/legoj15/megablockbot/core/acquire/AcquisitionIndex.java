@@ -74,8 +74,9 @@ public final class AcquisitionIndex {
     }
 
     /**
-     * The ids of the blocks some mining or harvesting source names: what a body has to look for in the world to know
-     * which of its ways to gather are at hand (the snapshot's sight, design 3.4). Sorted; the same instance on every call.
+     * The ids of the blocks some mining, harvesting or use-on source names (a use-on source's fluid or block target; a
+     * lava source is the block {@code minecraft:lava}): what a body has to look for in the world to know which of its
+     * ways to gather are at hand (the snapshot's sight, design 3.4). Sorted; the same instance on every call.
      */
     public Set<String> sourceBlocks() {
         return sourceBlocks;
@@ -158,6 +159,12 @@ public final class AcquisitionIndex {
                 for (Source source : list) {
                     if (source instanceof Source.MineBlock mine) blocks.add(mine.block());
                     else if (source instanceof Source.Harvest harvest) blocks.add(harvest.block());
+                    // A use-on source's fluid or block target stands in the world like a mined block does (a lava
+                    // source is the block minecraft:lava), so the sight looks for it the same way. A mob is nowhere
+                    // to be seen.
+                    else if (source instanceof Source.UseOn use && !Source.UseOn.ENTITY.equals(use.targetKind())) {
+                        blocks.add(use.target());
+                    }
                 }
             }
             // Ways are ordered the same way (the way and the from text break a tie).

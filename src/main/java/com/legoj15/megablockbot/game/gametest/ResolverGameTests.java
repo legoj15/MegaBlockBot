@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
+import javax.annotation.Nullable;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
@@ -396,20 +397,25 @@ public final class ResolverGameTests {
         helper.succeed();
     }
 
-    // The ways a player has that no Source records (issue #28). A lava bucket is scooped from lava and a powder snow
-    // bucket from the powder snow block; a mob bucket is a catch of its fish, not a scoop of the water it holds, so
-    // the axolotl bucket must carry catch_in_bucket and no fill_bucket.
+    // What a player gets by using a held tool on something (issue #28), now sources the planner can choose: a lava
+    // bucket is an empty bucket scooped into a lava source and a powder snow bucket one scooped over the powder snow
+    // block; a mob bucket is a water bucket closed on its fish, not a scoop of the water it holds, so the axolotl
+    // bucket's source is the axolotl and never the fluid.
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
-    public static void bucketsAreWaysOfScoopingAndOfCatching(GameTestHelper helper) {
+    public static void bucketsAreUsedOnTheirTargetAndNotOnTheWaterTheyHold(GameTestHelper helper) {
         AcquisitionIndex index = index(helper);
-        helper.assertTrue(hasWay(index, "minecraft:lava_bucket", KnownWay.FILL_BUCKET, "minecraft:lava"),
-            "the lava bucket has no fill_bucket way from minecraft:lava");
-        helper.assertTrue(hasWay(index, "minecraft:powder_snow_bucket", KnownWay.FILL_BUCKET, "minecraft:powder_snow"),
-            "the powder snow bucket has no fill_bucket way from minecraft:powder_snow");
-        helper.assertTrue(hasWay(index, "minecraft:axolotl_bucket", KnownWay.CATCH_IN_BUCKET, "minecraft:axolotl"),
-            "the axolotl bucket has no catch_in_bucket way from minecraft:axolotl");
-        helper.assertTrue(!hasAnyWay(index, "minecraft:axolotl_bucket", KnownWay.FILL_BUCKET),
-            "the axolotl bucket has a fill_bucket way: " + index.knownWays(ItemKey.of("minecraft:axolotl_bucket")));
+        helper.assertTrue(hasUse(index, "minecraft:lava_bucket", "minecraft:bucket", "fluid", "minecraft:lava", null),
+            "the lava bucket has no use-on source from minecraft:lava");
+        helper.assertTrue(hasUse(index, "minecraft:powder_snow_bucket", "minecraft:bucket", "block",
+            "minecraft:powder_snow", null), "the powder snow bucket has no use-on source from minecraft:powder_snow");
+        helper.assertTrue(hasUse(index, "minecraft:axolotl_bucket", "minecraft:water_bucket", "entity",
+            "minecraft:axolotl", null), "the axolotl bucket has no use-on source from minecraft:axolotl");
+        helper.assertTrue(!hasAnyUse(index, "minecraft:axolotl_bucket", "fluid", "minecraft:water"),
+            "the axolotl bucket is had by scooping water: " + index.sources(ItemKey.of("minecraft:axolotl_bucket")));
+        helper.assertTrue(hasUse(index, "minecraft:milk_bucket", "minecraft:bucket", "entity", "minecraft:cow", null),
+            "the milk bucket has no use-on source from minecraft:cow");
+        helper.assertTrue(hasUse(index, "minecraft:white_wool", "minecraft:shears", "entity", "minecraft:sheep",
+            "white"), "the white wool has no use-on source from a white sheep");
         helper.succeed();
     }
 
@@ -430,16 +436,23 @@ public final class ResolverGameTests {
     }
 
     // What the lint's unobtainable list means: that a player cannot have the item at all. An item a player has a way
-    // for that no Source records goes to the no-strategy list instead, a spawn egg stays unobtainable, and an item
-    // with both a source and a way (leather: cows drop it and piglins barter it) counts with the source.
+    // for that no Source records goes to the no-strategy list instead, a spawn egg stays unobtainable, an item with
+    // both a source and a way (leather: cows drop it and piglins barter it) counts with the source, and what a
+    // use-on source records (a lava bucket, wool) counts with its sources.
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
     public static void theLintSeparatesNoStrategyFromUnobtainable(GameTestHelper helper) {
         AcquisitionIndex index = index(helper);
         LintReport report = LintReport.of(index, "minecraft");
-        for (String id : List.of("minecraft:lava_bucket", "minecraft:axolotl_bucket", "minecraft:powder_snow_bucket",
-            "minecraft:angler_pottery_sherd", "minecraft:nether_star")) {
+        for (String id : List.of("minecraft:angler_pottery_sherd", "minecraft:nether_star")) {
             ItemKey item = ItemKey.of(id);
             helper.assertTrue(report.noStrategy().contains(item), id + " is not in the no-strategy list");
+            helper.assertTrue(!report.unobtainable().contains(item), id + " is listed unobtainable");
+        }
+        for (String id : List.of("minecraft:lava_bucket", "minecraft:axolotl_bucket", "minecraft:powder_snow_bucket",
+            "minecraft:milk_bucket", "minecraft:white_wool")) {
+            ItemKey item = ItemKey.of(id);
+            helper.assertTrue(!index.sources(item).isEmpty(), id + " has no source: " + index.knownWays(item));
+            helper.assertTrue(!report.noStrategy().contains(item), id + " is in the no-strategy list");
             helper.assertTrue(!report.unobtainable().contains(item), id + " is listed unobtainable");
         }
         ItemKey egg = ItemKey.of("minecraft:zombie_spawn_egg");
@@ -462,7 +475,15 @@ public final class ResolverGameTests {
         return index.knownWays(ItemKey.of(item)).stream().anyMatch(w -> w.way().equals(way));
     }
 
-    private static boolean hasWay(AcquisitionIndex index, String item, String way, String from) {
-        return index.knownWays(ItemKey.of(item)).stream().anyMatch(w -> w.way().equals(way) && w.from().equals(from));
+    private static boolean hasUse(AcquisitionIndex index, String item, String tool, String targetKind, String target,
+                                  @Nullable String variant) {
+        return index.sources(ItemKey.of(item)).stream().anyMatch(s -> s instanceof Source.UseOn use
+            && use.tool().id().equals(tool) && use.targetKind().equals(targetKind) && use.target().equals(target)
+            && java.util.Objects.equals(use.variant(), variant));
+    }
+
+    private static boolean hasAnyUse(AcquisitionIndex index, String item, String targetKind, String target) {
+        return index.sources(ItemKey.of(item)).stream().anyMatch(s -> s instanceof Source.UseOn use
+            && use.targetKind().equals(targetKind) && use.target().equals(target));
     }
 }

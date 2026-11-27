@@ -13,6 +13,8 @@ import com.legoj15.megablockbot.core.planner.LookInside;
  *   <li>{@value #FISH}: cast a rod into water until the body holds a count of an item ({@link FishTask}).</li>
  *   <li>{@value #KILL}: fight mobs until the body holds a count of an item ({@link KillTask}).</li>
  *   <li>{@value #HARVEST}: take growables until the body holds a count of an item ({@link HarvestTask}).</li>
+ *   <li>{@value #USE_ON}: hold a tool and use it on a fluid, a block or a mob until the body holds a count of an item
+ *       ({@link UseOnTask}, issue 28).</li>
  *   <li>{@value #RECOVER_DROPS}: pick up what a death dropped ({@link RecoverDropsTask}).</li>
  *   <li>{@value #DEPOSIT}: put items into a container ({@link DepositTask}).</li>
  *   <li>{@value #WITHDRAW}: take items out of a container its owner named (or the body placed), as a player does
@@ -36,6 +38,8 @@ public final class TaskFeature {
     public static final String KILL = "kill";
     /** The kind a planner leaf for a {@code Harvest} source binds to ({@code SolverPlanner}). */
     public static final String HARVEST = "harvest";
+    /** The kind a planner leaf for a {@code UseOn} source binds to ({@code SolverPlanner}). */
+    public static final String USE_ON = UseOnTask.KIND;
     /** The kind of the node the executor inserts after a death; the name is the executor's ({@code DeathHandling}). */
     public static final String RECOVER_DROPS = "recover_drops";
     public static final String DEPOSIT = "deposit";
@@ -57,6 +61,7 @@ public final class TaskFeature {
         TaskRegistry.register(FISH, FishTask::new);
         TaskRegistry.register(KILL, KillTask::new);
         TaskRegistry.register(HARVEST, HarvestTask::new);
+        TaskRegistry.register(USE_ON, UseOnTask::new);
         TaskRegistry.register(RECOVER_DROPS, (leaf, hints) -> new RecoverDropsTask(leaf));
         TaskRegistry.register(DEPOSIT, (leaf, hints) -> new DepositTask(leaf));
         TaskRegistry.register(WITHDRAW, (leaf, hints) -> new WithdrawTask(leaf));

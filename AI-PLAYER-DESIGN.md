@@ -857,6 +857,7 @@ and on datapack reload:
 | Ore search hint | `c:ores/*` tags; placed-feature height providers for the Y range | best branch-mining Y |
 | Kill mob | entity loot tables | spawn biome/light conditions |
 | Fishing | fishing loot table | marks the item as random |
+| Use tool on something | item classes: buckets (a fluid, a solid block, a fish caught into one), the milk bucket, shears on a sheep | the tool, spent (a bucket becomes the result) or kept (shears); target kind (fluid/block/entity) and id; a sheep's dye colour as variant |
 | Villager trade | profession trade lists | random → needs a reroll strategy |
 | Chest loot | structure loot tables | random + exploration; lowest preference |
 | Harvest/grow | crop and sapling blocks | renewable flag |

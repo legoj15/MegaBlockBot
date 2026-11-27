@@ -510,8 +510,17 @@ public final class KillTask extends BodyTask {
     }
 
     private boolean eligible(Mob mob) {
+        return takeable(mob) && !setAside.contains(mob.getUUID());
+    }
+
+    /**
+     * Whether a mob is one a player may take from — the kill task's rule, shared with the use-on task (a sheep
+     * sheared, a cow milked, a fish caught): alive, and neither named (a name tag is somebody's mark, and it keeps the
+     * mob from despawning), leashed nor tamed (somebody's pet), nor a baby (it drops nothing, and it is not ready to
+     * be used on). What each task adds on top (the set-aside, a sheep's wool) is its own.
+     */
+    static boolean takeable(Mob mob) {
         if (mob.isRemoved() || !mob.isAlive() || mob.isDeadOrDying()) return false;
-        if (setAside.contains(mob.getUUID())) return false;
         if (mob.hasCustomName() || mob.isLeashed()) return false;
         if (mob instanceof TamableAnimal tame && tame.isTame()) return false;
         if (mob instanceof AgeableMob aged && aged.isBaby()) return false;

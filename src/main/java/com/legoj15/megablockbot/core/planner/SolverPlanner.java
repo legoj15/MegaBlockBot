@@ -55,7 +55,8 @@ import java.util.TreeSet;
  * gathered when its cheapest source is no dearer than crafting it (brief P12b items 3 and 11). The planner then
  * <ol>
  *   <li>commits everything that consumes stock before the shortfall is trusted: the tool prerequisite of a mining
- *       source, the whole of a trade (its payment is planned, the trade leaf emitted, the payment spent), and a
+ *       source, the whole of a trade (its payment is planned, the trade leaf emitted, the payment spent), the whole
+ *       of a use-on source that spends its tool (its tools are planned and spent the same way), and a
  *       strategy's nodes. After a round that committed anything the shortfall is taken again, until a round commits
  *       none (P12b item 1, P12c item 1: the tool chain and the payments eat stock the first list counted);</li>
  *   <li>emits one gather leaf per remaining listed item, the goal of each computed from the working stock at that
@@ -79,6 +80,11 @@ import java.util.TreeSet;
  *       {@code false}).</li>
  *   <li>{@code fish}: {@code item}, {@code count}, {@code table}. The plan provides a fishing rod first, as it
  *       provides a mining source's tool: planned like any item, kept, never consumed.</li>
+ *   <li>{@code use_on}: {@code item}, {@code count}, {@code tool} (what is held and used), {@code spent} ({@code true}
+ *       or {@code false}), {@code targetKind} ({@code fluid}, {@code block} or {@code entity}), {@code target}, and
+ *       {@code variant} when there is one (a sheep's dye colour). A spent tool — a bucket becomes the result — is
+ *       planned and spent as a trade's payment is, one per unit of the result; a kept tool (shears) is a prerequisite
+ *       relied on exactly as the fishing rod is.</li>
  *   <li>{@code trade}: {@code item}, {@code count} (the trades: one item each), {@code profession},
  *       {@code level}, {@code cost} (what one trade charges, {@code item=count,item=count} in id order; the charge of
  *       an offer the body has noted, where it has noted one), {@code chance} (the share of offers that are this one)
@@ -285,7 +291,7 @@ public final class SolverPlanner implements Planner {
         private final Map<ItemKey, Long> stockView = Collections.unmodifiableMap(stock);
         private final List<String> notes = new ArrayList<>();
         private final TreeSet<String> toolPath = new TreeSet<>();
-        /** Items whose trade payment is being planned: a payment that needs the item itself is a cycle. */
+        /** Items whose charge is being planned (a trade's payment, a spent tool): one that needs the item itself is a cycle. */
         private final TreeSet<ItemKey> paying = new TreeSet<>();
         /** The containers the body may take from, nearest first, and the sum of what they are known to hold. */
         private final List<ContainerSight> supply;
@@ -729,11 +735,15 @@ public final class SolverPlanner implements Planner {
             long gatherCost = CostModel.UNOBTAINABLE;
             for (int i = 0; i < ranked.size() && chosen < 0; i++) {
                 Source source = ranked.get(i);
-                boolean trade = source instanceof Source.Trade;
-                Step ready = trade ? planSource(item, demand, source) : prerequisite(source);
+                // A trade and a use-on source that spends its tool are committed whole — the payment, the tools — so
+                // what they eat is out of the stock before the shortfall is trusted; any other source only has its
+                // prerequisite prepared here and its gather emitted later.
+                boolean whole = source instanceof Source.Trade
+                        || source instanceof Source.UseOn use && use.toolSpent();
+                Step ready = whole ? planSource(item, demand, source) : prerequisite(source);
                 if (ready.failure() == null) {
                     chosen = i;
-                    emitted = trade;
+                    emitted = whole;
                     prerequisite = ready.nodes();
                     afterPrerequisite = mark();
                     if (!strategies.isEmpty()) gatherCost = gatherTotal(source, demand, !prerequisite.isEmpty());
@@ -787,6 +797,12 @@ public final class SolverPlanner implements Planner {
                 // The rod once, as the tool is charged once (its recipe is the price of sticks and string).
                 long price = solver.unitCost(FISHING_ROD);
                 if (price < CostModel.UNOBTAINABLE) total = satAdd(total, price);
+            }
+            if (needsTool && source instanceof Source.UseOn use) {
+                // The tool once when it is kept, and one per unit of the result when it is spent (a bucket a lava
+                // bucket costs).
+                long price = solver.unitCost(use.tool());
+                if (price < CostModel.UNOBTAINABLE) total = satAdd(total, use.toolSpent() ? satMul(price, demand) : price);
             }
             return total;
         }
@@ -862,6 +878,14 @@ public final class SolverPlanner implements Planner {
                     removeStock(charge.getKey(), (long) charge.getValue() * demand);
                 }
             }
+            if (source instanceof Source.UseOn use && use.toolSpent()) {
+                // The tool becomes the result: one per unit of it, planned as a trade's payment is and then spent, so
+                // the next shortfall counts the tools gone (two lava buckets need two buckets).
+                Step tools = spentTool(item, use, demand);
+                if (tools.failure() != null) return tools;
+                nodes.addAll(tools.nodes());
+                removeStock(use.tool(), demand);
+            }
             addStock(item, demand);
             long absolute = check == null ? held(item) : checkedTarget;
             if (absolute > Integer.MAX_VALUE) {
@@ -897,7 +921,9 @@ public final class SolverPlanner implements Planner {
         /**
          * The tool prerequisite of a source, as a group node placed before the gather, or nothing when the source
          * needs no tool or the body carries one (brief P12). A mining source that requires a tool of no known class
-         * cannot be planned. A fishing source's tool is its rod, planned the same way.
+         * cannot be planned. A fishing source's tool is its rod and a use-on source that keeps its tool (shears) is
+         * planned the same way ({@link #keptToolPrerequisite}); a use-on source that spends its tool has no
+         * prerequisite here, for its tools are planned with the gather as a trade's payment is.
          */
         private Step prerequisite(Source source) {
             if (source instanceof Source.MineBlock mine && mine.toolRequired()) {
@@ -911,36 +937,39 @@ public final class SolverPlanner implements Planner {
                 }
                 return toolPrerequisite(mine);
             }
-            if (source instanceof Source.Fishing fishing) return rodPrerequisite(fishing);
+            if (source instanceof Source.Fishing fishing) return keptToolPrerequisite(fishing, FISHING_ROD);
+            if (source instanceof Source.UseOn use && !use.toolSpent()) {
+                return keptToolPrerequisite(use, use.tool());
+            }
             return Step.ok(List.of());
         }
 
-        /** True while the rod is being planned, so a fish source the rod's own ingredients need cannot be asked for it again. */
-        private boolean planningRod;
+        /** Tools a kept-tool prerequisite is still planning, so one whose own chain needs the source cannot loop. */
+        private final TreeSet<ItemKey> planningKeptTools = new TreeSet<>();
 
         /**
-         * The rod a fishing source casts with, planned like any item is planned and kept, not consumed (as a crafting
-         * station is: relied on, never drawn). One rod serves however many fish leaves a plan has: once one is in the
-         * working stock, the next fishing source plans nothing. A plan whose rod cannot be had makes the source
-         * unusable, and the item's other sources are tried as they are for a mining source whose tool cannot be had.
+         * A tool the source holds and uses and keeps (a fishing rod, shears), planned like any item is planned and
+         * relied on, never consumed (as a crafting station is: relied on, never drawn). One tool serves however many
+         * leaves a plan has: once one is in the working stock, the next source that needs it plans nothing. A plan
+         * whose tool cannot be had makes the source unusable, and the item's other sources are tried as they are for a
+         * mining source whose tool cannot be had.
          */
-        private Step rodPrerequisite(Source.Fishing fishing) {
-            if (held(FISHING_ROD) >= 1) {
-                relied.merge(FISHING_ROD, 1L, (a, b) -> Math.max(a, b));
+        private Step keptToolPrerequisite(Source source, ItemKey tool) {
+            if (held(tool) >= 1) {
+                relied.merge(tool, 1L, (a, b) -> Math.max(a, b));
                 return Step.ok(List.of());
             }
-            if (planningRod) {
-                return Step.fail(new Failure.NoSource(FISHING_ROD, fishing.id(), "planning the fishing rod needs "
-                        + fishing.item().id() + " from " + fishing.id() + ", which needs the rod: a cycle"));
+            if (!planningKeptTools.add(tool)) {
+                return Step.fail(new Failure.NoSource(tool, source.id(), "planning the " + tool.id() + " needs "
+                        + source.item().id() + " from " + source.id() + ", which needs the " + tool.id() + ": a cycle"));
             }
-            planningRod = true;
             try {
-                Step step = itemPlan(FISHING_ROD, 1);
+                Step step = itemPlan(tool, 1);
                 if (step.failure() != null) return step;
                 return Step.ok(step.nodes().isEmpty() ? List.of()
-                        : List.of(NodeSpec.group(new Goal.HaveItem(FISHING_ROD, 1), step.nodes())));
+                        : List.of(NodeSpec.group(new Goal.HaveItem(tool, 1), step.nodes())));
             } finally {
-                planningRod = false;
+                planningKeptTools.remove(tool);
             }
         }
 
@@ -973,6 +1002,27 @@ public final class SolverPlanner implements Planner {
             } finally {
                 toolPath.remove(key);
                 toolDepth--;
+            }
+        }
+
+        /**
+         * The item plan for the tools a use-on source spends, one tool per unit of the result, planned as a trade's
+         * payment is planned (brief P12b item 6's shape) and spent by the caller. A tool whose own chain needs the
+         * item it obtains is a cycle and makes the source unusable.
+         */
+        private Step spentTool(ItemKey item, Source.UseOn use, long count) {
+            if (count <= 0 || held(use.tool()) >= count) return Step.ok(List.of());
+            if (!paying.add(item)) {
+                return Step.fail(new Failure.NoSource(item, use.id(), "the " + use.tool().id() + " that " + use.id()
+                        + " spends needs " + item.id() + " itself: a cycle"));
+            }
+            try {
+                if (count > Integer.MAX_VALUE) {
+                    return Step.fail(internal("the tools for " + use.id() + " exceed what a goal can count"));
+                }
+                return expand(new Goal.HaveItem(use.tool(), (int) count));
+            } finally {
+                paying.remove(item);
             }
         }
 
@@ -1395,6 +1445,12 @@ public final class SolverPlanner implements Planner {
                 params.put("jobSite", trade.jobSite() == null ? "" : trade.jobSite().id());
             } else if (source instanceof Source.ChestLoot chest) {
                 params.put("table", chest.table());
+            } else if (source instanceof Source.UseOn use) {
+                params.put("tool", use.tool().id());
+                params.put("spent", Boolean.toString(use.toolSpent()));
+                params.put("targetKind", use.targetKind());
+                params.put("target", use.target());
+                if (use.variant() != null) params.put("variant", use.variant());
             }
             return params;
         }
@@ -1416,6 +1472,7 @@ public final class SolverPlanner implements Planner {
                 case Source.Fishing fishing -> "fish";
                 case Source.Trade trade -> "trade";
                 case Source.ChestLoot chest -> "chest"; // unreachable: chest loot is unusable and never chosen
+                case Source.UseOn use -> "use_on";
             };
         }
 
@@ -1769,10 +1826,10 @@ public final class SolverPlanner implements Planner {
 
     /**
      * The part of the fingerprint the sight contributes. For a goal the planner can see into, one mark per block that a
-     * mining or harvesting source of an item in {@code closure} names: seen or not, never the distance. For a goal it
-     * cannot (null closure), the set of blocks in the sight. {@code none} when the sight is empty, because an empty
-     * sight adds no charge at all and a sight that holds none of these blocks charges them all. Nothing when the plan
-     * has no such block to read.
+     * mining or harvesting source, or a use-on source's fluid or block target, of an item in {@code closure} names:
+     * seen or not, never the distance. For a goal it cannot (null closure), the set of blocks in the sight.
+     * {@code none} when the sight is empty, because an empty sight adds no charge at all and a sight that holds none
+     * of these blocks charges them all. Nothing when the plan has no such block to read.
      */
     private String sightText(Snapshot snapshot, TreeSet<ItemKey> closure) {
         TreeSet<String> blocks = new TreeSet<>();
@@ -1783,6 +1840,9 @@ public final class SolverPlanner implements Planner {
                 for (Source source : index.sources(item)) {
                     if (source instanceof Source.MineBlock mine) blocks.add(mine.block());
                     else if (source instanceof Source.Harvest harvest) blocks.add(harvest.block());
+                    else if (source instanceof Source.UseOn use && !Source.UseOn.ENTITY.equals(use.targetKind())) {
+                        blocks.add(use.target());
+                    }
                 }
             }
         }
@@ -1838,6 +1898,9 @@ public final class SolverPlanner implements Planner {
                 } else if (source instanceof Source.Fishing) {
                     // The rod every fish source needs is read like a tool: a plan that would have to make one changed.
                     queue.add(FISHING_ROD);
+                } else if (source instanceof Source.UseOn use) {
+                    // The tool the source holds and uses, spent or kept: a plan that would have to make one changed.
+                    queue.add(use.tool());
                 } else if (source instanceof Source.Trade trade) {
                     queue.addAll(trade.cost().keySet());
                     // The job site the trade's plan holds, like the rod a fish source needs.

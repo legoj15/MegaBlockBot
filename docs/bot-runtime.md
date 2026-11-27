@@ -79,6 +79,8 @@ returns hints for where to look after a restart, never facts.
 
 Registered here: `craft`, `smelt`, `stonecut`, `smith` and `equip`. `navigate`, `reach`, `mine`, `fish`, `kill`,
 `harvest`, `recover_drops`, `deposit`, `withdraw`, `look_inside` and `build` are registered by the navigation work
+Registered here: `craft`, `smelt` and `equip`. `navigate`, `reach`, `mine`, `fish`, `kill`, `harvest`, `use_on`,
+`recover_drops`, `deposit`, `withdraw`, `look_inside` and `build` are registered by the navigation work
 (`TaskFeature`), not here.
 
 What the navigation tasks need from this runtime:
@@ -681,6 +683,87 @@ that undercuts the trade still winning as it always did. The leaf's source id ri
   trade of the same profession that needs a roll of its own therefore ends `MissingInput` for the job-site item and
   the next plan brings one.
 - `progress()` says what it is doing: looking for a villager, looking at offers, the roll it is on, paying.
+
+## `use_on`
+
+Holds a tool and uses it on a fluid, a block or a mob until the body holds the leaf's count of the item
+(`game.task.UseOnTask`; the source is `Source.UseOn`, priced by the `useOn` cost — a kill's price by default, since
+one use is one walk and one click the way one kill is one fight). Leaf params: `item`, `count` (how many more; the
+goal's absolute count wins, as for a mine leaf), `tool` (what is held and used), `spent` (`true` when the tool
+becomes the result, as a bucket does), `targetKind` (`fluid`, `block` or `entity`), `target` (the registry id) and
+`variant` (a sheep's dye colour, only when there is one).
+
+- **The plan gets the tool first.** A spent tool is planned and spent as a trade's payment is: one tool per unit of
+  the result (two lava buckets need two buckets), planned against the working stock before the leaf and removed from
+  it, so the next shortfall counts the tools gone — the source is committed whole, as a trade is. A kept tool
+  (shears) is a prerequisite relied on exactly as the fishing rod is (`SolverPlanner.prerequisite`'s kept-tool
+  planning, which the rod's was generalised into: planned like any item, kept, never consumed, once per plan however
+  many leaves need it, and a cycle — a tool whose own chain needs the item — makes the source unusable). A source
+  whose tool cannot be had is unusable the way a mining source whose pickaxe cannot be had is: priced
+  `UNOBTAINABLE` (`GatherCosts.toolObtainable`), so the item's other sources are tried and the failure for an item
+  with no other way names the tool.
+- **MissingInput** names the tool when the body holds none of it (for a spent tool, at least one: the plan provides
+  one per unit as it goes). A full inventory the result would not fit is **`NoRoom`**: with several of a spent tool
+  stacked in one slot the filled one cannot stack onto them and would be dropped, and a kept tool's result (wool)
+  lies where it fell until it is picked up — a single spent tool is replaced in the hand by what it becomes, which
+  always fits.
+- **Finding a target**, within the search radius the kill and harvest tasks use (24 blocks for a mob, a 32-block scan
+  of the loaded chunks for a fluid or block cell): a source cell of the fluid (a cell of the block, powder snow),
+  with a standable cell beside it that the use reaches (below); or a living mob of the type that is ready — not a
+  baby, and a sheep ready for shearing (`Sheep.readyForShearing`) and of the variant's colour; any adult serves for
+  milking, which takes nothing. A mob that is named or leashed is left alone by the rule the kill task also uses
+  (`KillTask.takeable`, shared). Cells the body has already used the tool on for nothing are read too and not gone to
+  again. None: it explores with the kill task's bounds (`UseOnTask.Search`), one look per stretch of exploring, and
+  past them fails `NoSource` with the leaf's item and source id (`BodyTask.exploreFailure` decides what an exploring
+  command's failure says, as for `mine`, `fish`, `kill` and `harvest`).
+- **The break rules are asked before a scoop**: scooping a fluid removes a block, so the cell is put to
+  `BreakRules.filterFor(body)` and a refused one is set aside; when only refused cells are left the failure is
+  `Protected` naming the nearest. A cell the body stood at and used the tool on until it gave up on is a different
+  thing — the target is there and the rules allow it — so when only those are left the failure is `NoProgress`, which
+  keeps `NoSource` meaning a source with nothing to give and sends the plan looking again rather than excluding the
+  source. Catching a fish and shearing a sheep take from a mob, which the shared eligibility rule covers; milking
+  takes nothing.
+- **Going to it.** A fluid or block target is walked to through `BotNavigator.goTo` to a standable cell beside it
+  (`TableSites.standable`): never a cell of the fluid itself, never one whose floor would not hold the body at full
+  height — so the lava being scooped is neither stood in nor pathed through. Stands are preferred by the same
+  `Level.clip` the use itself will end in — the blocks' outlines, and the sources when the target is a fluid — asked
+  from the stand's eyes to the aim point and answered with the target cell or with something else; the nearest stand
+  whose line strikes the rim a walled source hides behind is a stand from which the use does nothing, so it is not
+  chosen while one that reaches is left. A mob is followed (`BotNavigator.follow`) and closed on by the body's own
+  steps within 4 blocks, as the kill task closes on its quarry, re-aiming as the mob moves.
+- **The use itself**: the tool taken into the main hand (a hotbar select or a `MenuHand` swap, as the fish task takes
+  its rod); the body turned at the target — into the fluid cell a little below its top face and toward the side away
+  from the body, at the mob's eyes — by a look written to the input *and* to the body's rotation, and left
+  `UseOnTask.TURN_TICKS` (one) tick to finish that turn before the use is given: the game's ray-cast reads the
+  rotation the body actually has, and a look written during the brain's tick is only in it from the next tick
+  (`BodyInput.applyTo`, after `BotPlayer.tick`), which is why the fish task waits two ticks for its cast. Then one
+  use: the body's `interactItem` for a fluid or a block (`ServerPlayerGameMode.useItem`, where `BucketItem.use`
+  ray-casts `SOURCE_ONLY` from the eyes along that rotation and `pickupBlock` removes the source), and the body's
+  `interactOn(entity, MAIN_HAND)` for a mob, which runs the mob's own `interact` and then the held item's
+  `interactLivingEntity` (a cow's milk, a `Bucketable` fish, `ShearsItem` on an `IShearable` sheep, whose wool spawns
+  as item entities beside it). Then a few ticks' wait and the count: gained means progress; a target that has not paid
+  out after `UseOnTask.USES_PER_TARGET` uses is set aside and another taken — a mob by itself, a cell among the cells
+  the tool did nothing to.
+- **The drops are picked up** as in `kill` (`DropPickup`): what a shearing dropped lies beside the sheep; with
+  nothing lying, the pick-up ends at once, so only a use that dropped something pays for a walk.
+- **Interruptions and exits**: pause, abort and completion go through `BodyTask.release`, which stops the task's own
+  navigator command and nothing else's; the input is reset; no use is held (an item use is one tick long). A resumed
+  task looks again from the top. `waiting()` is true while a use's result and a pick-up are the game's timing, so the
+  stuck watchdog leaves it alone. The checkpoint holds the dimension, how far the search has reached and the cells it
+  could not get at — a mob moves, so none is named.
+- Time: the kind has its own budget (`BotRuntime.USE_ON_BUDGET_TICKS`, 24000 ticks — one use is one walk and one
+  click, but the target may be nowhere near and the search explores as far as a mine's, and a goal of several units
+  repeats the walk).
+- `progress()`: "looking for lava to use the bucket on", "walking to a cow", "using the bucket on a sheep" — and how
+  many of the item it holds.
+- `UseOnGameTests` (registered with the navigation work's, in `NavFeature`): a bucket beside a walled lava basin ends
+  holding a lava bucket with the cell no longer lava and the body's health what it was; a bucket and a penned cow end
+  with a milk bucket and the cow alive; a water bucket and a walled pool holding one salmon end with a salmon bucket;
+  shears and a penned white sheep end holding white wool with the sheep alive and sheared; no target anywhere fails
+  `NoSource` inside its bound; no bucket carried fails `MissingInput` naming it. Every test is in a batch of its own,
+  as the kill tests' flocks are: the scan does not stop at walls, so a basin or an animal in a neighbouring arena is a
+  target for this body too. The penned animals are set down at the arena's absolute position and in the pen the kill
+  tests build; the salmon in the water of a pool like the fish tests' own.
 
 ## Supply containers, `look_inside` and `withdraw`
 

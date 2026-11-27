@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
@@ -46,6 +47,7 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.attributes.DefaultAttributes;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.BucketItem;
+import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -84,6 +86,9 @@ public final class AcquisitionIndexBuilder {
         "minecraft:campfire_cooking", "minecraft:stonecutting", "minecraft:smithing");
 
     private static final String FISHING_TABLE = "minecraft:gameplay/fishing";
+
+    /** What a grown sheep drops on the shears: one to three, so the middle of the range; never nothing. */
+    private static final double SHEEP_WOOL_YIELD = 2.0;
 
     // The loot table types the index reads; every other type is counted in the notes.
     private static final Set<String> READ_TABLE_TYPES = Set.of("minecraft:block", "minecraft:entity", "minecraft:chest", "minecraft:fishing");
@@ -125,7 +130,7 @@ public final class AcquisitionIndexBuilder {
         section("villager trades", () -> TradeSampler.sample(server, notes).forEach(index::addSource));
         section("recipes", this::recipes);
         section("loot tables of unread types", this::unreadLootTables);
-        section("buckets", this::buckets);
+        section("using a tool on something", this::usedOn);
         section("game code drops", this::gameCodeDrops);
         section("standing notes", this::standingNotes);
         notes.lines().forEach(index::note);
@@ -351,43 +356,37 @@ public final class AcquisitionIndexBuilder {
             if (type == null || READ_TABLE_TYPES.contains(type) || type.equals("minecraft:generic")) continue;
             String way = WAYS_BY_TABLE_TYPE.getOrDefault(type, KnownWay.OTHER_LOOT);
             for (Route route : eval.routes(table, EnumSet.of(Tool.PLAIN), false, LootEval.StateRule.MINED)) {
-                index.addKnownWay(new KnownWay(wayIdPrefix(way) + table, ItemKey.of(route.item()), way, table));
+                index.addKnownWay(new KnownWay(way + ":" + table, ItemKey.of(route.item()), way, table));
             }
         }
     }
 
-    // The id prefix of a way, in the style of Source ids: the two bucket ways and the game-code rows read better
-    // short ("fill:minecraft:lava", "code:wither"), every other way is its own prefix.
-    private static String wayIdPrefix(String way) {
-        switch (way) {
-            case KnownWay.FILL_BUCKET: return "fill:";
-            case KnownWay.CATCH_IN_BUCKET: return "catch:";
-            case KnownWay.GAME_CODE: return "code:";
-            default: return way + ":";
-        }
-    }
-
     /**
-     * The buckets, read off the item classes: a {@link BucketItem} holds a fluid the player scoops up, a
-     * {@link MobBucketItem} a fish the player catches (the water it also holds is not the way), and the one
-     * {@link SolidBucketItem}, powder snow, a block. None is a source the planner can choose, so each is a way.
+     * What a player gets by holding a tool and using it on something (issue #28), read off the item classes: a
+     * {@link BucketItem} holding a fluid is that fluid scooped up with an empty bucket, the one {@link SolidBucketItem}
+     * (powder snow) is its block scooped the same way, a {@link MobBucketItem} is its fish caught into a water bucket
+     * (the water it also holds is not the way), the milk bucket is an empty bucket on a cow, a mooshroom or a goat
+     * ({@code Cow.mobInteract} and the goat's own class), and wool is shears on a sheep of that colour. Each is a
+     * source now, not a known way: a known way is by definition one no source records.
      */
-    private void buckets() {
+    private void usedOn() {
         var features = server.getWorldData().enabledFeatures();
         for (Item item : BuiltInRegistries.ITEM) {
             if (!item.isEnabled(features)) continue;
             String itemId = BuiltInRegistries.ITEM.getKey(item).toString();
             try {
-                bucket(item, itemId);
+                usedOn(item, itemId);
             } catch (RuntimeException e) {
-                // One modded bucket that throws costs that bucket, not every way this section records.
-                notes.skipped("buckets whose content could not be read", itemId + " (" + e.getClass().getSimpleName() + ")");
+                // One modded bucket that throws costs that bucket, not every source this section records.
+                notes.skipped("items used on something whose target could not be read", itemId + " (" + e.getClass().getSimpleName() + ")");
             }
         }
+        milk();
+        woolByShears();
     }
 
-    /** One bucket item: the way its content gives it, if it holds any. */
-    private void bucket(Item item, String itemId) {
+    /** One bucket item: the source its content gives it, if it holds any. */
+    private void usedOn(Item item, String itemId) {
         if (item instanceof MobBucketItem) {
             // The entity type is a private field with no getter; the ids name it instead (every mob bucket is
             // "<fish>_bucket" for the fish "<fish>"), so a bucket that does not follow the naming is counted.
@@ -397,14 +396,14 @@ public final class AcquisitionIndexBuilder {
                 return;
             }
             String entityId = BuiltInRegistries.ENTITY_TYPE.getKey(fish.get()).toString();
-            index.addKnownWay(new KnownWay(wayIdPrefix(KnownWay.CATCH_IN_BUCKET) + entityId,
-                ItemKey.of(itemId), KnownWay.CATCH_IN_BUCKET, entityId));
+            index.addSource(new Source.UseOn(useId(Items.WATER_BUCKET, Source.UseOn.ENTITY, entityId, null),
+                ItemKey.of(itemId), itemKey(Items.WATER_BUCKET), true, Source.UseOn.ENTITY, entityId, null, 1.0, false));
         } else if (item instanceof BucketItem bucket) {
             Fluid content = bucket.content;
             if (content == Fluids.EMPTY) return; // the empty bucket scoops nothing
             String fluidId = BuiltInRegistries.FLUID.getKey(content).toString();
-            index.addKnownWay(new KnownWay(wayIdPrefix(KnownWay.FILL_BUCKET) + fluidId,
-                ItemKey.of(itemId), KnownWay.FILL_BUCKET, fluidId));
+            index.addSource(new Source.UseOn(useId(Items.BUCKET, Source.UseOn.FLUID, fluidId, null),
+                ItemKey.of(itemId), itemKey(Items.BUCKET), true, Source.UseOn.FLUID, fluidId, null, 1.0, false));
         } else if (item instanceof SolidBucketItem) {
             // The block is a private field with no getter either; the id names it ("powder_snow_bucket").
             Optional<Block> block = registrySibling(BuiltInRegistries.BLOCK, itemId, "_bucket");
@@ -413,9 +412,48 @@ public final class AcquisitionIndexBuilder {
                 return;
             }
             String blockId = BuiltInRegistries.BLOCK.getKey(block.get()).toString();
-            index.addKnownWay(new KnownWay(wayIdPrefix(KnownWay.FILL_BUCKET) + blockId,
-                ItemKey.of(itemId), KnownWay.FILL_BUCKET, blockId));
+            index.addSource(new Source.UseOn(useId(Items.BUCKET, Source.UseOn.BLOCK, blockId, null),
+                ItemKey.of(itemId), itemKey(Items.BUCKET), true, Source.UseOn.BLOCK, blockId, null, 1.0, false));
         }
+    }
+
+    /** The milk bucket: an empty bucket used on an adult cow, a mooshroom or a goat, one source each. */
+    private void milk() {
+        for (EntityType<?> type : List.of(EntityType.COW, EntityType.MOOSHROOM, EntityType.GOAT)) {
+            ResourceLocation id = BuiltInRegistries.ENTITY_TYPE.getKey(type);
+            if (id == null) continue; // the type is not registered in this server
+            String entityId = id.toString();
+            index.addSource(new Source.UseOn(useId(Items.BUCKET, Source.UseOn.ENTITY, entityId, null),
+                itemKey(Items.MILK_BUCKET), itemKey(Items.BUCKET), true, Source.UseOn.ENTITY, entityId, null, 1.0, false));
+        }
+    }
+
+    /** Wool by shears: one source per dye colour, the sheep's own colour, which the shearing drops beside it. */
+    private void woolByShears() {
+        var features = server.getWorldData().enabledFeatures();
+        for (DyeColor colour : DyeColor.values()) {
+            String name = colour.getName();
+            ResourceLocation id = ResourceLocation.fromNamespaceAndPath("minecraft", name + "_wool");
+            Optional<Item> wool = BuiltInRegistries.ITEM.getOptional(id);
+            if (wool.isEmpty()) {
+                notes.skipped("wool colours whose item is not registered", id.toString());
+                continue;
+            }
+            if (!wool.get().isEnabled(features)) continue;
+            String sheep = "minecraft:sheep";
+            index.addSource(new Source.UseOn(useId(Items.SHEARS, Source.UseOn.ENTITY, sheep, name),
+                ItemKey.of(id.toString()), itemKey(Items.SHEARS), false, Source.UseOn.ENTITY, sheep, name,
+                SHEEP_WOOL_YIELD, false));
+        }
+    }
+
+    /** The id of a use-on source: {@code use:<tool>@<target kind>:<target>}, with {@code #<variant>} when there is one. */
+    private static String useId(Item tool, String targetKind, String target, @Nullable String variant) {
+        return "use:" + itemKey(tool).id() + "@" + targetKind + ":" + target + (variant == null ? "" : "#" + variant);
+    }
+
+    private static ItemKey itemKey(Item item) {
+        return ItemKey.of(BuiltInRegistries.ITEM.getKey(item).toString());
     }
 
     // The registry entry a bucket's content has by the id convention (<x>_bucket holds <x>), or empty when no such
@@ -444,9 +482,8 @@ public final class AcquisitionIndexBuilder {
         // The item frame an end ship generates with the elytra still in it.
         new CodeDrop("minecraft:elytra", "code:end_ship", "the item frame that holds it in an end ship"),
         // The egg the first killed dragon leaves on the exit portal; only one per world.
-        new CodeDrop("minecraft:dragon_egg", "code:dragon_egg", "the first dragon kill"),
-        // An empty bucket used on a cow, a mooshroom or a goat: the milk is no fluid a bucket scoops and no drop.
-        new CodeDrop("minecraft:milk_bucket", "code:milking", "an empty bucket used on a cow, a mooshroom or a goat"));
+        new CodeDrop("minecraft:dragon_egg", "code:dragon_egg", "the first dragon kill"));
+    // The milk bucket is a use-on source (an empty bucket on a cow), not a code drop.
 
     /** Records the code drops above as game-code ways. */
     private void gameCodeDrops() {

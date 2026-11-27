@@ -168,4 +168,33 @@ public sealed interface Source {
             Objects.requireNonNull(block, "block");
         }
     }
+
+    /**
+     * Holding a tool and using it on a fluid, a block or a mob (issue #28): a bucket scooped into a lava source, a
+     * water bucket closed on a fish, an empty bucket on a cow, shears on a sheep. {@code tool} is what is held and
+     * used; {@code toolSpent} is true when the tool becomes the result (a bucket: one tool per unit of the item) and
+     * false when it is kept for the next use (shears, which only lose durability). {@code targetKind} is
+     * {@link #FLUID}, {@link #BLOCK} or {@link #ENTITY}, {@code target} the registry id of the fluid, the block or the
+     * entity type, and {@code variant} a further name of the target (a sheep's dye colour) or null.
+     *
+     * <p>One use is one attempt. A kept tool's result may be dropped beside the target and walked to, so the yield is
+     * what the game drops on the average; a spent tool's result lands in the hand.
+     */
+    record UseOn(String id, ItemKey item, ItemKey tool, boolean toolSpent, String targetKind, String target,
+                 String variant, double yield, boolean random) implements Source {
+        /** The target is a fluid source the tool is dipped into. */
+        public static final String FLUID = "fluid";
+        /** The target is a block the tool is used on. */
+        public static final String BLOCK = "block";
+        /** The target is a living entity the tool is used on. */
+        public static final String ENTITY = "entity";
+
+        public UseOn {
+            Objects.requireNonNull(id, "id");
+            Objects.requireNonNull(item, "item");
+            Objects.requireNonNull(tool, "tool");
+            Objects.requireNonNull(targetKind, "targetKind");
+            Objects.requireNonNull(target, "target");
+        }
+    }
 }

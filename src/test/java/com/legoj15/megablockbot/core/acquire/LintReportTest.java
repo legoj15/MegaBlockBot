@@ -31,10 +31,10 @@ final class LintReportTest {
             .addCraftable(BREAD)
             .addKnownWay(new KnownWay("barter:minecraft:gameplay/piglin_barter", LEATHER, KnownWay.BARTER,
                 "minecraft:gameplay/piglin_barter"))
-            .addKnownWay(new KnownWay("fill:minecraft:lava", LAVA_BUCKET, KnownWay.FILL_BUCKET, "minecraft:lava"))
+            .addKnownWay(new KnownWay("modded_fill:minecraft:lava", LAVA_BUCKET, "modded_fill", "minecraft:lava"))
             .addKnownWay(new KnownWay("code:wither", NETHER_STAR, KnownWay.GAME_CODE, "the wither drops it when it dies"))
             .addKnownWay(new KnownWay("other_loot:somemod:mystery", WIDGET, KnownWay.OTHER_LOOT, "somemod:mystery"))
-            .addKnownWay(new KnownWay("fill:somemod:acid", WIDGET, KnownWay.FILL_BUCKET, "somemod:acid"))
+            .addKnownWay(new KnownWay("modded_fill:somemod:acid", WIDGET, "modded_fill", "somemod:acid"))
             .build();
     }
 
@@ -63,16 +63,16 @@ final class LintReportTest {
     void waysAreHeldApartFromTheSourcesAndSortedById() {
         AcquisitionIndex index = index();
         assertEquals(List.of(), index.knownWays(SPAWN_EGG));
-        assertEquals(List.of("fill:somemod:acid", "other_loot:somemod:mystery"),
+        assertEquals(List.of("modded_fill:somemod:acid", "other_loot:somemod:mystery"),
             index.knownWays(WIDGET).stream().map(KnownWay::id).toList());
     }
 
     @Test
     void theFileListsEachNoStrategyItemWithItsWays() {
         String text = LintReport.of(index(), null).fullText();
-        assertTrue(text.contains("minecraft:lava_bucket: fill_bucket minecraft:lava\n"), text);
+        assertTrue(text.contains("minecraft:lava_bucket: modded_fill minecraft:lava\n"), text);
         assertTrue(text.contains("minecraft:nether_star: game_code the wither drops it when it dies\n"), text);
-        assertTrue(text.contains("somemod:widget: fill_bucket somemod:acid, other_loot somemod:mystery\n"), text);
+        assertTrue(text.contains("somemod:widget: modded_fill somemod:acid, other_loot somemod:mystery\n"), text);
         assertFalse(text.contains("minecraft:leather:"), text); // with a source, so no way line of its own
         assertTrue(text.contains("minecraft:zombie_spawn_egg\n"), text);
     }
