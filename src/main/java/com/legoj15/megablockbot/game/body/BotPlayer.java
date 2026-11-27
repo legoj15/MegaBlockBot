@@ -63,7 +63,7 @@ public class BotPlayer extends ServerPlayer
     private List<ItemEntity> deathDrops;
     // The navigation engine's views of this instance's own inventory, food and game mode (see the nav section below).
     private final BodyInventory navInventory = new BodyInventory(getInventory());
-    private final BodyHunger navHunger = new BodyHunger(getFoodData());
+    private final BodyHunger navHunger = new BodyHunger(this);
     private final BodyInteractionManager navInteraction = new BodyInteractionManager(this);
 
     /** The constructor {@code PlayerList.respawn} is redirected to; bodies spawned by the manager use the other one. */

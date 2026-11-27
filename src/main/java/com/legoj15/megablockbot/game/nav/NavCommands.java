@@ -11,9 +11,11 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.RequiredArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
@@ -25,6 +27,10 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.phys.Vec3;
@@ -122,11 +128,24 @@ final class NavCommands {
             return 0;
         }
         int count = IntegerArgumentType.getInteger(ctx, "count");
+        List<Item> wanted = dropsOf(body.serverLevel(), block.get());
         DevBrain brain = brainOf(body);
-        BotNavigator.of(body).mine(List.of(block.get()), count);
+        BotNavigator.of(body).mine(List.of(block.get()), wanted, count);
         brain.started(body, "mine " + id + " x" + count);
-        ctx.getSource().sendSuccess(() -> Component.literal(body.getGameProfile().getName() + " mining " + count + " " + id), true);
+        ctx.getSource().sendSuccess(() -> Component.literal(body.getGameProfile().getName() + " mining " + count + " " + id
+            + " for " + wanted.stream().map(item -> BuiltInRegistries.ITEM.getKey(item).toString()).toList()), true);
         return 1;
+    }
+
+    /**
+     * What breaking the block with a bare hand yields, from its loot table: what the command waits for. A block with
+     * random drops can yield something this sample misses; this is a debugging command, the tasks name their item.
+     */
+    private static List<Item> dropsOf(ServerLevel level, Block block) {
+        Set<Item> items = new LinkedHashSet<>();
+        for (ItemStack stack : Block.getDrops(block.defaultBlockState(), level, BlockPos.ZERO, null)) items.add(stack.getItem());
+        if (items.isEmpty() && block.asItem() != Items.AIR) items.add(block.asItem());
+        return List.copyOf(items);
     }
 
     private static int stop(CommandContext<CommandSourceStack> ctx) {

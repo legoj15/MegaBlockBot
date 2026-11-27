@@ -6,6 +6,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerPlayerGameMode;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.LivingEntity;
@@ -42,6 +43,8 @@ public final class BodyInteractionManager implements IInteractionManager {
     // Counts for the dev command's report: blocks this body broke and placed through this manager.
     private int broken;
     private int placed;
+    // Where the last block this body broke stood (a task keeps it as a hint of where the ore is).
+    private BlockPos lastBroken;
 
     public BodyInteractionManager(ServerPlayer player) {
         this.player = player;
@@ -66,7 +69,10 @@ public final class BodyInteractionManager implements IInteractionManager {
             case STOP_DESTROY_BLOCK -> {
                 if (mining && pos.equals(miningPos)) {
                     player.gameMode.handleBlockBreakAction(pos, action, direction, worldHeight, sequence);
-                    if (player.level().getBlockState(pos).isAir()) broken++;
+                    if (player.level().getBlockState(pos).isAir()) {
+                        broken++;
+                        lastBroken = pos.immutable();
+                    }
                     mining = false;
                     progress = 0.0F;
                     cooldownUntil = now() + DESTROY_DELAY;
@@ -74,7 +80,7 @@ public final class BodyInteractionManager implements IInteractionManager {
             }
             case ABORT_DESTROY_BLOCK -> {
                 pendingPos = null;
-                if (mining) player.gameMode.handleBlockBreakAction(miningPos, action, direction, worldHeight, sequence);
+                releaseGameMode(direction, worldHeight, sequence);
                 mining = false;
                 progress = 0.0F;
             }
@@ -82,15 +88,49 @@ public final class BodyInteractionManager implements IInteractionManager {
         }
     }
 
+    /**
+     * Lets go of whatever break this body has begun, as a player does by releasing the mouse button: nothing is mined,
+     * nothing waits to start, and the game mode is no longer working on a block. A no-op when nothing was begun.
+     */
+    public void abortBreak() {
+        pendingPos = null;
+        releaseGameMode(Direction.UP, player.level().getMaxBuildHeight(), 0);
+        mining = false;
+        progress = 0.0F;
+    }
+
+    /**
+     * Sends the game mode an abort for the block it is working on, if it is working on one: the one this manager began,
+     * or one an earlier break left behind in the game mode's own state. The flag can outlive a break (a STOP the
+     * game mode refused, a cancelled event), and a flag left set would make a refused START look accepted.
+     */
+    private void releaseGameMode(Direction face, int worldHeight, int sequence) {
+        ServerPlayerGameMode gameMode = player.gameMode;
+        if (!mining && !gameMode.isDestroyingBlock) return;
+        BlockPos target = gameMode.isDestroyingBlock ? gameMode.destroyPos : miningPos;
+        gameMode.handleBlockBreakAction(target, Action.ABORT_DESTROY_BLOCK, face, worldHeight, sequence);
+        // The game mode ignores an abort for a block now out of reach, and a mod can cancel one: whatever is left of
+        // the break (the flag, the crack shown to other players) is cleared here, since this body is done with it.
+        gameMode.isDestroyingBlock = false;
+        player.level().destroyBlockProgress(player.getId(), target, -1);
+    }
+
     private void start(BlockPos pos, Direction face, int worldHeight, int sequence) {
         pendingPos = null;
         brokeBlock = true;
+        // A flag an earlier break left set is cleared first, as a client aborts the block it was on before it starts
+        // another: then the flag after the START says whether the game mode took this one.
+        releaseGameMode(face, worldHeight, sequence);
         boolean wasAir = player.level().getBlockState(pos).isAir();
         player.gameMode.handleBlockBreakAction(pos, Action.START_DESTROY_BLOCK, face, worldHeight, sequence);
-        if (!wasAir && player.level().getBlockState(pos).isAir()) broken++;
+        boolean air = player.level().getBlockState(pos).isAir();
+        if (!wasAir && air) {
+            broken++;
+            lastBroken = pos.immutable();
+        }
         // An instant break is already done, and a refused START (out of reach, protected, cancelled) set nothing:
         // either way there is nothing to count. Only a START the game mode is now working on is mined.
-        mining = player.gameMode.isDestroyingBlock && !player.level().getBlockState(pos).isAir();
+        mining = player.gameMode.isDestroyingBlock && player.gameMode.destroyPos.equals(pos) && !air;
         miningPos = pos.immutable();
         progress = 0.0F;
         startedAt = now();
@@ -152,6 +192,11 @@ public final class BodyInteractionManager implements IInteractionManager {
 
     public int blocksBroken() {
         return broken;
+    }
+
+    /** Where the last block this body broke stood, or null when it has broken none. */
+    public BlockPos lastBrokenPos() {
+        return lastBroken;
     }
 
     public int blocksPlaced() {

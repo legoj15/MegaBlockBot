@@ -2,6 +2,7 @@ package com.legoj15.megablockbot.game.safety;
 
 import com.legoj15.megablockbot.game.gametest.BlockSafetyGameTests;
 import com.legoj15.megablockbot.platform.LoaderServices;
+import com.legoj15.megablockbot.game.task.BreakRules;
 import com.legoj15.megablockbot.platform.Platform;
 
 /**
@@ -22,6 +23,10 @@ public final class SafetyFeature {
         // Tags and POI data can change on /reload, and with them which blocks are beds and workstations.
         loader.onServerDataLoaded(server -> BlockKinds.rebuild());
 
+        // Every task hands its body's navigator a filter that ends here: asked when a path is costed and again before
+        // each break, on search threads as well as the server thread.
+        BreakRules.setBodyRules((body, level, pos, state) ->
+            BlockSafety.of(level.getServer()).mayBreak(body, level, pos, state).allowed());
         SafetyCommands.init();
         loader.registerGameTests(BlockSafetyGameTests.class);
     }

@@ -25,11 +25,11 @@ import java.util.UUID;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.Clearable;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.Item;
-import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.Block;
@@ -56,6 +56,27 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 public final class BotNavigator {
     public enum State { IDLE, WORKING, DONE, FAILED }
 
+    /**
+     * Why a command failed, for callers that must route on it (a task maps these to typed failures; the text from
+     * {@link #failure()} is for logs only and may change).
+     */
+    public enum FailKind {
+        /** The engine found no route to the goal. */
+        NO_PATH,
+        /** A mine command ended with the body short of its count: no block of the kind is known and reachable. */
+        NOTHING_TO_MINE,
+        /** A go-to made no progress toward its goal for {@link #STALL_TICKS} ticks. */
+        STUCK,
+        /** An explore command could not find a path toward any chunk it has not seen. */
+        EXPLORE_FAILED,
+        /** A follow command's entity is gone. */
+        TARGET_GONE,
+        /** The body was replaced, removed or moved to another dimension while the command ran. */
+        BODY_LOST,
+        /** The engine threw. */
+        ENGINE_ERROR
+    }
+
     /** Ticks a go-to may go without getting closer to its goal before it is failed as stuck. */
     static final int STALL_TICKS = 1200;
     /** Path cost per point of fall damage: about one second of walking per half heart, so a long fall is a last resort. */
@@ -72,6 +93,8 @@ public final class BotNavigator {
     private State state = State.IDLE;
     @Nullable
     private String failure;
+    @Nullable
+    private FailKind failKind;
     private BreakFilter breakFilter = BreakFilter.ALLOW_ALL;
 
     @Nullable
@@ -127,20 +150,35 @@ public final class BotNavigator {
         e.getFollowProcess().follow(entity -> entity == target);
     }
 
-    /** Finds, reaches, breaks and picks up blocks until {@code count} more of their items are in the inventory. */
-    public void mine(Collection<Block> blocks, int count) {
+    /**
+     * Finds, reaches, breaks and picks up blocks of these kinds until the body holds {@code count} more of the
+     * {@code wanted} items than it does now. The wanted items are not the blocks' own: stone drops cobblestone and an
+     * ore drops a gem, so the caller names what the break yields. The command is done when that count is held; it
+     * fails ({@link FailKind#NOTHING_TO_MINE}) when the engine runs out of blocks it knows and can reach first.
+     */
+    public void mine(Collection<Block> blocks, Collection<Item> wanted, int count) {
+        if (blocks.isEmpty() || wanted.isEmpty()) throw new IllegalArgumentException("mine needs blocks and wanted items");
         Baritone e = begin(Kind.MINE);
-        Set<Item> items = new LinkedHashSet<>();
-        for (Block block : blocks) items.add(block.asItem());
-        mineItems = items;
-        // The engine counts what the inventory holds, not what it collected: aim at what is held now plus count.
+        mineItems = new LinkedHashSet<>(wanted);
         mineTarget = countHeld() + Math.max(1, count);
-        e.getMineProcess().mine(mineTarget, blocks.toArray(Block[]::new));
+        // The engine gets no count of its own (0 means mine until stopped): it would count a sample of the blocks'
+        // drops, which is not what this command promises, and would stop early or never. tick() ends the command.
+        e.getMineProcess().mine(0, blocks.toArray(Block[]::new));
     }
 
-    /** Walks outward from {@code origin} over chunks not seen yet, until stopped. */
+    /** Walks outward from {@code origin} over chunks not seen yet, at any height, until stopped. */
     public void explore(BlockPos origin) {
-        begin(Kind.EXPLORE).getExploreProcess().explore(origin.getX(), origin.getZ());
+        configureExplore(begin(Kind.EXPLORE), -1).getExploreProcess().explore(origin.getX(), origin.getZ());
+    }
+
+    /** As {@link #explore}, but keeps to the height {@code y} where the terrain allows (underground ore searches). */
+    public void exploreAtY(BlockPos origin, int y) {
+        configureExplore(begin(Kind.EXPLORE), y).getExploreProcess().explore(origin.getX(), origin.getZ());
+    }
+
+    private static Baritone configureExplore(Baritone e, int maintainY) {
+        e.settings().exploreMaintainY.set(maintainY);
+        return e;
     }
 
     /** Cancels whatever runs and releases the body's input. The state goes back to IDLE. */
@@ -150,6 +188,7 @@ public final class BotNavigator {
         goal = null;
         state = State.IDLE;
         failure = null;
+        failKind = null;
         releaseInput();
     }
 
@@ -157,10 +196,47 @@ public final class BotNavigator {
         return state;
     }
 
-    /** Why the last command failed, or null unless the state is FAILED. */
+    /** Why the last command failed, or null unless the state is FAILED. For logs: route on {@link #failKind()}. */
     @Nullable
     public String failure() {
         return state == State.FAILED ? failure : null;
+    }
+
+    /** What kind of failure ended the last command, or null unless the state is FAILED. */
+    @Nullable
+    public FailKind failKind() {
+        return state == State.FAILED ? failKind : null;
+    }
+
+    /** True while the body is working at a block (progress that its position and inventory do not show yet). */
+    public boolean breaking() {
+        return body.getInteractionManager().isMining();
+    }
+
+    /** True while a navigator exists for this body, whatever it is doing. For tests and the dev command. */
+    public static boolean tracks(UUID bodyId) {
+        return NAVIGATORS.containsKey(bodyId);
+    }
+
+    /**
+     * Drops the navigators of bodies that are gone for good. A navigator follows its body through a respawn (same
+     * UUID, new instance), so only a body that is no longer logged in at all, a despawn nothing replaced, makes its
+     * navigator dead weight; left alone it would keep the removed body, and its engine, in memory for the life of the
+     * process. Called periodically by {@link NavFeature}.
+     */
+    public static void sweep(MinecraftServer server) {
+        NAVIGATORS.values().removeIf(navigator -> {
+            if (navigator.body.getServer() != server) return false;
+            if (server.getPlayerList().getPlayer(navigator.body.getUUID()) != null) return false;
+            try {
+                if (navigator.engine != null) navigator.dropEngine(navigator.engine);
+            } catch (RuntimeException e) {
+                // Called from the server tick: the engine of a body that is gone must not take the tick down.
+                NavRuntime.LOGGER.error("Could not release the engine of a removed body", e);
+            }
+            navigator.engine = null;
+            return true;
+        });
     }
 
     /** Consulted when a path is costed (off thread) and before every break. Applies to the running engine at once. */
@@ -181,7 +257,7 @@ public final class BotNavigator {
         follow(current);
         if (state != State.WORKING || engine == null) return;
         if (!ownsBody(engine)) {
-            fail(body.isRemoved() ? "body removed" : "body changed dimension or was replaced");
+            fail(FailKind.BODY_LOST, body.isRemoved() ? "body removed" : "body changed dimension or was replaced");
             engine = null;
             return;
         }
@@ -195,7 +271,7 @@ public final class BotNavigator {
             // A brain must not throw (BotBrain): nothing around the body tick catches it, so an engine bug would take
             // the server down. It fails this command instead, with the exception as the reason.
             NavRuntime.LOGGER.error("Navigation engine failed for {}", body.getGameProfile().getName(), e);
-            fail("engine error: " + e);
+            fail(FailKind.ENGINE_ERROR, "engine error: " + e);
             return;
         }
 
@@ -203,22 +279,31 @@ public final class BotNavigator {
             case GOTO -> {
                 if (!engine.getCustomGoalProcess().isActive()) {
                     if (goal != null && goal.isInGoal(engine.getEntityContext().feetPos())) finish();
-                    else fail(reason("no path"));
+                    else fail(FailKind.NO_PATH, reason("no path"));
                 } else {
                     watchProgress();
                 }
             }
             case MINE -> {
-                if (!engine.getMineProcess().isActive()) {
-                    if (countHeld() >= mineTarget) finish();
-                    else fail(reason("nothing to mine in range"));
+                if (countHeld() >= mineTarget) {
+                    // The engine runs with no count of its own (see mine): the count is reached here, and the engine
+                    // is told to let go of the blocks it still had in mind.
+                    cancelEngine(engine);
+                    finish();
+                } else if (!engine.getMineProcess().isActive()) {
+                    fail(FailKind.NOTHING_TO_MINE, reason("nothing to mine in range"));
                 }
             }
             case FOLLOW -> {
-                if (!engine.getFollowProcess().isActive()) fail(reason("target gone"));
+                if (!engine.getFollowProcess().isActive()) fail(FailKind.TARGET_GONE, reason("target gone"));
             }
             case EXPLORE -> {
-                if (!engine.getExploreProcess().isActive()) fail(reason("exploration ended"));
+                if (!engine.getExploreProcess().isActive()) {
+                    // The process also ends when it has nothing left to explore, which is a success. It records a
+                    // failure reason only when its search for a path failed.
+                    if (engine.getLastFailure() != null) fail(FailKind.EXPLORE_FAILED, reason("exploration failed"));
+                    else finish();
+                }
             }
         }
     }
@@ -238,7 +323,7 @@ public final class BotNavigator {
         BotPlayer previous = body;
         body = current;
         if (engine != null && engine.getEntityContext().entity() == previous) {
-            if (state == State.WORKING) fail("body replaced (respawn)");
+            if (state == State.WORKING) fail(FailKind.BODY_LOST, "body replaced (respawn)");
             dropEngine(engine);
             engine = null;
         }
@@ -260,6 +345,7 @@ public final class BotNavigator {
         kind = newKind;
         goal = null;
         failure = null;
+        failKind = null;
         state = State.WORKING;
         return e;
     }
@@ -318,6 +404,9 @@ public final class BotNavigator {
         s.allowFlowingWater.set(true);
         s.randomLooking.set(0.0);
         s.randomLooking113.set(0.0);
+        // Upstream keeps an explorer at height 64; exploring goes wherever the terrain lets it unless a command says
+        // otherwise (exploreAtY).
+        s.exploreMaintainY.set(-1);
         s.fallDamagePenalty.set(FALL_DAMAGE_PENALTY);
         s.maxFallHeightNoWater.set(fallLimit(body.getHealth()));
         s.acceptableThrowawayItems.set(new ArrayList<>(List.of(
@@ -365,7 +454,7 @@ public final class BotNavigator {
             sinceProgress = 0;
         } else if (++sinceProgress > STALL_TICKS) {
             cancelEngine(engine);
-            fail(reason("stuck: no progress for " + STALL_TICKS + " ticks"));
+            fail(FailKind.STUCK, reason("stuck: no progress for " + STALL_TICKS + " ticks"));
         }
     }
 
@@ -377,9 +466,7 @@ public final class BotNavigator {
 
     private int countHeld() {
         int n = 0;
-        for (ItemStack stack : body.getInventory().items) {
-            if (mineItems.contains(stack.getItem())) n += stack.getCount();
-        }
+        for (Item item : mineItems) n += body.getInventory().countItem(item);
         return n;
     }
 
@@ -391,17 +478,23 @@ public final class BotNavigator {
         NavRuntime.LOGGER.debug("{}: navigation done", body.getGameProfile().getName());
     }
 
-    private void fail(String why) {
+    private void fail(FailKind why, String text) {
         if (engine != null && ownsBody(engine)) cancelEngine(engine);
         state = State.FAILED;
-        failure = why;
+        failure = text;
+        failKind = why;
         kind = null;
         releaseInput();
-        NavRuntime.LOGGER.debug("{}: navigation failed: {}", body.getGameProfile().getName(), why);
+        NavRuntime.LOGGER.debug("{}: navigation failed: {}", body.getGameProfile().getName(), text);
     }
 
-    /** Once, when the engine stops driving: a body keeps its last input until someone clears it. */
+    /**
+     * When the engine stops driving: a body keeps its last input until someone clears it, and a break it had begun
+     * stays begun in the game mode (the engine is no longer ticked, so it will never send the abort a player's
+     * released mouse button would).
+     */
     private void releaseInput() {
+        if (body.getInteractionManager() instanceof BodyInteractionManager breaking) breaking.abortBreak();
         if (!inputDirty) return;
         inputDirty = false;
         body.input().reset();

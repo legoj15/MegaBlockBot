@@ -80,6 +80,9 @@ public final class ExploreProcess extends BaritoneProcessHelper implements IExpl
    public PathingCommand onTick(boolean calcFailed, boolean isSafeToCancel) {
       if (calcFailed) {
          this.logDirect("Failed");
+         // MegaBlockBot: the owner tells a failed search from "explored all chunks" (a success) by this reason; both
+         // end the process the same way and upstream recorded neither.
+         this.baritone.setLastFailure("no path toward any chunk not yet explored");
          if (this.baritone.settings().desktopNotifications.get() && this.baritone.settings().notificationOnExploreFinished.get()) {
             NotificationHelper.notify("Exploration failed", true);
          }

@@ -101,6 +101,21 @@ runs wherever the command tree is built (a worker thread while data loads).
   interaction and hunger providers (`game.nav.Body*` adapters); breaking and placing go through the player's own
   `ServerPlayerGameMode`. `/aiplayer nav <name> goto|gotoxz|mine|stop|status` is the debugging command;
   `game.gametest.BotNavGameTests` is the acceptance check.
+- Navigator contract a task relies on: `mine(blocks, wanted items, count)` is done when the body holds `count` more of
+  the wanted items (stone drops cobblestone, so the block's own item is not the measure) and the engine is run with no
+  count of its own; `explore` that runs out of chunks is DONE, one whose path search fails is FAILED; `failKind()` says
+  why a command failed so that a task routes on it, never on the text; a stopped command also aborts a break in
+  progress (the engine is no longer ticked to do it); `BotNavigator.sweep` (called every 100 ticks from `NavFeature`)
+  drops the navigator of a body that was despawned and not replaced.
+- Tasks (`game.task`): `TaskFeature.init()` registers the plan-leaf kinds `navigate`, `reach`, `mine`, `recover_drops`
+  and `deposit` with `TaskRegistry` (called from `NavFeature.init()` until the bot runtime takes it over). They drive the
+  body only through its navigator, its menus and its game mode, release the body themselves before they report (the
+  executor does not abort a task that ended on its own) and take the break filter from `BreakRules`, the one place the
+  block-safety feature will install its rules (default: everything may be broken). Failure mapping: unreachable path or
+  other dimension `Unreachable`; no block of the kind in range after the bounded search `NoSource` (carrying the leaf's
+  source id); a break the rules forbid `Protected`; a missing required tool `MissingTool`; a missing container
+  `TargetGone`; too few items to deposit `MissingInput`. `recover_drops` never fails. `game.gametest.MoveAndMineGameTests`
+  is their acceptance check; the navigator rules above are in `BotNavGameTests`.
 - Evidence the nested jars are in: `unzip -l versions/1.21.1/build/libs/*.jar` lists `META-INF/jarjar/` with the
   solver jar and `megablockbot-nav-<version>.jar`; a non-bot node's jar has the solver only.
 

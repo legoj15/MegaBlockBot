@@ -140,6 +140,9 @@ The engine drives the bot's `ServerPlayer` body as well as plain `LivingEntity`s
 - `api/IBaritone.logDirect` and `api/utils/IEntityContext.logDebug` never write to chat; both log through
   `NavRuntime.LOGGER` at debug (`Baritone.logDirect` also keeps the text as the last message).
 - `pathing/calc/AbstractNodeCostSearch.calculate` catches `Throwable` (was `Exception`) and records the reason.
+- `process/ExploreProcess.onTick`: a failed path search records a failure reason (`Baritone.setLastFailure`) before the
+  process ends. The process also ends with no reason when it has nothing left to explore; the bot's navigator reads
+  the difference (reason: failed, none: done).
 - `behavior/PathingBehavior.findPathInNewThread`: an `EXCEPTION` result queues `CALC_FAILED` (upstream queued nothing
   and the process re-requested the same failing search every tick); the search task runs in try/finally, so a throw
   anywhere still clears `inProgress` and fails the calculation with a reason.

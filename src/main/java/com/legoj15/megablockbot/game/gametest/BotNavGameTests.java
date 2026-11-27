@@ -6,16 +6,25 @@ import com.legoj15.megablockbot.game.body.BodyManager;
 import com.legoj15.megablockbot.game.body.BotBrain;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.body.DeathRecord;
+import com.legoj15.megablockbot.game.nav.BodyInteractionManager;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
+import com.legoj15.megablockbot.game.nav.BreakFilter;
+import com.legoj15.megablockbot.nav.engine.api.IBaritone;
+import com.legoj15.megablockbot.nav.engine.api.entity.IHungerManager;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Supplier;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.Item;
@@ -24,6 +33,7 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -38,7 +48,7 @@ import net.minecraft.world.phys.Vec3;
  */
 public final class BotNavGameTests {
     private static final String RUN_ID = Integer.toString((int) (System.nanoTime() & 0xFFFFF), 36);
-    private static final int FLOOR_Y = 1;
+    static final int FLOOR_Y = 1;
 
     /** Every block a bot body broke, as the platform's block-broken hook reported it (see {@code NavFeature}). */
     private static final List<Break> BREAKS = new CopyOnWriteArrayList<>();
@@ -210,6 +220,9 @@ public final class BotNavGameTests {
             if (run.nav().state() == BotNavigator.State.FAILED) helper.fail("failed: " + run.nav().failure());
             if (run.nav().state() != BotNavigator.State.DONE) return;
             helper.assertTrue(inWater[0] > 0, "arrived without ever being in the water");
+            // At the surface the feet stay in the top layer of water (measured: lowest 4.14 with the top layer from 4.0).
+            // A body that dived or sank would be down at 2, the pool's floor; half a block of slack under the top layer.
+            helper.assertTrue(lowestFeet[0] >= top - 0.5, "went down to y " + lowestFeet[0] + " in a pool whose surface layer starts at " + top);
             MegaBlockBot.LOGGER.info("Nav GameTest: crossed the pool in {} ticks, {} of them in water, lowest feet y {} (surface {})",
                 run.ticks, inWater[0], lowestFeet[0], top);
             run.pass();
@@ -314,8 +327,9 @@ public final class BotNavGameTests {
         helper.setBlock(4, FLOOR_Y + 1, 11, Blocks.OAK_LOG);
         helper.setBlock(11, FLOOR_Y + 1, 11, Blocks.OAK_LOG);
         NavRun run = NavRun.start(helper, "nmine", new Vec3(7.5, FLOOR_Y + 1, 4.5), 1300);
+        run.nav().setBreakFilter(arenaOnly(helper));
         try {
-            run.nav().mine(List.of(Blocks.OAK_LOG), 2);
+            run.nav().mine(List.of(Blocks.OAK_LOG), List.of(Items.OAK_LOG), 2);
         } catch (RuntimeException e) {
             MegaBlockBot.LOGGER.error("mine threw", e);
             run.cleanup();
@@ -372,19 +386,184 @@ public final class BotNavGameTests {
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // The navigator's own rules (what a task relies on)
+    // ---------------------------------------------------------------------------------------------------------
+
+    /**
+     * Stone drops cobblestone: mine(stone, cobblestone, 3) is done when the body holds three more cobblestone. The
+     * floor is barrier so the only stone is the three blocks the test places, and the pickaxe is wooden (stone needs a
+     * pickaxe to drop anything). Counting the block's own item, as the navigator once did, never completes here.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 2700)
+    public static void minesCobblestoneFromStone(GameTestHelper helper) {
+        room(helper, 3, Blocks.BARRIER);
+        for (int x = 5; x <= 7; x++) helper.setBlock(x, FLOOR_Y + 1, 10, Blocks.STONE);
+        NavRun run = NavRun.start(helper, "nstone", new Vec3(6.5, FLOOR_Y + 1, 4.5), 2700);
+        run.body().getInventory().setItem(0, new ItemStack(Items.WOODEN_PICKAXE));
+        run.nav().setBreakFilter(arenaOnly(helper));
+        run.nav().mine(List.of(Blocks.STONE), List.of(Items.COBBLESTONE), 3);
+        run.each(2400, () -> {
+            if (run.nav().state() == BotNavigator.State.FAILED) helper.fail("failed: " + run.nav().failure());
+            if (run.nav().state() != BotNavigator.State.DONE) return;
+            int held = run.body().getInventory().countItem(Items.COBBLESTONE);
+            helper.assertTrue(held >= 3, "DONE holding " + held + " cobblestone");
+            helper.assertTrue(run.body().getInventory().countItem(Items.STONE) == 0, "picked up stone, which a pickaxe does not drop");
+            run.pass();
+        });
+    }
+
+    /** An explore that has nothing left to explore ends DONE: only a failed search is FAILED. */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 200)
+    public static void exploreThatFinishesIsDone(GameTestHelper helper) {
+        room(helper, 3);
+        NavRun run = NavRun.start(helper, "nxdone", new Vec3(7.5, FLOOR_Y + 1, 7.5), 200);
+        try {
+            // A chunk list with every chunk already explored and the filter inverted: the process finishes at once.
+            Path filter = Files.createTempFile("mbb-explore", ".json");
+            Files.writeString(filter, "[]");
+            filter.toFile().deleteOnExit();
+            IBaritone.KEY.get(run.body()).getExploreProcess().applyJsonFilter(filter, true);
+        } catch (Exception e) {
+            run.cleanup();
+            throw new IllegalStateException("could not set up the explore filter", e);
+        }
+        run.nav().explore(helper.absolutePos(new BlockPos(7, FLOOR_Y + 1, 7)));
+        run.each(100, () -> {
+            helper.assertTrue(run.nav().state() != BotNavigator.State.FAILED, "an explore that finished failed: " + run.nav().failure());
+            if (run.nav().state() == BotNavigator.State.DONE) run.pass();
+        });
+    }
+
+    /** A body walled in has no path toward anything unexplored: the explore fails, with a reason and a kind. */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 400)
+    public static void exploreWithNowhereToGoFails(GameTestHelper helper) {
+        room(helper, 5, Blocks.BARRIER);
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                for (int y = FLOOR_Y + 1; y <= FLOOR_Y + 3; y++) helper.setBlock(7 + dx, y, 7 + dz, Blocks.BARRIER);
+            }
+        }
+        helper.setBlock(7, FLOOR_Y + 3, 7, Blocks.BARRIER);
+        NavRun run = NavRun.start(helper, "nxfail", new Vec3(7.5, FLOOR_Y + 1, 7.5), 400);
+        run.nav().explore(helper.absolutePos(new BlockPos(7, FLOOR_Y + 1, 7)));
+        run.each(300, () -> {
+            helper.assertTrue(run.nav().state() != BotNavigator.State.DONE, "an explore with nowhere to go finished");
+            if (run.nav().state() != BotNavigator.State.FAILED) return;
+            helper.assertTrue(run.nav().failKind() == BotNavigator.FailKind.EXPLORE_FAILED, "failed as " + run.nav().failKind());
+            helper.assertTrue(run.nav().failure() != null && !run.nav().failure().isBlank(), "FAILED without a reason");
+            run.pass();
+        });
+    }
+
+    /**
+     * A break the game mode refuses is not a break in progress. A flag an earlier break left set in the game mode
+     * (here set by hand) must not make a START it refuses (a block out of reach) look accepted; a START it takes is
+     * mined, and abortBreak lets go of both the manager's state and the game mode's.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
+    public static void aRefusedBreakIsNotInProgress(GameTestHelper helper) {
+        room(helper, 3);
+        helper.setBlock(14, FLOOR_Y + 1, 14, Blocks.STONE);
+        helper.setBlock(3, FLOOR_Y + 1, 2, Blocks.STONE);
+        NavRun run = NavRun.start(helper, "nrefuse", new Vec3(2.5, FLOOR_Y + 1, 2.5), 100);
+        try {
+            BotPlayer body = run.body();
+            BodyInteractionManager manager = (BodyInteractionManager) body.getInteractionManager();
+            int height = body.level().getMaxBuildHeight();
+            body.gameMode.isDestroyingBlock = true; // what an earlier break left behind
+
+            BlockPos far = helper.absolutePos(new BlockPos(14, FLOOR_Y + 1, 14));
+            manager.processBlockBreakingAction(far, Action.START_DESTROY_BLOCK, Direction.UP, height, 0);
+            helper.assertTrue(!manager.isMining(), "a START out of reach counted as a break in progress");
+            helper.assertTrue(!body.gameMode.isDestroyingBlock, "the stale flag outlived the refused START");
+
+            BlockPos near = helper.absolutePos(new BlockPos(3, FLOOR_Y + 1, 2));
+            manager.processBlockBreakingAction(near, Action.START_DESTROY_BLOCK, Direction.WEST, height, 1);
+            helper.assertTrue(manager.isMining() && manager.getMiningPos().equals(near), "a START within reach was not taken");
+            helper.assertTrue(body.gameMode.isDestroyingBlock, "the game mode is not working on the block");
+
+            manager.abortBreak();
+            helper.assertTrue(!manager.isMining() && !body.gameMode.isDestroyingBlock, "abortBreak left a break begun");
+            helper.assertBlockPresent(Blocks.STONE, new BlockPos(3, FLOOR_Y + 1, 2));
+        } catch (RuntimeException | Error e) {
+            run.cleanup();
+            throw e;
+        }
+        run.pass();
+    }
+
+    /**
+     * The engine's view of the body's hunger follows the body's current food data. Vanilla replaces a player's food
+     * data when a respawn keeps everything (coming back from the End), which this triggers directly: the view taken
+     * before it must read the new data.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 100)
+    public static void hungerReadsTheCurrentFoodData(GameTestHelper helper) {
+        room(helper, 3);
+        NavRun old = NavRun.start(helper, "hungold", new Vec3(2.5, FLOOR_Y + 1, 2.5), 100);
+        NavRun fresh = NavRun.start(helper, "hungnew", new Vec3(5.5, FLOOR_Y + 1, 5.5), 100);
+        try {
+            BotPlayer replacedBody = fresh.body();
+            old.body().getFoodData().setFoodLevel(3);
+            replacedBody.getFoodData().setFoodLevel(17);
+            IHungerManager hunger = replacedBody.getHungerManager();
+            helper.assertTrue(hunger.getFoodLevel() == 17, "reads " + hunger.getFoodLevel() + " before the replacement");
+
+            replacedBody.restoreFrom(old.body(), true);
+            helper.assertTrue(replacedBody.getFoodData() == old.body().getFoodData(), "the keep-everything respawn did not replace the food data");
+            helper.assertTrue(hunger.getFoodLevel() == 3, "reads " + hunger.getFoodLevel() + " after the replacement, the body has 3");
+        } catch (RuntimeException | Error e) {
+            old.cleanup();
+            fresh.cleanup();
+            throw e;
+        }
+        old.cleanup();
+        fresh.pass();
+    }
+
+    /**
+     * A body that is despawned and not replaced takes its navigator out of the navigator map at the next sweep (the
+     * platform's server tick calls one every few seconds); a body still logged in keeps its own.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 260)
+    public static void aNavigatorOfADespawnedBodyIsDropped(GameTestHelper helper) {
+        room(helper, 3);
+        NavRun gone = NavRun.start(helper, "navgone", new Vec3(2.5, FLOOR_Y + 1, 2.5), 250);
+        NavRun stays = NavRun.start(helper, "navstay", new Vec3(5.5, FLOOR_Y + 1, 5.5), 250);
+        BotPlayer body = gone.body();
+        BotNavigator.of(body);
+        BotNavigator.of(stays.body());
+        helper.assertTrue(BotNavigator.tracks(gone.id) && BotNavigator.tracks(stays.id), "a navigator was not tracked once made");
+        BodyManager.of(helper.getLevel().getServer()).despawn(body);
+        helper.assertTrue(BotNavigator.tracks(gone.id), "the navigator went with the despawn itself, before any sweep");
+        helper.succeedWhen(() -> {
+            helper.assertTrue(!BotNavigator.tracks(gone.id), "the navigator of the despawned body is still tracked");
+            helper.assertTrue(BotNavigator.tracks(stays.id), "the navigator of a body that is still logged in was dropped");
+            gone.cleanup();
+            stays.cleanup();
+        });
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // Terrain
     // ---------------------------------------------------------------------------------------------------------
 
     /** A stone floor at {@link #FLOOR_Y} and barrier walls {@code height} high around the arena's edge. */
-    private static void room(GameTestHelper helper, int height) {
+    static void room(GameTestHelper helper, int height) {
+        room(helper, height, Blocks.STONE);
+    }
+
+    /** As {@link #room(GameTestHelper, int)} with another floor: barrier makes the only breakable blocks the ones a test places. */
+    static void room(GameTestHelper helper, int height, Block floor) {
         for (int x = 0; x < 16; x++) {
-            for (int z = 0; z < 16; z++) helper.setBlock(x, FLOOR_Y, z, Blocks.STONE);
+            for (int z = 0; z < 16; z++) helper.setBlock(x, FLOOR_Y, z, floor);
         }
         walls(helper, height);
     }
 
     /** Barrier walls on the arena's edge, from the floor up {@code height} blocks; the inside is x and z 1 to 14. */
-    private static void walls(GameTestHelper helper, int height) {
+    static void walls(GameTestHelper helper, int height) {
         for (int i = 0; i < 16; i++) {
             for (int y = FLOOR_Y; y <= FLOOR_Y + height; y++) {
                 helper.setBlock(i, y, 0, Blocks.BARRIER);
@@ -400,6 +579,17 @@ public final class BotNavGameTests {
         for (int x = 1; x <= 14; x++) {
             for (int y = FLOOR_Y + 1; y <= FLOOR_Y + 3; y++) helper.setBlock(x, y, z, block);
         }
+    }
+
+    /**
+     * Breaking is allowed inside this test's arena only. Tests run side by side in one world, and a mining command finds
+     * the blocks of its kind in the next arena too (its floor, say): the engine cannot get there but it tries, and when a
+     * search fails it blacklists the block nearest to it, which may be the one the test is after.
+     */
+    static BreakFilter arenaOnly(GameTestHelper helper) {
+        BlockPos corner = helper.absolutePos(BlockPos.ZERO);
+        AABB box = new AABB(corner.getX(), corner.getY(), corner.getZ(), corner.getX() + 16, corner.getY() + 16, corner.getZ() + 16);
+        return (level, at, state) -> box.contains(at.getX() + 0.5, at.getY() + 0.5, at.getZ() + 0.5);
     }
 
     private static int countInArena(GameTestHelper helper, Block block, int maxY) {
@@ -433,7 +623,7 @@ public final class BotNavGameTests {
     }
 
     /** One test body: spawned with a {@link NavBrain}, watched every tick, despawned and forgotten when the test ends. */
-    private static final class NavRun {
+    static final class NavRun {
         private final GameTestHelper helper;
         private final BodyManager manager;
         private final String name;
@@ -442,6 +632,7 @@ public final class BotNavGameTests {
         private Vec3 last;
         private BotPlayer lastBody;
         private boolean over;
+        private final java.util.List<Runnable> atEnd = new java.util.ArrayList<>();
 
         private NavRun(GameTestHelper helper, String name) {
             this.helper = helper;
@@ -451,9 +642,14 @@ public final class BotNavGameTests {
         }
 
         static NavRun start(GameTestHelper helper, String tag, Vec3 relative, int deadlineTicks) {
+            return start(helper, tag, relative, deadlineTicks, NavBrain::new);
+        }
+
+        /** As above with the brain the test wants ticked (a task's, for instance); a tag is at most 8 characters, a name 16. */
+        static NavRun start(GameTestHelper helper, String tag, Vec3 relative, int deadlineTicks, Supplier<BotBrain> brain) {
             NavRun run = new NavRun(helper, "gt_" + tag + "_" + RUN_ID);
             try {
-                run.manager.spawn(run.name, null, helper.getLevel(), helper.absoluteVec(relative), 0.0F, NavBrain::new);
+                run.manager.spawn(run.name, null, helper.getLevel(), helper.absoluteVec(relative), 0.0F, brain);
             } catch (BodyException e) {
                 throw new IllegalStateException("could not spawn " + run.name + ": " + e.getMessage(), e);
             }
@@ -517,9 +713,15 @@ public final class BotNavGameTests {
             helper.succeed();
         }
 
+        /** Runs when the test ends, whichever way (a pass, a failed check, the deadline): for state a test must not leak. */
+        void atEnd(Runnable undo) {
+            atEnd.add(undo);
+        }
+
         void cleanup() {
             if (over) return;
             over = true;
+            atEnd.forEach(Runnable::run);
             BotPlayer current = manager.get(id);
             if (current != null) {
                 BotNavigator.of(current).stop();

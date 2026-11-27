@@ -497,6 +497,26 @@ above, these hold; the code is `core/exec`.**
 - Owner pause with no goal does nothing. An owner resume while a reflex still holds the body waits
   for the hold to end.
 
+**Amendments made while the tasks that move and mine were built (2026-11-26, #12). The code is `game/task`.**
+
+- A task that ends on its own, with a Completed or Failed result, has already let go of the body (the navigator
+  stopped, a menu closed), because the executor does not abort it afterwards. The same code runs for an abort and a
+  pause.
+- A leaf's source id travels in `NO_SOURCE`, so the replan excludes that source, not every source of the item. A
+  mining task has no tick clock of its own (the executor's budgets decide how long it may run). It bounds its search by
+  a number of attempts and a distance explored (`MineTask.Search`), and past that fails `NO_SOURCE` saying how far it
+  looked. For a block with a height range it digs to the best height first.
+- `PROTECTED` from a mining task is read from the world, not from the navigator: when the navigator finds nothing to
+  mine, the loaded area around the body is searched for blocks of the kind, and when there are some and the break rules
+  forbid every one the failure is `PROTECTED` at the nearest. The break rules have one home, `game.task.BreakRules`,
+  which block safety (3.5) will fill in; until then everything may be broken.
+- `recover_drops` never fails (it is best-effort and a position it cannot reach is skipped) and keeps no checkpoint:
+  checkpoints are keyed by node identity, and two deaths' recover nodes share one.
+- A deposit is done with the container's own menu: the body uses the block, moves items with slot clicks (a
+  shift-click for a whole stack, one right-click per item for part of one) and closes the menu, which hands the cursor
+  back to the inventory. A container with no room takes what it can and the task completes; the postcondition says what
+  is missing.
+
 ### 3.5 Block safety
 
 Griefing is a non-goal, but a mining bot breaks blocks by default. Rules, on in every profile:
