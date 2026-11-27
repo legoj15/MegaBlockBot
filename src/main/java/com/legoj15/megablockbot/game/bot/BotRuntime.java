@@ -89,6 +89,8 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     @Nullable
     private Task<BotPlayer> currentTask;
     private boolean taskWasActive;
+    /** Whether the reflex layer held the body in the tick being run: it runs the navigator itself then. */
+    private boolean heldThisTick;
 
     /** The last goal result, as a line; what a status says about an idle bot. */
     @Nullable
@@ -213,15 +215,26 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         think(current);
         // Tasks only hand the navigator commands; its engine runs here, once per body tick, after the tasks have
         // decided and before the body applies its input. Without this the body never moves for a goal. A body nothing
-        // has navigated yet has no navigator, and one with no command running writes no input.
-        if (BotNavigator.tracks(current.getUUID())) BotNavigator.of(current).tick(current);
+        // has navigated yet has no navigator, and one with no command running writes no input. While a reflex holds
+        // the body the navigator is the reflex layer's, and that layer runs it itself: a second tick here would move
+        // the body twice as fast as a player.
+        if (!heldThisTick && BotNavigator.tracks(current.getUUID())) BotNavigator.of(current).tick(current);
     }
 
     private void think(BotPlayer current) {
         attach(current);
-        // The executor waits for the table to be back in the inventory: its replan would plan without it.
-        if (tidyTick(current)) return;
-        executor.tick(current, reflexHold(current));
+        // The reflex layer is asked first, once per tick: while it holds the body nothing else here may drive it.
+        ReflexHold hold = reflexHold(current);
+        heldThisTick = hold.held();
+        if (hold.held()) {
+            // The leftover-table step is a task like any other: paused for the hold, taken up again after it.
+            if (tidy != null && tidy.state() == TaskState.RUNNING) tidy.pause(current, hold.cause());
+        } else {
+            if (tidy != null && tidy.state() == TaskState.PAUSED) tidy.resume(current);
+            // The executor waits for the table to be back in the inventory: its replan would plan without it.
+            if (tidyTick(current)) return;
+        }
+        executor.tick(current, hold);
         // A task that has ended may have left the body walking: its movement input is reset once, the tick it ends. A
         // hold a command put on a body with no goal is never touched, because no task was ever active for it.
         boolean active = currentTask != null && (currentTask.state() == TaskState.RUNNING || currentTask.state() == TaskState.PAUSED);

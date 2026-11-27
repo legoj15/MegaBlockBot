@@ -245,6 +245,11 @@ public final class BotNavigator {
         if (engine != null) applyBreakFilter(engine);
     }
 
+    /** The filter in force, so a caller that sets its own for a while (the reflex layer's retreat) can put the previous one back. */
+    public BreakFilter breakFilter() {
+        return breakFilter;
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Tick
     // ---------------------------------------------------------------------------------------------------------

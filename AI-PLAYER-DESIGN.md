@@ -254,6 +254,23 @@ The reflex layer never changes the goal tree. It only pauses the active task (§
 Preemption). Task state machines must
 be resumable after preemption; this is a hard requirement on every task.
 
+Decided in #8 (`game.reflex`, `docs/reflexes.md`, `ReflexGameTests`; the numbers are `ReflexConstants`, starting from
+AIBot's):
+- One `ReflexLayer` per body. The brain calls `tick(body)` once per body tick before the executor and gets a `ReflexHold`;
+  while it is held the layer drives the body (it ticks the navigator itself) and the runtime leaves the executor's task and
+  the navigator alone. Taking the body stops the navigator, clears input, item use and any block break; letting go leaves
+  none behind. Reflexes are listed once, in `ReflexRegistry`; one that throws is quarantined, not allowed to take the tick down.
+- A threat is a hostile whose target is the body, within 16 blocks, or any hostile within melee range, **and in sight**
+  (which is what keeps a body walled into its shelter from fighting the zombies outside). A hold ends after a quiet
+  period (no threat for 20 ticks, no mob hurt for 40). The resume gate's "health above the retreat threshold" is the
+  vitals reflex's: it holds the body to eat while it can; with no food the gate opens (3.2 item 3: "otherwise only report").
+- Attacks go through `Player.attack`, **before** `swing` (`ServerPlayer.swing` resets the attack cooldown, so a swing first makes
+  every hit a weak one); a shield is lowered for the swing, since a player cannot swing with it up. A creeper is never
+  approached; one whose fuse burns near a body that holds a shield is faced with it raised.
+- The night shelter is built from inside, bottom up, by clicking faces the eyes can see (the cap goes against a block put on
+  a wall from the top of a jump), after asking `BlockSafety` whether each cell could be broken again, and is taken down in the
+  morning by breaking what the body placed.
+
 ### 3.3 Language layer
 
 - Provider-agnostic: an OpenAI-compatible endpoint (covers llama.cpp, Ollama, LM Studio, and
