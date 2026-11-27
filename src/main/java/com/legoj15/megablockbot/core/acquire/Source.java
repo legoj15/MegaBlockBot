@@ -71,9 +71,10 @@ public sealed interface Source {
      * full health and {@code attack} the damage of its blow (0 for one that does not fight back), both the type's own
      * defaults. {@code spawnsNaturally} is false for a kind the world does not spawn on its own account (an iron
      * golem, a villager): one stands only where a village or a player made it, and finding one is not planned.
+     * {@code aquatic} is true for a kind that lives in water (a fish, a squid, a dolphin, an axolotl).
      */
     record KillMob(String id, ItemKey item, String entity, boolean playerKillOnly, double yield, boolean random,
-                   double health, double attack, boolean spawnsNaturally)
+                   double health, double attack, boolean spawnsNaturally, boolean aquatic)
         implements Source {
         /** The health of the mob the planner's base price of a kill is for: a cow's. */
         public static final double BASE_HEALTH = 10.0;
@@ -86,7 +87,7 @@ public sealed interface Source {
 
         /** A harmless mob of a cow's health that spawns on its own: what a fixture that is not about the fight needs. */
         public KillMob(String id, ItemKey item, String entity, boolean playerKillOnly, double yield, boolean random) {
-            this(id, item, entity, playerKillOnly, yield, random, BASE_HEALTH, 0.0, true);
+            this(id, item, entity, playerKillOnly, yield, random, BASE_HEALTH, 0.0, true, false);
         }
     }
 

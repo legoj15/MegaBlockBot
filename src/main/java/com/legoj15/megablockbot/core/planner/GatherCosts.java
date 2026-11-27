@@ -142,6 +142,11 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
             // village or where a player built it. As with a generated chest, the finding is what is not planned.
             return "a mob the world does not spawn on its own: finding one is not planned yet";
         }
+        if (source instanceof Source.KillMob kill && kill.aquatic()) {
+            // The kill task closes on its quarry on foot and the body is kept at the surface for its air: it does
+            // not fight under water. Until it does, a fish is something to catch with a rod, not to hunt.
+            return "a mob that lives in water: hunting under water is not built yet";
+        }
         if (source instanceof Source.Trade trade && !(trade.chance() > 0)) return "the offer never comes up";
         // One item per trade: a trade that takes one or more of that item back leaves the stock no higher.
         if (source instanceof Source.Trade trade && trade.cost().getOrDefault(trade.item(), 0) >= 1) {

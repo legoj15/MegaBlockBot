@@ -880,7 +880,12 @@ and registered with a precondition, an expected yield, and a cost:
 
 - Librarian reroll (enchanted books). Designed here: AIBot has no reroll, lectern or village
   code, only a single trade with a villager already beside it.
-- Fishing (manual — implemented, issue #16: the `fish` task casts, watches the bobber dip and reels in like a player), and auto-fisher build (blueprint)
+- Fishing (manual — implemented, issue #16: the `fish` task casts, watches the bobber dip and reels in like a
+  player; live on 2026-11-27, two cod in four minutes with a rod at a river). No auto-fisher: the game has no
+  fishing without a player holding the rod, so a contraption would only hold the bot's own hand still, which the
+  bot does for itself; an owner who wants a fish farm for their own use can have one built from a blueprint like
+  any other structure. A fish is caught, not hunted: the planner does not plan a kill of a mob that lives in
+  water, because the kill task does not fight under water.
 - Branch mine at Y, cave exploration, travel until biome/structure found
 - Blueprint build from structure NBT (farms, shelters, auto-fisher). What exists (#17): a blueprint is a file in
   `<config dir>/megablockbot/blueprints/` or one of the server's structure templates, saved by

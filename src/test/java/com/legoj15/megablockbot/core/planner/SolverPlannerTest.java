@@ -2506,14 +2506,18 @@ final class SolverPlannerTest {
     @Test
     void aKillIsPricedByTheFightAndAMobThatDoesNotSpawnOnItsOwnIsNotHunted() {
         // A cow is the mob the base price is for; a zombie has twice its health and hits back; an iron golem gives
-        // four ingots a kill and stands only where a village or a player made one.
+        // four ingots a kill and stands only where a village or a player made one; a cod swims (a live run asked for
+        // one cod with a rod in hand and spent a minute and a half under a river looking for the fish to hit).
         Source cow = new Source.KillMob("kill:minecraft:cow", ItemKey.of("leather"), "minecraft:cow", false, 1.0, false,
-                10.0, 0.0, true);
+                10.0, 0.0, true, false);
         Source zombie = new Source.KillMob("kill:minecraft:zombie", ItemKey.of("rotten_flesh"), "minecraft:zombie", false,
-                1.0, false, 20.0, 3.0, true);
+                1.0, false, 20.0, 3.0, true, false);
         Source golem = new Source.KillMob("kill:minecraft:iron_golem", IRON_INGOT, "minecraft:iron_golem", false, 4.0,
-                false, 100.0, 15.0, false);
-        AcquisitionIndex indexOf = AcquisitionIndex.builder().addSource(cow).addSource(zombie).addSource(golem).build();
+                false, 100.0, 15.0, false, false);
+        Source cod = new Source.KillMob("kill:minecraft:cod", SALMON, "minecraft:cod", false, 1.0, false,
+                3.0, 0.0, true, true);
+        AcquisitionIndex indexOf = AcquisitionIndex.builder().addSource(cow).addSource(zombie).addSource(golem)
+                .addSource(cod).build();
         PlannerConfig config = PlannerConfig.defaults();
         GatherCosts costs = new GatherCosts(book(), indexOf, config, Exclusions.NONE, EMPTY);
         assertEquals(config.kill(), costs.costOf(cow), "a harmless mob of a cow's health costs the base price");
@@ -2522,6 +2526,7 @@ final class SolverPlannerTest {
         assertEquals(com.legoj15.solver.CostModel.UNOBTAINABLE, costs.costOf(golem),
                 "a mob that does not spawn on its own is not hunted");
         assertFalse(costs.usable(golem));
+        assertFalse(costs.usable(cod), "a mob that lives in water is not hunted: the kill task does not fight under water");
     }
 
     @Test

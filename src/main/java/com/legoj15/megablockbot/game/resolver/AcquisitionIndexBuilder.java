@@ -291,10 +291,13 @@ public final class AcquisitionIndexBuilder {
                 ? attributes.getBaseValue(Attributes.MAX_HEALTH) : Source.KillMob.BASE_HEALTH;
             double attack = attributes.hasAttribute(Attributes.ATTACK_DAMAGE)
                 ? attributes.getBaseValue(Attributes.ATTACK_DAMAGE) : 0.0;
-            boolean spawnsNaturally = type.getCategory() != MobCategory.MISC;
+            MobCategory category = type.getCategory();
+            boolean spawnsNaturally = category != MobCategory.MISC;
+            boolean aquatic = category == MobCategory.WATER_CREATURE || category == MobCategory.WATER_AMBIENT
+                || category == MobCategory.UNDERGROUND_WATER_CREATURE || category == MobCategory.AXOLOTLS;
             for (Route route : eval.routes(table, EnumSet.of(Tool.PLAIN), true, LootEval.StateRule.MINED)) {
                 index.addSource(new Source.KillMob("kill:" + entityId, ItemKey.of(route.item()), entityId, route.byPlayer(),
-                    route.expected(), route.random(), health, attack, spawnsNaturally));
+                    route.expected(), route.random(), health, attack, spawnsNaturally, aquatic));
             }
         }
     }
