@@ -22,6 +22,7 @@ import com.legoj15.megablockbot.core.task.TickResult;
 import com.legoj15.megablockbot.game.body.BotBrain;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.body.DeathRecord;
+import com.legoj15.megablockbot.game.nav.BotNavigator;
 import com.legoj15.megablockbot.game.plan.BotMemory;
 import com.legoj15.megablockbot.game.plan.SnapshotCollector;
 import com.legoj15.megablockbot.game.task.CraftTask;
@@ -209,6 +210,14 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
 
     @Override
     public void tick(BotPlayer current) {
+        think(current);
+        // Tasks only hand the navigator commands; its engine runs here, once per body tick, after the tasks have
+        // decided and before the body applies its input. Without this the body never moves for a goal. A body nothing
+        // has navigated yet has no navigator, and one with no command running writes no input.
+        if (BotNavigator.tracks(current.getUUID())) BotNavigator.of(current).tick(current);
+    }
+
+    private void think(BotPlayer current) {
         attach(current);
         // The executor waits for the table to be back in the inventory: its replan would plan without it.
         if (tidyTick(current)) return;
