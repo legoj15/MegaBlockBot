@@ -25,6 +25,6 @@ public final class ResolverFeature {
         Platform.loader().onServerStopping(server -> AcquisitionIndexes.clear());
 
         LintCommand.init();
-        Platform.loader().registerGameTests(ResolverGameTests.class);
+        Platform.loader().registerGameTests(ResolverGameTests.class, LootEvalGameTests.class);
     }
 }

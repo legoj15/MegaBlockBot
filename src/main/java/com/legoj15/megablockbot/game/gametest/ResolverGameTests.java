@@ -6,7 +6,10 @@ import com.legoj15.megablockbot.core.ToolClass;
 import com.legoj15.megablockbot.core.ToolTier;
 import com.legoj15.megablockbot.core.acquire.AcquisitionIndex;
 import com.legoj15.megablockbot.core.acquire.Source;
+import com.legoj15.megablockbot.game.resolver.AcquisitionIndexBuilder;
 import com.legoj15.megablockbot.game.resolver.AcquisitionIndexes;
+import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
@@ -16,9 +19,15 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.npc.VillagerProfession;
+import net.minecraft.world.entity.npc.VillagerTrades;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.trading.ItemCost;
+import net.minecraft.world.item.trading.MerchantOffer;
 
 /**
  * The acquisition index built from the real vanilla data the GameTest server loads. What these protect: a Minecraft
@@ -166,23 +175,157 @@ public final class ResolverGameTests {
         return fishing.get().yield();
     }
 
-    // blocks/sweet_berry_bush.json puts set_count on the pool, not on the entry: uniform 2..3 in the age-3 pool and
-    // uniform 1..2 in the age-2 pool. The evaluator cannot tell the two block states apart and reads both pools as
-    // holding, so the figure is 2.5 + 1.5 = 4.0 (a state-aware reading would say 2.5). Without the pool-level function
-    // every pick counted 1 and the figure was 2.0.
+    // blocks/sweet_berry_bush.json has two pools, one for age 3 (set_count uniform 2..3, mean 2.5) and one for age 2
+    // (uniform 1..2, mean 1.5), each set on the pool and not on the entry. A bush has one age, so the pools are
+    // alternatives. The default state, age 0, gives no berries, so the state that gives the most is read, the ripe one,
+    // 2.5. The pools used to be added, 2.5 + 1.5 = 4.0. Without the pool-level function every pick counted 1, and the
+    // figure was 1.0.
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
-    public static void aPoolLevelSetCountIsApplied(GameTestHelper helper) {
+    public static void sweetBerryPoolsOfDifferentAgesAreAlternatives(GameTestHelper helper) {
         AcquisitionIndex index = index(helper);
         Optional<Source.Harvest> berries = find(index, "minecraft:sweet_berries", Source.Harvest.class,
             h -> h.block().equals("minecraft:sweet_berry_bush"));
         helper.assertTrue(berries.isPresent(), "sweet berries have no harvest source from the bush: "
             + index.sources(ItemKey.of("minecraft:sweet_berries")));
-        helper.assertTrue(Math.abs(berries.get().yield() - 4.0) < 1e-9, "berries per bush are " + berries.get().yield() + ", expected 4.0");
+        helper.assertTrue(Math.abs(berries.get().yield() - 2.5) < 1e-9, "berries per bush are " + berries.get().yield() + ", expected 2.5");
         helper.succeed();
     }
 
-    // The mob a kill source names must be a mob a player can fight. In vanilla data only mobs have loot-table
-    // contents, so this guards a version that gives an armor stand or a boat drops of its own.
+    // blocks/tall_grass.json has a pool for the lower half and one for the upper half (each also asks a location check
+    // for its other half, which the index cannot judge and reads as holding). With shears each pool is short_grass x2,
+    // and a block is one half (the default state is the lower), so it is 2.0, not the 2 + 2 = 4.0 of both pools. Without shears each pool
+    // gives wheat seeds with a 0.125 chance, so 0.125 and not 0.25.
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void tallGrassHalvesAreAlternatives(GameTestHelper helper) {
+        AcquisitionIndex index = index(helper);
+        Optional<Source.MineBlock> grass = find(index, "minecraft:short_grass", Source.MineBlock.class,
+            m -> m.block().equals("minecraft:tall_grass") && m.needsShears());
+        helper.assertTrue(grass.isPresent(), "short grass has no shears source from tall grass: " + index.sources(ItemKey.of("minecraft:short_grass")));
+        helper.assertTrue(Math.abs(grass.get().yield() - 2.0) < 1e-9, "short grass per tall grass is " + grass.get().yield() + ", expected 2.0");
+        Optional<Source.MineBlock> seeds = find(index, "minecraft:wheat_seeds", Source.MineBlock.class,
+            m -> m.block().equals("minecraft:tall_grass") && !m.needsShears() && !m.needsSilkTouch());
+        helper.assertTrue(seeds.isPresent(), "wheat seeds have no plain source from tall grass: " + index.sources(ItemKey.of("minecraft:wheat_seeds")));
+        helper.assertTrue(Math.abs(seeds.get().yield() - 0.125) < 1e-9, "seeds per tall grass are " + seeds.get().yield() + ", expected 0.125");
+        helper.succeed();
+    }
+
+    // A yield a block's state decides is the block's default state's, the one it has when placed, when that state yields
+    // the item at all; only an item the default state gives none of is read in the state that gives the most. The
+    // planner prices a source by this number, and a high one makes a plan fall short (it counts on four candles from a
+    // block that was placed with one) where a low one only collects a little too much. The default state of each of
+    // these is the first value of its property: a slab is a bottom slab, candles are 1, pickles 1, snow 1 layer, petals
+    // 1, cocoa and nether wart age 0, a carrot age 0.
+    // oak_slab.json: set_count 2 only when type is double: 1. candle.json: set_count 2, 3, 4 for that many candles: 1 with
+    // one. sea_pickle.json: the same for 2, 3, 4 pickles: 1. pink_petals.json: set_count 1..4 for flower_amount 1..4: 1.
+    // snow.json: set_count 1..8 snowballs for that many layers, 1 at one layer, and its plain branch never gives the
+    // snow block, which only the silk-touch branch gives for layers 8. cocoa.json: set_count 3 only when age is 2, so 1
+    // at age 0. nether_wart.json: set_count uniform 2..4 only when age is 3, so 1 at age 0. carrots.json: the first pool
+    // gives 1 carrot in every state and the second another at age 7: 1, where the best state gives 2.
+    // What the default state does not give at all is read in the best state: glow_lichen.json with shears starts the
+    // stack at 1, adds 1 for each of the six faces that has lichen and then adds -1, so the default state, which has no
+    // face, gives 0 and a lichen on every face gives 1 + 6 - 1 = 6. The wheat of wheat.json is only given at age 7, 1.
+    // Each figure is collected and the test fails once with every one that is off, so a run shows them all.
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void aYieldThatBlockStateDecidesIsTheDefaultStatesUnlessItGivesNothing(GameTestHelper helper) {
+        AcquisitionIndex index = index(helper);
+        List<String> off = new ArrayList<>();
+        check(off, "oak slab per oak slab", sourceYield(index, "minecraft:oak_slab", Source.MineBlock.class, m -> m.block().equals("minecraft:oak_slab")), 1.0);
+        check(off, "candles per candle block", sourceYield(index, "minecraft:candle", Source.MineBlock.class, m -> m.block().equals("minecraft:candle")), 1.0);
+        check(off, "sea pickles per sea pickle block", sourceYield(index, "minecraft:sea_pickle", Source.MineBlock.class, m -> m.block().equals("minecraft:sea_pickle")), 1.0);
+        check(off, "pink petals per pink petals block", sourceYield(index, "minecraft:pink_petals", Source.MineBlock.class, m -> m.block().equals("minecraft:pink_petals")), 1.0);
+        check(off, "snowballs per snow block", sourceYield(index, "minecraft:snowball", Source.MineBlock.class, m -> m.block().equals("minecraft:snow") && !m.needsSilkTouch()), 1.0);
+        check(off, "cocoa beans per pod", sourceYield(index, "minecraft:cocoa_beans", Source.Harvest.class, h -> h.block().equals("minecraft:cocoa")), 1.0);
+        check(off, "nether wart per plant", sourceYield(index, "minecraft:nether_wart", Source.Harvest.class, h -> h.block().equals("minecraft:nether_wart")), 1.0);
+        check(off, "carrots per carrot crop", sourceYield(index, "minecraft:carrot", Source.Harvest.class, h -> h.block().equals("minecraft:carrots")), 1.0);
+        check(off, "glow lichen per block, with shears", sourceYield(index, "minecraft:glow_lichen", Source.MineBlock.class,
+            m -> m.block().equals("minecraft:glow_lichen") && m.needsShears()), 6.0);
+        check(off, "wheat per wheat crop", sourceYield(index, "minecraft:wheat", Source.Harvest.class, h -> h.block().equals("minecraft:wheat")), 1.0);
+        if (find(index, "minecraft:snow_block", Source.MineBlock.class, m -> m.block().equals("minecraft:snow") && !m.needsSilkTouch()).isPresent()) {
+            off.add("a plain tool gets the snow block from snow");
+        }
+        helper.assertTrue(off.isEmpty(), "figures that are off: " + off);
+        helper.succeed();
+    }
+
+    private static <T extends Source> double sourceYield(AcquisitionIndex index, String item, Class<T> kind, Predicate<T> match) {
+        return find(index, item, kind, match).map(Source::yield).orElse(Double.NaN);
+    }
+
+    private static void check(List<String> off, String what, double got, double expected) {
+        if (!(Math.abs(got - expected) < 1e-9)) off.add(what + " " + got + " (expected " + expected + ")");
+    }
+
+    // An offer whose result cannot be read, in a listing placed ahead of the real ones of a farmer's first level. The
+    // rest of that level, and every profession after it, must still be sampled; the failure is named in the notes.
+    private static final class PoisonListing implements VillagerTrades.ItemListing {
+        @Override
+        public MerchantOffer getOffer(Entity trader, RandomSource random) {
+            return new MerchantOffer(new ItemCost(Items.EMERALD, 1), new ItemStack(Items.BREAD), 1, 1, 0.05F) {
+                @Override
+                public ItemStack getResult() {
+                    throw new IllegalStateException("poisoned offer");
+                }
+            };
+        }
+    }
+
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void aTradeListingThatThrowsCostsOnlyItself(GameTestHelper helper) {
+        Int2ObjectMap<VillagerTrades.ItemListing[]> farmer = VillagerTrades.TRADES.get(VillagerProfession.FARMER);
+        VillagerTrades.ItemListing[] original = farmer.get(1);
+        VillagerTrades.ItemListing[] poisoned = new VillagerTrades.ItemListing[original.length + 1];
+        poisoned[0] = new PoisonListing();
+        System.arraycopy(original, 0, poisoned, 1, original.length);
+        AcquisitionIndex built;
+        try {
+            farmer.put(1, poisoned);
+            built = AcquisitionIndexBuilder.build(helper.getLevel().getServer());
+        } finally {
+            farmer.put(1, original);
+        }
+        // Farmer level 1 also sells bread for emeralds (ItemsForEmeralds(BREAD, 1, 6, 16, 1)), after the listing that threw.
+        helper.assertTrue(find(built, "minecraft:bread", Source.Trade.class,
+            t -> t.profession().equals("minecraft:farmer") && t.level() == 1).isPresent(),
+            "the farmer's bread trade was lost with the listing that threw: " + built.sources(ItemKey.of("minecraft:bread")));
+        // The librarian comes after the farmer in profession order.
+        helper.assertTrue(find(built, "minecraft:enchanted_book", Source.Trade.class,
+            t -> t.profession().equals("minecraft:librarian") && t.enchantments().containsKey("minecraft:mending")).isPresent(),
+            "the librarian's trades were lost with the farmer's listing that threw");
+        // The index every other test reads was built without the poisoned listing, so a note that names the farmer only
+        // comes from this build having skipped it.
+        helper.assertTrue(index(helper).notes().stream().noneMatch(n -> n.contains("minecraft:farmer")),
+            "the farmer is named in the notes of a build that skipped nothing: " + index(helper).notes());
+        helper.assertTrue(built.notes().stream().anyMatch(n -> n.contains("minecraft:farmer")),
+            "the farmer whose listing threw is not named in the notes: " + built.notes());
+        helper.succeed();
+    }
+
+    // What a kill source says, against the table's own numbers. A count at or below zero gives nothing, and looting is
+    // level 0, so enchanted_count_increase adds nothing.
+    // entities/zombie.json, pool 1: rotten_flesh with set_count uniform 0..2, each of 0, 1, 2 equally likely: mean
+    // (0 + 1 + 2) / 3 = 1.0, and 2/3 of kills give any. Pool 2: only when a player kills it, with a 0.025 chance, one
+    // entry of three of equal weight (iron_ingot, carrot, potato): each is 0.025 / 3 per kill, and the pool never opens
+    // without the player kill, so the source says the drop needs one.
+    // entities/spider.json, pool 2: spider_eye with set_count uniform -1..1, only for a player kill: the values -1 and
+    // 0 give nothing, 1 gives one, so the mean is 1/3.
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void killSourcesCarryTheTablesOwnNumbers(GameTestHelper helper) {
+        AcquisitionIndex index = index(helper);
+        Source.KillMob flesh = kill(helper, index, "minecraft:rotten_flesh", "minecraft:zombie");
+        helper.assertTrue(Math.abs(flesh.yield() - 1.0) < 1e-9, "rotten flesh per zombie is " + flesh.yield() + ", expected 1.0");
+        helper.assertTrue(flesh.random() && !flesh.playerKillOnly(), "zombie rotten flesh is " + flesh);
+        Source.KillMob iron = kill(helper, index, "minecraft:iron_ingot", "minecraft:zombie");
+        helper.assertTrue(Math.abs(iron.yield() - 0.025 / 3) < 1e-9, "iron ingots per zombie are " + iron.yield() + ", expected " + 0.025 / 3);
+        helper.assertTrue(iron.playerKillOnly(), "zombie iron ingots do not need a player kill: " + iron);
+        Source.KillMob eye = kill(helper, index, "minecraft:spider_eye", "minecraft:spider");
+        helper.assertTrue(Math.abs(eye.yield() - 1.0 / 3) < 1e-9, "spider eyes per spider are " + eye.yield() + ", expected " + 1.0 / 3);
+        helper.assertTrue(eye.playerKillOnly(), "spider eyes do not need a player kill: " + eye);
+        helper.succeed();
+    }
+
+    // The mob a kill source names must exist and be a mob a player can fight: not a player, an armor stand, a boat or
+    // any other entity that is not living. In vanilla data only mobs have loot-table contents, so this guards a version
+    // (or a pack) that gives one of those drops of its own and the filter that keeps them out of the index.
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
     public static void killSourcesNameMobsOnly(GameTestHelper helper) {
         AcquisitionIndex index = index(helper);
@@ -190,13 +333,20 @@ public final class ResolverGameTests {
         for (ItemKey item : index.sourced()) {
             for (Source source : index.sources(item)) {
                 if (!(source instanceof Source.KillMob kill) || !checked.add(kill.entity())) continue;
-                EntityType<?> type = BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.parse(kill.entity()));
-                Entity entity = type.create(helper.getLevel());
+                ResourceLocation id = ResourceLocation.parse(kill.entity());
+                helper.assertTrue(BuiltInRegistries.ENTITY_TYPE.containsKey(id), kill.entity() + " is named by a kill source but is not an entity type");
+                Entity entity = BuiltInRegistries.ENTITY_TYPE.get(id).create(helper.getLevel());
                 helper.assertTrue(entity instanceof Mob, kill.entity() + " is the entity of a kill source but is not a mob");
             }
         }
         helper.assertTrue(checked.size() > 20, "only " + checked.size() + " entity types have kill sources");
         helper.succeed();
+    }
+
+    private static Source.KillMob kill(GameTestHelper helper, AcquisitionIndex index, String item, String entity) {
+        Optional<Source.KillMob> found = find(index, item, Source.KillMob.class, k -> k.entity().equals(entity));
+        if (found.isEmpty()) helper.fail(item + " has no kill source from " + entity + ": " + index.sources(ItemKey.of(item)));
+        return found.get();
     }
 
     // Planners key a source by (item, id); two sources of one item with one id would silently merge into one.

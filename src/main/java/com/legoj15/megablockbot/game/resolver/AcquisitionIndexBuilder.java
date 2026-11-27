@@ -59,6 +59,7 @@ import net.minecraft.world.level.block.StemBlock;
 import net.minecraft.world.level.block.SugarCaneBlock;
 import net.minecraft.world.level.block.SweetBerryBushBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.storage.loot.LootTable;
 
 /**
@@ -300,6 +301,7 @@ public final class AcquisitionIndexBuilder {
         }
         notes.always("global loot modifiers are not evaluated (" + globalLootModifierCount() + " registered)");
         notes.always("drops a mob's code adds outside its loot table (a wither's nether star) are not seen");
+        notes.always("a block's yield is that of its default state, the one it is placed in (one slab, one candle, an unripe crop's first pool); an item that state does not yield at all is read in the state that yields the most of it (ripe sweet berries, grown wheat, glow lichen on every face), not in the state the block is found in");
         notes.always("a block drops its loot-table items whether or not it can exist in the world, so a block that never generates still counts as a source of its own item");
         notes.always("recipes of special crafting types (armor dyeing, firework rockets, tipped arrows, ...) report no result item ("
             + noResultRecipes + " loaded), so what only they make is not in craftable() and shows as unobtainable");
@@ -381,6 +383,36 @@ public final class AcquisitionIndexBuilder {
             if (json == null) return null;
             String type = LootEval.string(json, "type");
             return type.isEmpty() ? "minecraft:generic" : type;
+        }
+
+        @Override
+        public List<String> stateValues(String blockId, String property) {
+            ResourceLocation location = ResourceLocation.tryParse(blockId);
+            if (location == null) return List.of();
+            Optional<Block> block = BuiltInRegistries.BLOCK.getOptional(location);
+            if (block.isEmpty()) return List.of();
+            Property<?> found = block.get().getStateDefinition().getProperty(property);
+            return found == null ? List.of() : valueNames(found);
+        }
+
+        private static <T extends Comparable<T>> List<String> valueNames(Property<T> property) {
+            List<String> names = new ArrayList<>();
+            for (T value : property.getPossibleValues()) names.add(property.getName(value));
+            return names;
+        }
+
+        @Override
+        public String defaultStateValue(String blockId, String property) {
+            ResourceLocation location = ResourceLocation.tryParse(blockId);
+            if (location == null) return null;
+            Optional<Block> block = BuiltInRegistries.BLOCK.getOptional(location);
+            if (block.isEmpty()) return null;
+            Property<?> found = block.get().getStateDefinition().getProperty(property);
+            return found == null ? null : defaultName(block.get().defaultBlockState(), found);
+        }
+
+        private static <T extends Comparable<T>> String defaultName(BlockState state, Property<T> property) {
+            return property.getName(state.getValue(property));
         }
 
         @Override

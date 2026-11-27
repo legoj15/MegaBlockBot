@@ -20,19 +20,55 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
 - Loot tables are encoded with `LootTable.DIRECT_CODEC` (registry-aware `JsonOps`) and walked as JSON in `LootEval`; no
   access transformer. NeoForge replaces 27 vanilla tables, so `neoforge:can_item_perform_ability` (`shears_dig`) is
   read as shears.
-- A table is evaluated per scenario (tool: none that matters, silk touch, shears; killed by a player or not; conditions
-  `LootEval` cannot judge assumed to hold or not). Each condition is a number 0..1, `alternatives` stops at the first
-  child that passes, and an item keeps only its least demanding route. The two readings of the unjudgeable conditions
-  are merged per item: where both yield an item it keeps the larger expected count and the larger chance (so cod is
-  0.5368 per cast, the 85/95 * 60/100 of a cast away from open water, not the 0.51 of one in it). Ids carry
-  `#silk_touch` or `#shears` for a special-tool route, so they are unique within one item's list, not across the index:
-  key a source by `(item, id)`.
+- A table is evaluated per scenario (tool: none that matters, silk touch, shears; killed by a player or not; block
+  state; conditions `LootEval` cannot judge assumed to hold or not). Each condition is a number 0..1, `alternatives`
+  stops at the first child that passes, and an item keeps only its least demanding route. The two readings of the
+  unjudgeable conditions are merged per item: where both yield an item it keeps the larger expected count and the
+  larger chance (so cod is 0.5368 per cast, the 85/95 * 60/100 of a cast away from open water, not the 0.51 of one in
+  it). Ids carry `#silk_touch` or `#shears` for a special-tool route, so they are unique within one item's list, not
+  across the index: key a source by `(item, id)`.
+- Block state: a block is in one state, so `block_state_property` conditions that test one property for different values
+  never hold together. The table is evaluated once per state it names (for each property, each value its conditions
+  mention that the block can have, from the block's own state definition, and one more state for all the others), and
+  the states tested inside the tables it references through `loot_table` entries count too (bounded like the chain of
+  references). Which state a yield is read in: **the block's default state when that state yields the item at all, the
+  state that yields it the most only when the default state yields none of it.** Tall grass is 2 short grass with
+  shears, not 4 (a lower and an upper half are two pools of which one is the block's, and the default state is the
+  lower half). A sweet berry bush is 2.5 berries, not 2.5 + 1.5 (age 3 plus age 2): its default state, age 0, yields
+  none, so the best state, age 3, is read; likewise wheat from a wheat crop (1 at age 7; the default state gives only
+  seeds) and a glow lichen with shears (6, a lichen on every face; the default state has no face and gives nothing). A
+  slab is 1, not 2 (only a double slab gives two), a candle block 1 (not 4), a sea pickle 1 (not 4), pink petals 1 (not
+  4), snowballs from snow 1 (not 8 layers), cocoa 1 (not 3), nether wart 1 (not 3), carrots 1 (not 2). The reason is the
+  planner's: it prices a source by this number, so a figure above what the block holds when placed makes a plan fall
+  short (four candles counted on, one found), where a low one only collects a little more than needed. No `Source`
+  says which state; the lint prints one standing note instead. Where the environment cannot say what the default state
+  is (a test's, or a block the registry lacks) the best state is read for everything. Past 256 combinations of states
+  (vanilla's most is 64: the six faces of glow lichen and sculk vein) a table's state conditions are read as
+  unjudgeable, both ways, and the table is noted; a property tested by a range instead of a value is never enumerated.
 - Counts come from `set_count` (constant, uniform and binomial providers, exact) on the entry and then on its pool, in
-  the game's order, only when the function's conditions hold under both readings. A pool-level `set_count` is not
-  applied over a nested `loot_table` entry, and neither are table-level count functions; both, and the pool-level
-  functions that change counts in other ways (`limit_count`, `enchanted_count_increase` and the wrappers `sequence`,
-  `filtered`, `reference`), are named in the notes. One table that throws while it is evaluated costs that table, named in
-  the notes. A `loot_table` entry with no readable value is noted with the table that holds it.
+  the game's order, only when the function's conditions hold under both readings (one that cannot hold in the state
+  being tried is simply not there). Three providers too big to enumerate are replaced, and each replacement is noted
+  with the table it was read in: a binomial with n above 1000 keeps its mean, n times p, as a count of the whole number
+  below it or the one above with the odds of the fraction; a uniform spanning 4096 values or more becomes its midpoint;
+  and a `set_count` with `add` whose sum would span more than 4096 values becomes the sum of the means. A pool-level
+  `set_count` is not applied over a nested `loot_table` entry, and neither are table-level count functions; both, and the
+  pool-level functions that change counts in other ways (`limit_count`, `enchanted_count_increase` and the wrappers
+  `sequence`, `filtered`, `reference`), are named in the notes. One table that throws while it is evaluated, or whose
+  block states cannot be looked up, costs that table, named in the notes. A `loot_table` entry with no readable value is
+  noted with the table that holds it, and so is a table that loops back to itself (once per table, not once per state).
+- A pool's pick: one roll takes one entry among those that are there, by weight. Beside entries that are only there
+  some of the time (a `random_chance` on the entry) an entry's share is averaged over which of them are there: weight 3
+  beside a weight 1 that is there half the time gets 1/2 * 3/3 + 1/2 * 3/4 = 0.875, not 3/3.5. The average runs over the
+  different totals of weight the uncertain entries can make (`LootEval.MAX_PICK_SUPPORT`, 4096); past that the entry's
+  weight over the expected weight of the pool is used, and the table is noted. Vanilla has no pool with an uncertain
+  entry beside another, so no vanilla figure depends on this.
+- `loot_table` references, inline ones too, are followed `LootEval.MAX_TABLE_DEPTH` (128) deep, the table where the chain
+  was cut is noted and the deeper references ignored; the longest chain in vanilla is three tables. A chain that long
+  would otherwise overflow the stack, which no guard of the build catches. The depth bounds the stack, not the work: a
+  table's result is kept by scenario and by how much depth is left where it was met, so a web of tables that reference
+  each other many times over (64 tables with two pools each referencing the next is 2^63 paths) costs as many
+  evaluations as it has tables and depths, not as many as paths. Without that, a result under a cut was not kept and the
+  same web took longer than 25 seconds where it took 90 ms before the bound.
 - Tool class from `mineable/*`, tier from the lowest `incorrect_for_*_tool` tag that lacks the block (HAND when no tool
   speeds the block up and none is required; shears routes are SHEARS/HAND).
 - Ore ranges: every biome's placed features, `height_range` read from the encoded placement, targets from the
@@ -44,7 +80,8 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
 - Kill sources: entity types that have attributes (a living entity), other than the player and the armor stand.
 - Trades: each listing of `VillagerTrades.TRADES` and the wandering trader is sampled 64 times with a fixed seed against
   an unplaced villager. Explorer-map listings are skipped (each roll would allocate a world map), a null listing is
-  noted and skipped.
+  noted and skipped, and a listing that throws, while it offers or while its offer is read, is noted and skipped on its
+  own: the rest of its level and the other professions are still sampled.
 - Recipes: every `RecipeManager` output is craftable; types other than crafting, smelting, blasting, smoking, campfire
   cooking, stonecutting and smithing are counted as unplannable.
 
@@ -54,6 +91,5 @@ Global loot modifiers, mob drops coded outside loot tables, loot tables of type 
 equipment, blocks that drop their own item but never exist naturally, and trades rarer than about 1 in 20 per listing.
 Recipes of special crafting types (armor dyeing, firework rockets, tipped arrows) report no result item, so what only
 they make is not in `craftable()`. With the `trade_rebalance` feature on, villagers and the wandering trader use the
-experimental per-biome trade lists, which are not sampled. Yields are level-0 (no fortune, looting or luck); a count that
-depends on block state is the lower bound, and two pools that read one block state each (a sweet berry bush's age 3 and
-age 2) are both counted, so that yield is high.
+experimental per-biome trade lists, which are not sampled. Yields are level-0 (no fortune, looting or luck), and a yield
+that block state decides is the default state's (see Block state above), which is the low side for a crop.

@@ -88,26 +88,26 @@ final class TradeSampler {
                     notes.count("explorer map trades not sampled (each roll would create a world map)");
                     continue;
                 }
-                sampleListing(trader, profession, level, i, listing, out, notes);
+                // Each listing on its own: one that throws, while it offers or while its offer is read, costs that
+                // listing, not the rest of its level or the professions after it.
+                try {
+                    sampleListing(trader, profession, level, i, listing, out);
+                } catch (RuntimeException e) {
+                    notes.skipped("villager trade listings that threw while sampled",
+                        profession + ":" + level + ":" + i + " " + listing.getClass().getName());
+                }
             }
         }
     }
 
     private static void sampleListing(Entity trader, String profession, int level, int index,
-                                      VillagerTrades.ItemListing listing, List<Result> out, BuildNotes notes) {
+                                      VillagerTrades.ItemListing listing, List<Result> out) {
         // Stable across restarts: the seed is built from the position of the listing, never from identity hashes.
         RandomSource random = RandomSource.create(SEED ^ (profession + ":" + level + ":" + index).hashCode());
         Map<String, Result> byKey = new TreeMap<>();
         Map<String, Integer> counts = new HashMap<>();
         for (int sample = 0; sample < SAMPLES; sample++) {
-            MerchantOffer offer;
-            try {
-                offer = listing.getOffer(trader, random);
-            } catch (RuntimeException e) {
-                notes.skipped("villager trade listings that threw while sampled",
-                    profession + ":" + level + ":" + index + " " + listing.getClass().getName());
-                return;
-            }
+            MerchantOffer offer = listing.getOffer(trader, random);
             if (offer == null) continue;
             ItemStack stack = offer.getResult();
             if (stack.isEmpty()) continue;
