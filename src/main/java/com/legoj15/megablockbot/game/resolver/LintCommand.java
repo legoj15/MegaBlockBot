@@ -15,8 +15,10 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.storage.LevelResource;
 
 /**
- * {@code /aiplayer lint [namespace] [write]}: the items nothing in a survival world can yield, from the acquisition
- * index. Permission level 2 (the console counts). A namespace literally named "write" cannot be linted by name.
+ * {@code /aiplayer lint [namespace] [write]}: the obtainability lint over the acquisition index — items with no
+ * source and no recipe, split into those a player still has a known way for (obtainable, no strategy yet) and those
+ * nothing in a survival world yields. Permission level 2 (the console counts). A namespace literally named "write"
+ * cannot be linted by name. Returns the unobtainable count.
  */
 final class LintCommand {
     /** Item ids shown in chat; the rest are counted, and {@code write} puts every one in a file. */

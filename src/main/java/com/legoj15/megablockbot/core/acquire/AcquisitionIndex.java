@@ -15,21 +15,28 @@ import java.util.TreeSet;
 /**
  * The reverse index "item to how a survival player can obtain it" (design 4.3). Immutable, so the planner may read it
  * from any thread while the server thread builds the next one after a reload; the holder swaps the reference.
+ *
+ * <p>Beside the sources it holds the {@link KnownWay known ways}: ways a player has that no {@link Source} records.
+ * They are for the obtainability lint, never for the planner.
  */
 public final class AcquisitionIndex {
     public static final AcquisitionIndex EMPTY = new Builder().build();
 
     // Sources by item, each list ordered by id. Items without a source are absent.
     private final Map<ItemKey, List<Source>> sources;
+    // Ways a player has that no Source records, by item and ordered by id: recorded for the lint, never planned.
+    private final Map<ItemKey, List<KnownWay>> knownWays;
     private final Set<ItemKey> items;
     private final Set<ItemKey> craftable;
     private final Set<String> sourceBlocks;
     private final Map<String, Integer> unplannableRecipeTypes;
     private final List<String> notes;
 
-    private AcquisitionIndex(Map<ItemKey, List<Source>> sources, Set<ItemKey> items, Set<ItemKey> craftable,
-                             Set<String> sourceBlocks, Map<String, Integer> unplannableRecipeTypes, List<String> notes) {
+    private AcquisitionIndex(Map<ItemKey, List<Source>> sources, Map<ItemKey, List<KnownWay>> knownWays,
+                             Set<ItemKey> items, Set<ItemKey> craftable, Set<String> sourceBlocks,
+                             Map<String, Integer> unplannableRecipeTypes, List<String> notes) {
         this.sources = sources;
+        this.knownWays = knownWays;
         this.items = items;
         this.craftable = craftable;
         this.sourceBlocks = sourceBlocks;
@@ -40,6 +47,15 @@ public final class AcquisitionIndex {
     /** Every way to obtain the item, ordered deterministically by id; empty when there is none. */
     public List<Source> sources(ItemKey item) {
         return sources.getOrDefault(item, List.of());
+    }
+
+    /**
+     * Every way a player has of obtaining the item that no {@link Source} records, ordered deterministically by id;
+     * empty when there is none. The planner does not read these; the obtainability lint does, to tell an item that is
+     * only unplanned from one that is unobtainable.
+     */
+    public List<KnownWay> knownWays(ItemKey item) {
+        return knownWays.getOrDefault(item, List.of());
     }
 
     /** Every item the server has enabled: the universe the lint judges. Sorted by id. */
@@ -90,6 +106,7 @@ public final class AcquisitionIndex {
 
     public static final class Builder {
         private final Map<ItemKey, List<Source>> sources = new HashMap<>();
+        private final Map<ItemKey, List<KnownWay>> knownWays = new HashMap<>();
         private final Set<ItemKey> items = new TreeSet<>();
         private final Set<ItemKey> craftable = new TreeSet<>();
         private final Map<String, Integer> unplannable = new TreeMap<>();
@@ -104,6 +121,11 @@ public final class AcquisitionIndex {
 
         public Builder addSource(Source source) {
             sources.computeIfAbsent(source.item(), k -> new ArrayList<>()).add(source);
+            return this;
+        }
+
+        public Builder addKnownWay(KnownWay way) {
+            knownWays.computeIfAbsent(way.item(), k -> new ArrayList<>()).add(way);
             return this;
         }
 
@@ -138,8 +160,19 @@ public final class AcquisitionIndex {
                     else if (source instanceof Source.Harvest harvest) blocks.add(harvest.block());
                 }
             }
+            // Ways are ordered the same way (the way and the from text break a tie).
+            Comparator<KnownWay> wayOrder = Comparator.comparing(KnownWay::id)
+                .thenComparing(KnownWay::way)
+                .thenComparing(KnownWay::from);
+            Map<ItemKey, List<KnownWay>> frozenWays = new HashMap<>();
+            for (Map.Entry<ItemKey, List<KnownWay>> e : knownWays.entrySet()) {
+                List<KnownWay> list = new ArrayList<>(e.getValue());
+                list.sort(wayOrder);
+                frozenWays.put(e.getKey(), List.copyOf(list));
+            }
             return new AcquisitionIndex(
                 Collections.unmodifiableMap(frozen),
+                Collections.unmodifiableMap(frozenWays),
                 Collections.unmodifiableSet(new TreeSet<>(items)),
                 Collections.unmodifiableSet(new TreeSet<>(craftable)),
                 Collections.unmodifiableSet(blocks),

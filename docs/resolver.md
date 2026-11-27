@@ -6,13 +6,14 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
 ## Pieces
 
 - `core.acquire` (Minecraft-free, every node): `Source` (sealed: `MineBlock`, `KillMob`, `Fishing`, `Trade`,
-  `ChestLoot`, `Harvest`), the immutable `AcquisitionIndex` (item to sources, `items()`, `craftable()`,
-  `unplannableRecipeTypes()`, `notes()`) and `LintReport`.
+  `ChestLoot`, `Harvest`), `KnownWay` (a way a player has that no `Source` records), the immutable `AcquisitionIndex`
+  (item to sources, `knownWays()`, `items()`, `craftable()`, `unplannableRecipeTypes()`, `notes()`) and `LintReport`.
 - `game.resolver`: `AcquisitionIndexBuilder.build(server)` (server thread), `AcquisitionIndexes.current()` (atomic
   holder; `AcquisitionIndex.EMPTY` before the first build and after the server stops), `ResolverFeature.init()` (rebuilds
   through `Platform.loader().onServerDataLoaded`, registers the command and `ResolverGameTests`).
 - `/aiplayer lint [namespace] [write]`: permission 2 or console. Chat shows counts, notes and at most 40 ids; `write`
-  puts everything in `<world>/megablockbot/lint.txt`. A namespace named `write` cannot be linted by name.
+  puts everything in `<world>/megablockbot/lint.txt`, the no-strategy items with their ways before the unobtainable
+  ids. The return value is the unobtainable count. A namespace named `write` cannot be linted by name.
 - Evidence run: `scripts/bot-server.ps1 start -Node 1.21.1`, then `cmd -Command "aiplayer lint minecraft write"`.
 
 ## How each source is read
@@ -98,11 +99,40 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
 - Recipes: every `RecipeManager` output is craftable; types other than crafting, smelting, blasting, smoking, campfire
   cooking, stonecutting and smithing are counted as unplannable.
 
+## Known ways: obtainable, no strategy yet
+
+An item with no source and no recipe is not necessarily unobtainable — a player may have a way the index has no
+`Source` kind for (issue #28). Each such way is a `KnownWay`, held apart from the sources (`knownWays(item)`, sorted
+by id) and read by nothing in `core/planner/`: they exist so the lint can say "obtainable with no strategy yet"
+instead of "unobtainable". Each builder section below is guarded like the source sections, so one that throws costs
+its ways and is noted.
+
+- Loot tables of the types no source reads (`archaeology`, `barter`, `gift`, `shearing`, `equipment`, any other type
+  except `generic`) are evaluated with `LootEval.routes` as a chest table is (the plain tool, no player kill, the
+  mined state rule): every item one yields is a way `from` that table's id — `archaeology`, `barter`, `gift`,
+  `shearing`, `equipment` for those types, `other_loot` for any other. A `generic` table is read only through the
+  table that references it and is not read on its own.
+- Buckets, read off the item classes: a `BucketItem` holding a fluid that is not empty is `fill_bucket` from the
+  fluid's id; a `MobBucketItem` is `catch_in_bucket` from its entity type's id and never `fill_bucket` (the water it
+  also holds is not the way); the `SolidBucketItem` (powder snow) is `fill_bucket` from its block's id. The entity
+  type and the block are private fields with no getters, so each is named the way the ids are laid out
+  (`<fish>_bucket` for the fish `<fish>`); a bucket whose content cannot be named that way is counted in the notes.
+- Game code: a small named table in the builder, one row per drop the game's own code makes outside any loot table —
+  the wither's nether star, a baby turtle's scute, an armadillo's scutes, dragon breath, an end ship's elytra, the
+  dragon egg of the first dragon kill — each row commented with where in the game the drop happens. A row whose item
+  is not in the registry (another game version) or is behind a disabled feature flag is skipped silently.
+
+The lint has four lists: an item with a source counts as with a source; else a craftable one as craftable only; else
+an item with a known way is listed obtainable with no strategy yet (the file shows each such item with its ways,
+`id: way from, way from`); the rest is unobtainable. The chat summary counts all four, and `itemLines` (the capped
+chat list) stays the unobtainable one.
+
 ## What it does not know (also printed by the lint)
 
-Global loot modifiers, mob drops coded outside loot tables, loot tables of type archaeology, barter, gift, shearing and
-equipment, blocks that drop their own item but never exist naturally, and trades rarer than about 1 in 20 per listing.
-Recipes of special crafting types (armor dyeing, firework rockets, tipped arrows) report no result item, so what only
-they make is not in `craftable()`. With the `trade_rebalance` feature on, villagers and the wandering trader use the
-experimental per-biome trade lists, which are not sampled. Yields are level-0 (no fortune, looting or luck); a yield that
-block state decides is the default state's for a mined block and the grown state's for a harvest (see Block state above).
+Global loot modifiers, mob drops coded outside loot tables beyond the rows the game-code table names (a totem of
+undying, a goat horn), blocks that drop their own item but never exist naturally, and trades rarer than about 1 in 20
+per listing. Recipes of special crafting types (armor dyeing, firework rockets, tipped arrows) report no result item,
+so what only they make is not in `craftable()` and has no known way either. With the `trade_rebalance` feature on,
+villagers and the wandering trader use the experimental per-biome trade lists, which are not sampled. Yields are
+level-0 (no fortune, looting or luck); a yield that block state decides is the default state's for a mined block and
+the grown state's for a harvest (see Block state above).

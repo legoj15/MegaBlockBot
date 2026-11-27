@@ -7,6 +7,7 @@ import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.ToolClass;
 import com.legoj15.megablockbot.core.ToolTier;
 import com.legoj15.megablockbot.core.acquire.AcquisitionIndex;
+import com.legoj15.megablockbot.core.acquire.KnownWay;
 import com.legoj15.megablockbot.core.acquire.Source;
 import com.legoj15.megablockbot.core.acquire.Source.OreRange;
 import com.legoj15.megablockbot.game.resolver.LootEval.Route;
@@ -25,6 +26,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
+import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
@@ -39,9 +41,12 @@ import net.minecraft.util.GsonHelper;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.ai.attributes.DefaultAttributes;
 import net.minecraft.world.flag.FeatureFlags;
+import net.minecraft.world.item.BucketItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.MobBucketItem;
+import net.minecraft.world.item.SolidBucketItem;
 import net.minecraft.world.item.crafting.Recipe;
 import net.minecraft.world.item.crafting.RecipeHolder;
 import net.minecraft.world.level.block.AttachedStemBlock;
@@ -60,6 +65,8 @@ import net.minecraft.world.level.block.SugarCaneBlock;
 import net.minecraft.world.level.block.SweetBerryBushBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
+import net.minecraft.world.level.material.Fluid;
+import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.storage.loot.LootTable;
 
 /**
@@ -110,6 +117,9 @@ public final class AcquisitionIndexBuilder {
         section("chest loot", this::chests);
         section("villager trades", () -> TradeSampler.sample(server, notes).forEach(index::addSource));
         section("recipes", this::recipes);
+        section("loot tables of unread types", this::unreadLootTables);
+        section("buckets", this::buckets);
+        section("game code drops", this::gameCodeDrops);
         standingNotes();
         notes.lines().forEach(index::note);
         return index.build();
@@ -298,6 +308,124 @@ public final class AcquisitionIndexBuilder {
         }
     }
 
+    // ---- known ways --------------------------------------------------------------------------------------------
+
+    // The way each unread loot table type gives a player. A type not named here is read as other_loot: its items are
+    // no less obtainable, only without even a name for how.
+    private static final Map<String, String> WAYS_BY_TABLE_TYPE = Map.of(
+        "minecraft:archaeology", KnownWay.ARCHAEOLOGY,
+        "minecraft:barter", KnownWay.BARTER,
+        "minecraft:gift", KnownWay.GIFT,
+        "minecraft:shearing", KnownWay.SHEARING,
+        "minecraft:equipment", KnownWay.EQUIPMENT);
+
+    /**
+     * The loot tables of the types no source kind reads (archaeology, barter, gift, ...): each is evaluated like a
+     * chest table and every item it yields becomes a known way, so the lint lists those items as obtainable with no
+     * strategy instead of unobtainable. The types the index reads already feed sources; a {@code generic} table is
+     * read only through the table that references it, and reading it here too would list its items twice.
+     */
+    private void unreadLootTables() {
+        for (String table : environment.tableIds()) {
+            String type = environment.type(table);
+            if (type == null || READ_TABLE_TYPES.contains(type) || type.equals("minecraft:generic")) continue;
+            String way = WAYS_BY_TABLE_TYPE.getOrDefault(type, KnownWay.OTHER_LOOT);
+            for (Route route : eval.routes(table, EnumSet.of(Tool.PLAIN), false, LootEval.StateRule.MINED)) {
+                index.addKnownWay(new KnownWay(wayIdPrefix(way) + table, ItemKey.of(route.item()), way, table));
+            }
+        }
+    }
+
+    // The id prefix of a way, in the style of Source ids: the two bucket ways and the game-code rows read better
+    // short ("fill:minecraft:lava", "code:wither"), every other way is its own prefix.
+    private static String wayIdPrefix(String way) {
+        switch (way) {
+            case KnownWay.FILL_BUCKET: return "fill:";
+            case KnownWay.CATCH_IN_BUCKET: return "catch:";
+            case KnownWay.GAME_CODE: return "code:";
+            default: return way + ":";
+        }
+    }
+
+    /**
+     * The buckets, read off the item classes: a {@link BucketItem} holds a fluid the player scoops up, a
+     * {@link MobBucketItem} a fish the player catches (the water it also holds is not the way), and the one
+     * {@link SolidBucketItem}, powder snow, a block. None is a source the planner can choose, so each is a way.
+     */
+    private void buckets() {
+        var features = server.getWorldData().enabledFeatures();
+        for (Item item : BuiltInRegistries.ITEM) {
+            if (!item.isEnabled(features)) continue;
+            String itemId = BuiltInRegistries.ITEM.getKey(item).toString();
+            if (item instanceof MobBucketItem) {
+                // The entity type is a private field with no getter; the ids name it instead (every mob bucket is
+                // "<fish>_bucket" for the fish "<fish>"), so a bucket that does not follow the naming is counted.
+                Optional<EntityType<?>> fish = registrySibling(BuiltInRegistries.ENTITY_TYPE, itemId, "_bucket");
+                if (fish.isEmpty()) {
+                    notes.count("mob buckets whose entity type could not be named from the item id");
+                    continue;
+                }
+                String entityId = BuiltInRegistries.ENTITY_TYPE.getKey(fish.get()).toString();
+                index.addKnownWay(new KnownWay(wayIdPrefix(KnownWay.CATCH_IN_BUCKET) + entityId,
+                    ItemKey.of(itemId), KnownWay.CATCH_IN_BUCKET, entityId));
+            } else if (item instanceof BucketItem bucket) {
+                Fluid content = bucket.content;
+                if (content == Fluids.EMPTY) continue; // the empty bucket scoops nothing
+                String fluidId = BuiltInRegistries.FLUID.getKey(content).toString();
+                index.addKnownWay(new KnownWay(wayIdPrefix(KnownWay.FILL_BUCKET) + fluidId,
+                    ItemKey.of(itemId), KnownWay.FILL_BUCKET, fluidId));
+            } else if (item instanceof SolidBucketItem) {
+                // The block is a private field with no getter either; the id names it ("powder_snow_bucket").
+                Optional<Block> block = registrySibling(BuiltInRegistries.BLOCK, itemId, "_bucket");
+                if (block.isEmpty()) {
+                    notes.count("solid buckets whose block could not be named from the item id");
+                    continue;
+                }
+                String blockId = BuiltInRegistries.BLOCK.getKey(block.get()).toString();
+                index.addKnownWay(new KnownWay(wayIdPrefix(KnownWay.FILL_BUCKET) + blockId,
+                    ItemKey.of(itemId), KnownWay.FILL_BUCKET, blockId));
+            }
+        }
+    }
+
+    // The registry entry a bucket's content has by the id convention (<x>_bucket holds <x>), or empty when no such
+    // entry is registered: what these items hold is behind private fields, but the ids are laid out to match.
+    private static <T> Optional<T> registrySibling(Registry<T> registry, String itemId, String suffix) {
+        if (!itemId.endsWith(suffix)) return Optional.empty();
+        ResourceLocation id = ResourceLocation.tryParse(itemId.substring(0, itemId.length() - suffix.length()));
+        return id == null ? Optional.empty() : registry.getOptional(id);
+    }
+
+    /** One drop the game's own code makes: what it yields, the way id, and where in the game it happens. */
+    private record CodeDrop(String item, String id, String from) {}
+
+    // Drops no loot table makes, each row naming where the game makes it. A row whose item is not in the registry
+    // (another game version) or is behind a disabled feature flag is skipped silently.
+    private static final List<CodeDrop> CODE_DROPS = List.of(
+        // The wither spawns the star when it dies; its loot table holds none of it.
+        new CodeDrop("minecraft:nether_star", "code:wither", "the wither drops it when it dies"),
+        // A baby turtle sheds its scute on growing up.
+        new CodeDrop("minecraft:turtle_scute", "code:baby_turtle", "a baby turtle growing up"),
+        // Brushing an armadillo, and the scutes it sheds on its own every few minutes.
+        new CodeDrop("minecraft:armadillo_scute", "code:armadillo", "brushing an armadillo, and the scutes it sheds"),
+        // A glass bottle used on the dragon breath cloud a dying dragon left behind.
+        new CodeDrop("minecraft:dragon_breath", "code:dragon_breath", "a glass bottle on the dragon's breath"),
+        // The item frame an end ship generates with the elytra still in it.
+        new CodeDrop("minecraft:elytra", "code:end_ship", "the item frame that holds it in an end ship"),
+        // The egg the first killed dragon leaves on the exit portal; only one per world.
+        new CodeDrop("minecraft:dragon_egg", "code:dragon_egg", "the first dragon kill"));
+
+    /** Records the code drops above as game-code ways. */
+    private void gameCodeDrops() {
+        var features = server.getWorldData().enabledFeatures();
+        for (CodeDrop drop : CODE_DROPS) {
+            ResourceLocation id = ResourceLocation.tryParse(drop.item());
+            Optional<Item> item = id == null ? Optional.empty() : BuiltInRegistries.ITEM.getOptional(id);
+            if (item.isEmpty() || !item.get().isEnabled(features)) continue;
+            index.addKnownWay(new KnownWay(drop.id(), ItemKey.of(drop.item()), KnownWay.GAME_CODE, drop.from()));
+        }
+    }
+
     // ---- notes -------------------------------------------------------------------------------------------------
 
     private void standingNotes() {
@@ -307,12 +435,12 @@ public final class AcquisitionIndexBuilder {
             if (type != null && !READ_TABLE_TYPES.contains(type) && !type.equals("minecraft:generic")) otherTypes.merge(type, 1, Integer::sum);
         }
         if (!otherTypes.isEmpty()) {
-            StringBuilder line = new StringBuilder("loot tables of other types are not indexed, so items only they yield show as unobtainable:");
+            StringBuilder line = new StringBuilder("loot tables of these types are not sources, and their items are listed as obtainable with no strategy yet:");
             otherTypes.forEach((type, count) -> line.append(' ').append(type).append(" x").append(count));
             notes.always(line.toString());
         }
         notes.always("global loot modifiers are not evaluated (" + globalLootModifierCount() + " registered)");
-        notes.always("drops a mob's code adds outside its loot table (a wither's nether star) are not seen");
+        notes.always("drops a mob's code adds outside its loot table are not all recorded (a totem of undying, a goat horn)");
         notes.always("the yield of a block that is mined is that of its default state, the one it is placed in (one slab, one candle); an item that state does not yield at all is read in the state that yields the most of it (glow lichen on every face); the yield of a harvested growable is that of the state a player waits for, the grown one (a ripe carrot, a full cocoa pod)");
         notes.always("a block drops its loot-table items whether or not it can exist in the world, so a block that never generates still counts as a source of its own item");
         notes.always("recipes of special crafting types (armor dyeing, firework rockets, tipped arrows, ...) report no result item ("

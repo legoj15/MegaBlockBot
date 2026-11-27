@@ -5,6 +5,8 @@ import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.ToolClass;
 import com.legoj15.megablockbot.core.ToolTier;
 import com.legoj15.megablockbot.core.acquire.AcquisitionIndex;
+import com.legoj15.megablockbot.core.acquire.KnownWay;
+import com.legoj15.megablockbot.core.acquire.LintReport;
 import com.legoj15.megablockbot.core.acquire.Source;
 import com.legoj15.megablockbot.game.resolver.AcquisitionIndexBuilder;
 import com.legoj15.megablockbot.game.resolver.AcquisitionIndexes;
@@ -364,5 +366,75 @@ public final class ResolverGameTests {
             }
         }
         helper.succeed();
+    }
+
+    // The ways a player has that no Source records (issue #28). A lava bucket is scooped from lava and a powder snow
+    // bucket from the powder snow block; a mob bucket is a catch of its fish, not a scoop of the water it holds, so
+    // the axolotl bucket must carry catch_in_bucket and no fill_bucket.
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void bucketsAreWaysOfScoopingAndOfCatching(GameTestHelper helper) {
+        AcquisitionIndex index = index(helper);
+        helper.assertTrue(hasWay(index, "minecraft:lava_bucket", KnownWay.FILL_BUCKET, "minecraft:lava"),
+            "the lava bucket has no fill_bucket way from minecraft:lava");
+        helper.assertTrue(hasWay(index, "minecraft:powder_snow_bucket", KnownWay.FILL_BUCKET, "minecraft:powder_snow"),
+            "the powder snow bucket has no fill_bucket way from minecraft:powder_snow");
+        helper.assertTrue(hasWay(index, "minecraft:axolotl_bucket", KnownWay.CATCH_IN_BUCKET, "minecraft:axolotl"),
+            "the axolotl bucket has no catch_in_bucket way from minecraft:axolotl");
+        helper.assertTrue(!hasAnyWay(index, "minecraft:axolotl_bucket", KnownWay.FILL_BUCKET),
+            "the axolotl bucket has a fill_bucket way: " + index.knownWays(ItemKey.of("minecraft:axolotl_bucket")));
+        helper.succeed();
+    }
+
+    // A pottery sherd comes out of an archaeology table (its way names the table) and a nether star out of the
+    // wither's own code, not its loot table.
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void sherdsComeFromArchaeologyAndCodeDropsFromCode(GameTestHelper helper) {
+        AcquisitionIndex index = index(helper);
+        Optional<KnownWay> sherd = index.knownWays(ItemKey.of("minecraft:angler_pottery_sherd")).stream()
+            .filter(w -> w.way().equals(KnownWay.ARCHAEOLOGY)).findFirst();
+        helper.assertTrue(sherd.isPresent(), "the angler pottery sherd has no archaeology way: "
+            + index.knownWays(ItemKey.of("minecraft:angler_pottery_sherd")));
+        helper.assertTrue(sherd.map(w -> w.id().startsWith("archaeology:")).orElse(false),
+            "the sherd's archaeology way is not keyed by its table: " + sherd);
+        helper.assertTrue(hasAnyWay(index, "minecraft:nether_star", KnownWay.GAME_CODE),
+            "the nether star has no game_code way");
+        helper.succeed();
+    }
+
+    // What the lint's unobtainable list means: that a player cannot have the item at all. An item a player has a way
+    // for that no Source records goes to the no-strategy list instead, a spawn egg stays unobtainable, and an item
+    // with both a source and a way (leather: cows drop it and piglins barter it) counts with the source.
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void theLintSeparatesNoStrategyFromUnobtainable(GameTestHelper helper) {
+        AcquisitionIndex index = index(helper);
+        LintReport report = LintReport.of(index, "minecraft");
+        for (String id : List.of("minecraft:lava_bucket", "minecraft:axolotl_bucket", "minecraft:powder_snow_bucket",
+            "minecraft:angler_pottery_sherd", "minecraft:nether_star")) {
+            ItemKey item = ItemKey.of(id);
+            helper.assertTrue(report.noStrategy().contains(item), id + " is not in the no-strategy list");
+            helper.assertTrue(!report.unobtainable().contains(item), id + " is listed unobtainable");
+        }
+        ItemKey egg = ItemKey.of("minecraft:zombie_spawn_egg");
+        helper.assertTrue(report.unobtainable().contains(egg), "the zombie spawn egg is not unobtainable");
+        helper.assertTrue(!report.noStrategy().contains(egg), "the zombie spawn egg is in the no-strategy list");
+        // The water bucket holds no mob and no recipe output names it; whichever way the index has it (a source, a
+        // way, or both), a player scoops water into one, so it cannot be unobtainable.
+        helper.assertTrue(!report.unobtainable().contains(ItemKey.of("minecraft:water_bucket")),
+            "the water bucket is unobtainable");
+        ItemKey leather = ItemKey.of("minecraft:leather");
+        helper.assertTrue(!index.sources(leather).isEmpty(), "leather has no source: " + index.sources(leather));
+        helper.assertTrue(hasAnyWay(index, "minecraft:leather", KnownWay.BARTER), "leather has no barter way: "
+            + index.knownWays(leather));
+        helper.assertTrue(!report.noStrategy().contains(leather), "leather is in the no-strategy list");
+        helper.assertTrue(!report.unobtainable().contains(leather), "leather is unobtainable");
+        helper.succeed();
+    }
+
+    private static boolean hasAnyWay(AcquisitionIndex index, String item, String way) {
+        return index.knownWays(ItemKey.of(item)).stream().anyMatch(w -> w.way().equals(way));
+    }
+
+    private static boolean hasWay(AcquisitionIndex index, String item, String way, String from) {
+        return index.knownWays(ItemKey.of(item)).stream().anyMatch(w -> w.way().equals(way) && w.from().equals(from));
     }
 }
