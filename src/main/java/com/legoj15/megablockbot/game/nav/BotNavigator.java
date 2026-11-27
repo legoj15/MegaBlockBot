@@ -65,6 +65,9 @@ import net.minecraft.world.phys.Vec3;
 public final class BotNavigator {
     public enum State { IDLE, WORKING, DONE, FAILED }
 
+    /** What a working command waits for, when it waits for anything: the body's air, or a second look at the world. */
+    public enum Wait { NONE, FOR_AIR, TO_LOOK_AGAIN }
+
     /**
      * Why a command failed, for callers that must route on it (a task maps these to typed failures; the text from
      * {@link #failure()} is for logs only and may change).
@@ -96,12 +99,15 @@ public final class BotNavigator {
     public static final int TARGET_STALL_TICKS = 400;
     /**
      * Ticks a mine command waits for the body's air to fill again when the only blocks it knows are ones it would take
-     * standing in or under water. A body out of the water has it back in under a second; one that is not out of it will
-     * not get it back by waiting.
+     * standing in or under water. Filling from empty takes about 75 ticks once the eyes are out of the water, and a
+     * body still in it loses air all the while, so the wait is counted only from the tick the eyes are out (see
+     * {@link #waitForAir}); this leaves room for the air to be coming back from a fall as well.
      */
     static final int AIR_WAIT_TICKS = 200;
     /** Ticks between a scan that found nothing and the second look (see {@link #lookAgain}). */
     static final int LOOK_AGAIN_TICKS = 10;
+    /** How far up and around from the body the navigator looks for a place to get its head out of the water. */
+    private static final int SURFACE_RADIUS = 4;
     /** Getting this much closer to a block, in blocks, counts as progress; less is the body swaying about. */
     private static final double CLOSER_BY = 1.0;
     /** Path cost per point of fall damage: about one second of walking per half heart, so a long fall is a last resort. */
@@ -144,8 +150,12 @@ public final class BotNavigator {
     private int lookAgainTicks;
     /** Set by the target policy: blocks that are known but only taken under water are held back until the air is full. */
     private volatile boolean airWithheld;
+    /** The blocks the policy is holding back for air: what a give-up on them sets aside. */
+    private volatile List<BlockPos> withheldForAir = List.of();
     /** Set by the target policy once it lets a block under water through, so that the air falling on the way does not stop it. */
     private volatile boolean wetCommitted;
+    /** What the running command waits for, when the engine's own process has ended and the navigator bridges the gap. */
+    private Wait waiting = Wait.NONE;
     private final IMineTargetPolicy targetPolicy = this::selectTargets;
     private double bestHeuristic;
     private int sinceProgress;
@@ -224,7 +234,8 @@ public final class BotNavigator {
      * {@code stallTicks} ticks is added to {@code setAside}, and so is one the engine found no path to; the engine
      * goes on to the next block it knows. When every block it knows is set aside the command fails
      * ({@link FailKind#NOTHING_TO_MINE}), as it does when it knows none. Blocks the body would have to stand in or
-     * under water to break are taken only when no other is known, and not while the body's air is below full.
+     * under water to break are taken only when no other is known, and not while the body's air is below full; the wait
+     * for that air is made out of the water (see {@link #waitForAir}), and the blocks are set aside when it cannot be.
      *
      * @param setAside blocks to leave alone, filled by the navigator and the caller; must be safe to read from the
      *                 engine's search threads (a concurrent set)
@@ -244,6 +255,7 @@ public final class BotNavigator {
         looksAgain = 0;
         lookAgainTicks = 0;
         airWithheld = false;
+        withheldForAir = List.of();
         wetCommitted = false;
         e.setMineTargetPolicy(targetPolicy);
         // The engine gets no count of its own (0 means mine until stopped): it would count a sample of the blocks'
@@ -251,10 +263,21 @@ public final class BotNavigator {
         e.getMineProcess().mine(0, blocks.toArray(Block[]::new));
     }
 
-    /** The blocks the running mine command knows of and may head for, nearest first; empty when none runs. */
+    /**
+     * The blocks the running mine command knows of and may head for, nearest first; empty when none runs. Plain
+     * positions, so that a caller can keep them in its own set and find them again (see {@link #plain}).
+     */
     public List<BlockPos> knownTargets() {
         if (kind != Kind.MINE || state != State.WORKING || engine == null) return List.of();
-        return engine.getMineProcess().knownLocations();
+        List<BlockPos> known = engine.getMineProcess().knownLocations();
+        List<BlockPos> out = new ArrayList<>(known.size());
+        for (BlockPos at : known) out.add(plain(at));
+        return out;
+    }
+
+    /** What the working command waits for before it asks the engine again; {@link Wait#NONE} while the engine works. */
+    public Wait waitState() {
+        return state == State.WORKING ? waiting : Wait.NONE;
     }
 
     /** The block a running mine command is heading for, or null when it has none in mind yet. */
@@ -491,6 +514,7 @@ public final class BotNavigator {
         kind = newKind;
         goal = null;
         focus = null;
+        waiting = Wait.NONE;
         failure = null;
         failKind = null;
         state = State.WORKING;
@@ -613,14 +637,24 @@ public final class BotNavigator {
             return;
         }
         if (!process.isActive()) {
-            if (airWithheld && waitForAir(process)) return;
-            if (lookAgain(process)) return;
+            // The engine's process is ended (or waiting on the navigator): nothing is being headed for, whatever
+            // the last block was, so the status must not keep naming it.
+            focus = null;
+            if (airWithheld && waitForAir(process)) {
+                waiting = Wait.FOR_AIR;
+                return;
+            }
+            if (lookAgain(process)) {
+                waiting = Wait.TO_LOOK_AGAIN;
+                return;
+            }
             keepWhatTheEngineGaveUpOn(process);
             int aside = setAside.size();
             fail(FailKind.NOTHING_TO_MINE, reason("nothing to mine in range")
                 + (aside == 0 ? "" : " (" + aside + " block" + (aside == 1 ? "" : "s") + " set aside)"));
             return;
         }
+        waiting = Wait.NONE;
         watchTargets(process);
     }
 
@@ -677,8 +711,11 @@ public final class BotNavigator {
     }
 
     /**
-     * A block position as the plain {@code BlockPos} the set holds: the engine has its own subclass, which hashes
-     * differently and would never be found again.
+     * A block position as the plain {@code BlockPos} its takers assume: the engine's own subclass computes its
+     * {@code hashCode} its own way, so a position that crosses this unconverted sits unrecognized in a set of plain
+     * positions (the set-aside blocks) however equal it looks. Every position on its way from the engine into such a
+     * set crosses this -- including the copies {@link #knownTargets()} hands out, which is what lets a caller add them
+     * straight in.
      */
     private static BlockPos plain(BlockPos pos) {
         return pos.getClass() == BlockPos.class ? pos : new BlockPos(pos.getX(), pos.getY(), pos.getZ());
@@ -728,16 +765,77 @@ public final class BotNavigator {
 
     /**
      * The engine ended its command because every block it knows is one the policy holds back for want of air. The body
-     * waits for its air and then starts the engine's mine process afresh, for up to {@link #AIR_WAIT_TICKS} ticks.
-     * True while it waits.
+     * waits for its air and then starts the engine's mine process afresh, for up to {@link #AIR_WAIT_TICKS} ticks --
+     * but out of the water: a body whose eyes are in it loses air all the while and can drown while it "waits for
+     * air", so the head is got out first, with a short {@code goTo} to the nearest place it can breathe at (the surface
+     * of the water column it is in is the usual answer), and the wait is counted only from the tick the eyes are out.
+     * The {@code goTo} ends this command; the task that gave it starts the mine again once the body is where it can
+     * breathe, and the wait picks up from there. Nowhere in range to get the head out, or air that does not come back
+     * in the bound, and the wet targets are given up for this command. True while it waits.
      */
     private boolean waitForAir(MineProcess process) {
-        if (++airWaitTicks > AIR_WAIT_TICKS) return false;
+        if (body.isEyeInFluid(FluidTags.WATER)) {
+            BlockPos out = placeToBreathe();
+            if (out == null) {
+                giveUpWetTargets("nowhere within " + SURFACE_RADIUS + " blocks to get the head out of the water");
+                return false;
+            }
+            goTo(out, 0);
+            return true;
+        }
+        if (++airWaitTicks > AIR_WAIT_TICKS) {
+            giveUpWetTargets("the air did not come back within " + AIR_WAIT_TICKS + " ticks of getting out of the water");
+            return false;
+        }
         if (body.getAirSupply() >= body.getMaxAirSupply()) {
             airWithheld = false;
             process.mine(0, mineBlocks.toArray(Block[]::new));
         }
         return true;
+    }
+
+    /**
+     * The nearest place within {@link #SURFACE_RADIUS} blocks whose eye cell is air and that the body can stand or
+     * float at, scanning upward and around from where it stands: straight up the water column it is in first (a body
+     * floats with its feet in the top of the water and its eyes above it), then the rings around, where the ground
+     * beside the water is. Null when there is no such place in range.
+     */
+    @Nullable
+    private BlockPos placeToBreathe() {
+        ServerLevel level = body.serverLevel();
+        BlockPos feet = body.blockPosition();
+        int highY = Math.min(feet.getY() + SURFACE_RADIUS, level.getMaxBuildHeight() - 2);
+        for (int y = feet.getY(); y <= highY; y++) {
+            for (int away = 0; away <= SURFACE_RADIUS; away++) {
+                for (int dx = -away; dx <= away; dx++) {
+                    for (int dz = -away; dz <= away; dz++) {
+                        if (Math.max(Math.abs(dx), Math.abs(dz)) != away) continue; // this ring only
+                        BlockPos at = new BlockPos(feet.getX() + dx, y, feet.getZ() + dz);
+                        if (!level.getBlockState(at.above()).isAir()) continue;
+                        // Floating: feet in the top of the water, eyes in the air above it.
+                        if (level.getFluidState(at).is(FluidTags.WATER)) return at;
+                        // Standing: feet in the air on something with collision to stand on.
+                        if (level.getBlockState(at).isAir()
+                            && !level.getBlockState(at.below()).getCollisionShape(level, at.below()).isEmpty()) return at;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The wet targets the policy was holding back are given up for this command: set aside like the ones the engine
+     * found no path to, so that neither this task nor a later one goes back to them under water.
+     */
+    private void giveUpWetTargets(String why) {
+        airWithheld = false;
+        for (BlockPos target : withheldForAir) {
+            if (setAside.add(plain(target))) {
+                NavRuntime.LOGGER.info("{}: gave up the block at {}; held back for want of air and {}",
+                    body.getGameProfile().getName(), target.toShortString(), why);
+            }
+        }
     }
 
     /**
@@ -766,15 +864,17 @@ public final class BotNavigator {
             return open;
         }
         airWithheld = true;
+        withheldForAir = List.copyOf(open);
         return List.of();
     }
 
     /**
-     * Water in the column the body works in to get at the block: its own cell and the two cells above and the two below it
-     * (the engine's mine goal puts the body's feet at the block or one or two below it, so these are the cells its feet and
-     * head can be in). The engine itself already refuses to break a block with liquid directly above it or at its sides
-     * (its cost is infinite, so such a block is never a target at all), so a block that gets this far is wet only from
-     * below or from two cells up.
+     * Water in the working column -- the block's own cell and the two cells above and the two below it, and no cell that
+     * merely touches it from the side: the engine's mine goal puts the body's feet at the block or one or two below it,
+     * so these are the cells its feet and head can be in, while water beside the block never touches the body at all.
+     * The engine itself already refuses to break a block with liquid directly above it or at its sides (its cost is
+     * infinite, so such a block is never a target at all), so a block that gets this far is wet only from below or from
+     * two cells up.
      */
     private static boolean wet(BlockPos pos, Function<BlockPos, BlockState> blocks) {
         for (int dy = -2; dy <= 2; dy++) {

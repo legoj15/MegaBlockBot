@@ -143,10 +143,13 @@ The engine drives the bot's `ServerPlayer` body as well as plain `LivingEntity`s
   filters and sort and before it cuts the list to 64; it is handed the engine's own world reader
   (`CalculationContext.get`), because it runs on the search pool as well as the server thread. A policy that throws is
   logged and ignored. The bot uses it to leave aside the blocks the body gave up on and to take blocks in water last.
-- `process/MineProcess.updateGoal`: with an empty known list (not in `legitMine`) it rescans at once and ends the command only
-  if that finds nothing, where upstream ended it there and then. A block the policy holds back is not in the list, so when
-  the blocks it preferred are gone (mined, set aside) the list is empty while the world is not. With the policy holding
-  every block back the rescan finds nothing, and the process ends as it does when it knows none.
+- `process/MineProcess.updateGoal`: with an empty known list (not in `legitMine`) it schedules a rescan on the search
+  pool -- one at a time, the way `onTick` schedules its own (a world scan on the server thread stalls the tick) -- and
+  asks the pathing to pause for that tick, where upstream ended the command there and then. A block the policy holds
+  back is not in the list, so when the blocks it preferred are gone (mined, set aside) the list is empty while the world
+  is not; the rescan fills the list, or -- finding nothing, or the policy holding every block back -- ends the command
+  itself as it does when it knows none. The pause keeps the process alive while the pool works; the owner's "look again"
+  covers the rest. (An earlier round of issue 27 did this rescan synchronously on the server thread.)
 - `process/MineProcess.knownLocations()` and `blacklisted()` (new): copies of the targets it knows now and of the ones it
   gave up on because no path led to them, for the owner to read. The known list is volatile and the blacklist copy-on-write:
   the search pool replaces the one and reads the other while the server thread adds to it. A process that ends keeps its

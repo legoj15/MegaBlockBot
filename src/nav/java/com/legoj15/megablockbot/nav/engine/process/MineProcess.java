@@ -69,6 +69,9 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
    // MegaBlockBot: volatile, because the search pool replaces the list while the owner reads it (knownLocations).
    private volatile List<BlockPos> knownOreLocations;
    private volatile List<BlockPos> blacklist;
+   // MegaBlockBot: set while updateGoal's empty-list rescan is out on the search pool, so the next empty tick waits
+   // for it instead of scheduling another.
+   private volatile boolean emptyListRescanPending;
    private Map<BlockPos, Long> anticipatedDrops;
    private BlockPos branchPoint;
    private GoalRunAway branchPointRunaway;
@@ -211,13 +214,22 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
       List<BlockPos> locs = this.knownOreLocations;
       if (locs.isEmpty() && !legit) {
          // MegaBlockBot: a block the owner's target policy holds back is not in this list, so when the blocks it preferred
-         // are gone the list is empty while the world is not. Look again now. Upstream ended the command here, which for
-         // a policy would have meant the blocks it held back were never tried.
-         this.rescan(new ArrayList<>(), new CalculationContext(this.baritone));
-         locs = this.knownOreLocations;
-         if (this.filter == null || locs.isEmpty()) {
-            return null;
+         // are gone the list is empty while the world is not. Look again -- on the search pool, the way every world scan
+         // this class makes is scheduled (onTick's rescan included; a scan on the server thread stalls the tick) -- and
+         // idle this tick rather than end the command: the rescan fills the list, or ends the command itself when it finds
+         // nothing, as it does when none was ever known. One at a time; a tick that still finds the list empty waits.
+         if (!this.emptyListRescanPending) {
+            this.emptyListRescanPending = true;
+            CalculationContext context = new CalculationContext(this.baritone, true);
+            NavRuntime.getExecutor().execute(() -> {
+               try {
+                  this.rescan(new ArrayList<>(), context);
+               } finally {
+                  this.emptyListRescanPending = false;
+               }
+            });
          }
+         return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
       }
 
       if (locs.isEmpty()) {

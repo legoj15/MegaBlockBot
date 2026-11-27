@@ -12,6 +12,7 @@ import com.legoj15.megablockbot.core.task.TickResult;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BodyInteractionManager;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
+import com.legoj15.megablockbot.game.nav.BreakFilter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -50,8 +51,8 @@ import net.minecraft.world.phys.Vec3;
  *       best height when the block has a height range (digging down is allowed), then outward from where the task
  *       started, in steps, mining again after each. The search is bounded by {@link Search}: past it the failure is
  *       {@code NoSource} saying how far it looked;</li>
- *   <li>fails {@code Protected} when what the navigator could not mine is blocks of the kind the break rules forbid
- *       (checked in the loaded area around the body, only when the navigator found nothing), and {@code Unreachable}
+ *   <li>fails {@code Protected} when what the navigator could not mine is blocks of the kind the break rules forbid for
+ *       this body (checked in the loaded area around the body, only when the navigator found nothing), and {@code Unreachable}
  *       for any other failure of the navigator.</li>
  * </ol>
  *
@@ -61,8 +62,11 @@ import net.minecraft.world.phys.Vec3;
  * go back to them). The task also watches itself: when neither the count held nor the best distance to a known block
  * has improved for {@link Search#noGainTicks} ticks it sets every block the navigator knows aside (a stalled round) and
  * looks elsewhere, as it does when the navigator finds nothing. After {@link Search#maxStalledRounds} stalled rounds, or
- * when the search is spent, it fails: {@code Unreachable} when it set blocks aside (there were some, and none could be
- * got at), {@code NoSource} when it never knew of any.
+ * when the search is spent, it fails {@code NoSource} either way: with blocks set aside (there were some, and none could
+ * be got at -- blocks withheld for want of air are set aside with them) the failure says how many were found and carries
+ * the leaf's source, which the executor puts in the goal's exclusions so the next plan gathers the item another way;
+ * with none ever known it says how far it looked. {@code Unreachable} stays for a place the body could not get to, the
+ * descent to {@code bestY}.
  *
  * <p>There is no clock of the task's own beyond that: a step of the search is bounded in ticks only so that it ends,
  * and the executor's budgets decide how long the whole task may take.
@@ -147,6 +151,8 @@ public final class MineTask extends BodyTask {
     private int noGainTicks;
     private int stalledRounds;
     @Nullable private BlockPos headingFor;
+    /** What the navigator is waiting for, read at the start of each tick for the status phrase. */
+    private BotNavigator.Wait navWait = BotNavigator.Wait.NONE;
     @Nullable private BlockPos lastMined;
     private int seenBroken;
     private Vec3 stepFrom = Vec3.ZERO;
@@ -296,6 +302,7 @@ public final class MineTask extends BodyTask {
         noteProgress(body);
         BotNavigator nav = nav(body);
         waiting = nav.breaking();
+        navWait = nav.waitState();
         headingFor = phase == Phase.MINING ? nav.focusTarget() : null;
         if (phase == Phase.MINING && nav.state() == BotNavigator.State.WORKING) {
             TickResult stalled = watchGain(body, nav);
@@ -418,13 +425,15 @@ public final class MineTask extends BodyTask {
 
     /**
      * Whether the body is getting anywhere: it is while the count it holds, or the best distance it has reached to a
-     * block it knows of, keeps improving. When neither has for {@link Search#noGainTicks} ticks, whatever the body is
-     * doing (one that keeps climbing out of a cave and falling back in moves all the time, so the executor's watchdog
-     * never fires), the blocks it knows of are set aside and it looks elsewhere. Null while it is getting somewhere.
+     * block it knows of, keeps improving, or while it is breaking a block (progress that neither of those shows yet --
+     * the navigator's own watch counts it too). When none of that has happened for {@link Search#noGainTicks} ticks,
+     * whatever the body is doing (one that keeps climbing out of a cave and falling back in moves all the time, so the
+     * executor's watchdog never fires), the blocks it knows of are set aside and it looks elsewhere. Null while it is
+     * getting somewhere.
      */
     @Nullable
     private TickResult watchGain(BotPlayer body, BotNavigator nav) {
-        boolean gain = false;
+        boolean gain = nav.breaking();
         int now = held(body);
         if (now > bestHeld) {
             bestHeld = now;
@@ -452,8 +461,10 @@ public final class MineTask extends BodyTask {
     }
 
     /**
-     * The search is spent. Blocks of the kind were known and none could be got at: {@code Unreachable}, saying how many
-     * and where, and what was tried. None was ever known: {@code NoSource}, saying how far it looked.
+     * The search is spent. Blocks of the kind were known and none could be got at: {@code NoSource} carrying the leaf's
+     * item and source, saying how many were found and where, and what was tried -- the executor puts the source in the
+     * goal's exclusions, so the next plan gathers the item another way instead of walking the same leaf again. None was
+     * ever known: {@code NoSource} too, saying how far it looked.
      */
     private TickResult giveUp(BotPlayer body) {
         release(body);
@@ -470,13 +481,13 @@ public final class MineTask extends BodyTask {
             where.append(at.getX()).append(' ').append(at.getY()).append(' ').append(at.getZ());
         }
         String detail = String.format(Locale.ROOT,
-            "knew of %d %s block(s) and could not get at any of them (nearest: %s); a block was set aside after %d ticks without getting closer to it"
-                + " or when the engine found no path to it; %d stalled round(s) of %d ticks; explored %d blocks in %d attempts around %s and found no other",
+            "found %d %s block(s) and could not get at any of them (nearest: %s); a block was set aside after %d ticks without getting closer to it"
+                + ", when the engine found no path to it, or when it could only be taken under water and the air would not come back;"
+                + " %d stalled round(s) of %d ticks; explored %d blocks in %d attempts around %s and found no other",
             setAside.size(), blockLabel, where, search.targetStallTicks(), stalledRounds, search.noGainTicks(), (int) exploredBlocks, attempts,
             origin.toShortString());
         MegaBlockBot.LOGGER.info("{}: gave up mining {}: {}", body.getGameProfile().getName(), blockLabel, detail);
-        return TickResult.failed(unreachable(blockLabel + " at " + named.get(0).toShortString(),
-            "set aside: the body could not get closer to " + setAside.size() + " known block(s)", detail));
+        return TickResult.failed(new Failure.NoSource(itemKey, sourceId, detail));
     }
 
     private void noteProgress(BotPlayer body) {
@@ -498,13 +509,17 @@ public final class MineTask extends BodyTask {
     // ---------------------------------------------------------------------------------------------------------
 
     /**
-     * The nearest block of the kind that the break rules forbid, when the loaded area around the body holds such blocks
-     * and none it may break; null otherwise. Asked only when the navigator found nothing to mine, because that is when "there
-     * are blocks, but not for us" is the answer to give. Loaded chunks only: a read never loads one.
+     * The nearest block of the kind that the break rules forbid for this body, when the loaded area around the body holds
+     * such blocks and none it may break; null otherwise. The per-body rules, as the navigator is armed with them
+     * ({@code BreakRules.filterFor}), not only the general ones: a block that is a player's is refused for this body
+     * alone, and that is as protected as any the general rules refuse. Asked only when the navigator found nothing to
+     * mine, because that is when "there are blocks, but not for us" is the answer to give. Loaded chunks only: a read
+     * never loads one.
      */
     @Nullable
     private BlockPos forbiddenTarget(BotPlayer body) {
         ServerLevel level = body.serverLevel();
+        BreakFilter rules = BreakRules.filterFor(body);
         Set<Block> kinds = new HashSet<>(blocks);
         BlockPos center = body.blockPosition();
         int r = PROTECTED_SCAN_RADIUS;
@@ -527,7 +542,7 @@ public final class MineTask extends BodyTask {
                             at.set(x, y, z);
                             BlockState state = chunk.getBlockState(at);
                             if (!kinds.contains(state.getBlock())) continue;
-                            if (mayBreak(level, at, state)) return null; // one may be broken: not a protection problem
+                            if (mayBreak(rules, level, at, state)) return null; // one may be broken: not a protection problem
                             double away = at.distSqr(center);
                             if (away < nearest) {
                                 nearest = away;
@@ -541,15 +556,23 @@ public final class MineTask extends BodyTask {
         return forbidden;
     }
 
-    private static boolean mayBreak(ServerLevel level, BlockPos pos, BlockState state) {
+    private static boolean mayBreak(BreakFilter rules, ServerLevel level, BlockPos pos, BlockState state) {
         try {
-            return BreakRules.filter().mayBreak(level, pos, state);
+            return rules.mayBreak(level, pos, state);
         } catch (RuntimeException e) {
             return false; // a filter that throws is a no, as everywhere else (BreakFilter)
         }
     }
 
     // ---------------------------------------------------------------------------------------------------------
+
+    /**
+     * The blocks this task will not head for again, as plain positions equal to the blocks' (what its checkpoint
+     * writes, and what it hands a restart); a copy. For tests and status.
+     */
+    public Set<BlockPos> setAside() {
+        return Set.copyOf(setAside);
+    }
 
     @Override
     public boolean waiting() {
@@ -586,14 +609,19 @@ public final class MineTask extends BodyTask {
         return out;
     }
 
-    /** What the task is doing now, for the status line: where it is heading, and how many blocks it has given up on. */
+    /** What the task is doing now, for the status line: where it is heading, what it waits for, and how many blocks it has given up on. */
     @Override
     public String progress() {
         String block = blockLabel.replace("minecraft:", "");
         String what = switch (phase) {
-            case MINING -> headingFor != null
-                ? "heading for a block at " + headingFor.getX() + " " + headingFor.getY() + " " + headingFor.getZ()
-                : "looking for " + block;
+            case MINING -> switch (navWait) {
+                // Truthful while the navigator bridges a gap the engine left: no block is being headed for just now.
+                case FOR_AIR -> "waiting for its air to come back";
+                case TO_LOOK_AGAIN -> "waiting to look again";
+                case NONE -> headingFor != null
+                    ? "heading for a block at " + headingFor.getX() + " " + headingFor.getY() + " " + headingFor.getZ()
+                    : "looking for " + block;
+            };
             case TO_LAST_MINED -> "going back to where it last mined";
             case TO_BEST_Y -> "going to y=" + targetY() + " to look for " + block;
             case EXPLORING -> "exploring for " + block;

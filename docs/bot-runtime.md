@@ -30,8 +30,12 @@ the command being carried out gets the same line unless it came from that owner 
 offline: the log and the command's feedback only. `/aiplayer status` is `BotSpeech.status`: the goal, its state, the step as
 `Step i of n: <kind> (<goal>)`, then `On it for 2m 13s: <what the task says>` (how long the body has been on the
 step: `BotRuntime` notes the game time when the executor first asks for a task for that node, a retry of it keeps
-counting; the phrase is `Task.progress()`, empty by default, for a mine task "heading for a block at x y z",
-"exploring for oak_log" and how many blocks it set aside), replans, queue; an idle bot repeats its last result.
+counting; the phrase is `Task.progress()`, empty by default, for a mine task "heading for a block at x y z", "waiting
+for its air to come back" (the wait for air is made out of the water: the navigator gets the body's head above the
+surface first, and only then counts the wait), "waiting to look again", "exploring for oak_log" and how many blocks it
+set aside; when the step ends because every block of the leaf's source it found was beyond reach, the failure is
+`NoSource` carrying that source, which the executor excludes so the next plan gathers the item another way), replans,
+queue; an idle bot repeats its last result.
 
 ## `BotRuntime` (one per body, registered with `BotBrains.setFactory` in `BotFeature.init`)
 

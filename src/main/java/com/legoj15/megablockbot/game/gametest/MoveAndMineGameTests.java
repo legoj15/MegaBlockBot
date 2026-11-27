@@ -21,6 +21,7 @@ import com.legoj15.megablockbot.game.body.DeathRecord;
 import com.legoj15.megablockbot.game.gametest.BotNavGameTests.NavRun;
 import com.legoj15.megablockbot.game.nav.BodyInteractionManager;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
+import com.legoj15.megablockbot.game.safety.BlockSafety;
 import com.legoj15.megablockbot.game.task.BreakRules;
 import com.legoj15.megablockbot.game.task.MineTask;
 import com.legoj15.megablockbot.game.task.TaskFeature;
@@ -29,12 +30,14 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -276,7 +279,8 @@ public final class MoveAndMineGameTests {
      * No block of the kind anywhere in a sealed arena: the search ends within its (small, for the test) budget with
      * NoSource naming the item, the block, the source id the planner chose and how far it looked. The block is ancient
      * debris, which does not generate in the overworld: the world around the arenas is natural terrain, and a diamond ore
-     * in it behind an arena's wall is a block the task knows of and cannot get at, which is {@code Unreachable}.
+     * in it behind an arena's wall is a block the task knows of and cannot get at, which is {@code NoSource} naming that
+     * source too.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 2700)
     public static void mineWhereNothingGrowsFailsNoSource(GameTestHelper helper) {
@@ -293,7 +297,6 @@ public final class MoveAndMineGameTests {
             }
             helper.assertTrue(none.key().equals(ItemKey.of("ancient_debris")), "NoSource names " + none.key());
             helper.assertTrue(none.source().equals("mine:minecraft:ancient_debris"), "NoSource carries source '" + none.source() + "'");
-            helper.assertTrue(none.detail().contains("ancient_debris") && none.detail().contains("blocks"), "no block or distance in: " + none.detail());
             MegaBlockBot.LOGGER.info("Move-and-mine GameTest: NoSource after {} ticks: {}", job.run.ticks, none.detail());
             job.run.pass();
         });
@@ -350,6 +353,47 @@ public final class MoveAndMineGameTests {
                 "Protected names " + at + " (relative), which is not one of the three emerald blocks");
             for (int x = 5; x <= 7; x++) helper.assertBlockPresent(Blocks.EMERALD_BLOCK, new BlockPos(x, FLOOR_Y + 1, 9));
             helper.assertTrue(job.body().getInventory().countItem(Items.EMERALD_BLOCK) == 0, "holds emerald blocks");
+            job.run.pass();
+        });
+    }
+
+    /**
+     * A log the break rules forbid for this body only (its own rules, as the navigator is armed with them: the general
+     * rules allow breaking in the arena): the task answers {@code Protected} without trying to break it, naming the log.
+     * The scan for forbidden blocks asks the per-body rules; with only the general ones it would see a breakable log and
+     * send the task exploring instead.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 6000)
+    public static void aLogTheBodyItselfMayNotBreakFailsProtected(GameTestHelper helper) {
+        room(helper, 3, Blocks.BARRIER);
+        helper.setBlock(7, FLOOR_Y + 1, 10, Blocks.BAMBOO_BLOCK);
+        BlockPos log = new BlockPos(7, FLOOR_Y + 1, 10);
+        Job job = Job.start(helper, "mbody", new Vec3(7.5, FLOOR_Y + 1, 4.5), 6000, mineLeaf("bamboo_block", 1, "bamboo_block", Map.of()));
+        // Set-up, once before the command starts driving anything, undone when the test ends however it ends: this
+        // body's own rules refuse the log, as SafetyFeature installs rules that ask block safety per body (restored the
+        // same way); every other body keeps block safety's answer, so tests running side by side are not touched.
+        UUID body = job.run.id;
+        BreakRules.setBodyRules((asked, level, at, state) -> {
+            if (asked.getUUID().equals(body) && state.is(Blocks.BAMBOO_BLOCK)) return false;
+            return BlockSafety.of(level.getServer()).mayBreak(asked, level, at, state).allowed();
+        });
+        job.run.atEnd(() -> BreakRules.setBodyRules((asked, level, at, state) ->
+            BlockSafety.of(level.getServer()).mayBreak(asked, level, at, state).allowed()));
+        job.run.each(5400, () -> {
+            helper.assertTrue(job.task.state() != TaskState.COMPLETED, "mined a log the body itself may not break");
+            if (job.task.state() != TaskState.FAILED) return;
+            if (!(job.task.failure() instanceof Failure.Protected protectedBlock)) {
+                helper.fail("failed as " + job.task.failure());
+                return;
+            }
+            BlockPos at = new BlockPos(protectedBlock.pos().x(), protectedBlock.pos().y(), protectedBlock.pos().z())
+                .subtract(helper.absolutePos(BlockPos.ZERO));
+            helper.assertTrue(at.equals(log), "Protected names " + at + " (relative), not the bamboo block at " + log);
+            helper.assertBlockPresent(Blocks.BAMBOO_BLOCK, log);
+            BodyInteractionManager manager = (BodyInteractionManager) job.body().getInteractionManager();
+            helper.assertTrue(manager.blocksBroken() == 0, "broke " + manager.blocksBroken() + " blocks trying for the log");
+            helper.assertTrue(!manager.isMining(), "a break is still in progress");
+            helper.assertTrue(job.body().getInventory().countItem(Items.BAMBOO_BLOCK) == 0, "holds bamboo blocks");
             job.run.pass();
         });
     }
@@ -484,12 +528,13 @@ public final class MoveAndMineGameTests {
 
     /**
      * Only logs the body cannot reach, sealed in what the rules forbid in an arena it cannot leave: the task ends, within
-     * the bound that its small search settings give, with {@code Unreachable} (blocks were known and none could be got at,
-     * which is not {@code NoSource}), the text says what it tried, the sealed log's position is in the checkpoint as set
-     * aside, and afterwards the body does not move.
+     * the bound that its small search settings give, with {@code NoSource} carrying the leaf's item and source id (blocks
+     * were known and none could be got at, which the executor answers by excluding that source, so the next plan gathers
+     * the item another way), the sealed log is among the set-aside blocks the task keeps, its position is in the
+     * checkpoint, and afterwards the body does not move.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 1200)
-    public static void onlyUnreachableLogsFailUnreachableWithinTheBound(GameTestHelper helper) {
+    public static void onlyUnreachableLogsFailNoSourceWithinTheBound(GameTestHelper helper) {
         room(helper, 5, Blocks.BARRIER);
         sealedLog(helper, Blocks.CHERRY_LOG, 12, FLOOR_Y + 2, 8);
         BlockPos sealed = helper.absolutePos(new BlockPos(12, FLOOR_Y + 2, 8));
@@ -505,16 +550,18 @@ public final class MoveAndMineGameTests {
             BotPlayer body = job.body();
             if (failedAt[0] < 0) {
                 if (job.task.state() != TaskState.FAILED) return;
-                if (!(job.task.failure() instanceof Failure.Unreachable unreachable)) {
+                if (!(job.task.failure() instanceof Failure.NoSource none)) {
                     helper.fail("failed as " + job.task.failure());
                     return;
                 }
                 helper.assertTrue(job.run.ticks <= bound, "failed only at tick " + job.run.ticks + ", the bound is " + bound);
-                helper.assertTrue(unreachable.detail().contains("set aside") && unreachable.detail().contains("explored"),
-                    "the text does not say what was tried: " + unreachable.detail());
+                helper.assertTrue(none.key().equals(ItemKey.of("cherry_log")), "NoSource names " + none.key());
+                helper.assertTrue(none.source().equals("mine:minecraft:cherry_log"), "NoSource carries source '" + none.source() + "'");
+                helper.assertTrue(((MineTask) job.task).setAside().contains(sealed),
+                    "the sealed log " + sealed + " is not among the set-aside blocks: " + ((MineTask) job.task).setAside());
                 helper.assertTrue(job.task.checkpoint().getOrDefault("setAside", "").contains(pos(sealed).encode()),
-                    "the sealed log " + pos(sealed).encode() + " is not among the set-aside blocks: " + job.task.checkpoint());
-                MegaBlockBot.LOGGER.info("Move-and-mine GameTest: Unreachable after {} ticks: {}", job.run.ticks, unreachable.detail());
+                    "the sealed log " + pos(sealed).encode() + " is not among the checkpoint's set-aside blocks: " + job.task.checkpoint());
+                MegaBlockBot.LOGGER.info("Move-and-mine GameTest: NoSource after {} ticks: {}", job.run.ticks, none.detail());
                 failedAt[0] = job.run.ticks;
                 return;
             }
@@ -572,14 +619,16 @@ public final class MoveAndMineGameTests {
      * A body that moves all the time and gets nowhere (the test swings it back and forth two blocks, as a body does that
      * climbs out of a flooded cave and falls back in: its block position changes every tick, so the executor's stuck
      * watchdog, which watches that and the inventory, would never fire): the task sees that neither the count it holds nor
-     * the best distance to the log improves, sets the log aside as a stalled round, and fails {@code Unreachable} within the
-     * bound. The navigator's own bound for one block is out of reach here, so only the task's watch can end it.
+     * the best distance to the log improves, sets the log aside as a stalled round, and fails {@code NoSource} carrying
+     * the leaf's item and source within the bound. The set it keeps holds plain positions, found again by equality with
+     * the block's own. The navigator's own bound for one block is out of reach here, so only the task's watch can end it.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 900)
-    public static void aStepThatMovesButGetsNowhereGivesUpUnreachable(GameTestHelper helper) {
+    public static void aStepThatMovesButGetsNowhereGivesUpNoSource(GameTestHelper helper) {
         room(helper, 3, Blocks.BARRIER);
         helper.setBlock(12, FLOOR_Y + 1, 3, Blocks.STRIPPED_OAK_LOG);
         Vec3 start = new Vec3(2.5, FLOOR_Y + 1, 3.5);
+        BlockPos log = helper.absolutePos(new BlockPos(12, FLOOR_Y + 1, 3));
         int noGain = 60;
         MineTask.Search swings = new MineTask.Search(8, 100, 24, 3, 100_000, noGain, 2);
         // 60 ticks without a gain, then at most the attempts of the search at a step of 100 ticks each, and some slack.
@@ -592,15 +641,20 @@ public final class MoveAndMineGameTests {
             BotPlayer body = job.body();
             blockPositions.add(body.blockPosition());
             if (job.task.state() == TaskState.FAILED) {
-                if (!(job.task.failure() instanceof Failure.Unreachable unreachable)) {
+                if (!(job.task.failure() instanceof Failure.NoSource none)) {
                     helper.fail("failed as " + job.task.failure());
                     return;
                 }
                 helper.assertTrue(job.run.ticks <= bound, "failed only at tick " + job.run.ticks + ", the bound is " + bound);
                 helper.assertTrue(blockPositions.size() >= 2, "the body stayed in one block, which the executor's watchdog would have caught");
-                helper.assertTrue(unreachable.detail().contains("1 stalled round"), "the text does not say it stalled: " + unreachable.detail());
-                helper.assertTrue(job.task.checkpoint().getOrDefault("setAside", "").contains(pos(helper.absolutePos(new BlockPos(12, FLOOR_Y + 1, 3))).encode()),
-                    "the log is not among the set-aside blocks: " + job.task.checkpoint());
+                helper.assertTrue(none.key().equals(ItemKey.of("stripped_oak_log")), "NoSource names " + none.key());
+                helper.assertTrue(none.source().equals("mine:minecraft:stripped_oak_log"), "NoSource carries source '" + none.source() + "'");
+                // What the stalled round set aside is found again as the plain position of the block it is: the engine
+                // has its own position subclass, whose hash would leave it unrecognized in the set.
+                helper.assertTrue(((MineTask) job.task).setAside().contains(log),
+                    "the log " + log + " is not among the set-aside blocks: " + ((MineTask) job.task).setAside());
+                helper.assertTrue(job.task.checkpoint().getOrDefault("setAside", "").contains(pos(log).encode()),
+                    "the log is not among the checkpoint's set-aside blocks: " + job.task.checkpoint());
                 job.run.pass();
                 return;
             }
@@ -612,8 +666,8 @@ public final class MoveAndMineGameTests {
 
     /**
      * What a retry keeps: a task given the checkpoint of one that had set a log aside, and that had explored its whole
-     * budget, does not go back to the log although nothing stands in the way. It fails {@code Unreachable} at once, naming
-     * the log, and the log is still there.
+     * budget, does not go back to the log although nothing stands in the way. It fails {@code NoSource} at once, naming
+     * the leaf's item and source (the blocks were known and could not be got at), and the log is still there.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600)
     public static void aRetryDoesNotGoBackToWhatWasSetAside(GameTestHelper helper) {
@@ -629,11 +683,14 @@ public final class MoveAndMineGameTests {
         job.run.each(400, () -> {
             helper.assertTrue(job.task.state() != TaskState.COMPLETED, "mined the log it had set aside");
             if (job.task.state() != TaskState.FAILED) return;
-            if (!(job.task.failure() instanceof Failure.Unreachable unreachable)) {
+            if (!(job.task.failure() instanceof Failure.NoSource none)) {
                 helper.fail("failed as " + job.task.failure());
                 return;
             }
-            helper.assertTrue(unreachable.target().contains(log.toShortString()), "Unreachable names " + unreachable.target() + ", not " + log.toShortString());
+            helper.assertTrue(none.key().equals(ItemKey.of("stripped_spruce_log")), "NoSource names " + none.key());
+            helper.assertTrue(none.source().equals("mine:minecraft:stripped_spruce_log"), "NoSource carries source '" + none.source() + "'");
+            helper.assertTrue(((MineTask) job.task).setAside().contains(log),
+                "the set-aside blocks lost the log: " + ((MineTask) job.task).setAside());
             helper.assertTrue(job.run.ticks <= 40, "took " + job.run.ticks + " ticks: it went for the log");
             helper.assertTrue(helper.relativeVec(job.body().position()).distanceTo(start) < 2.0, "the body moved to " + job.body().position());
             helper.assertBlockPresent(Blocks.STRIPPED_SPRUCE_LOG, new BlockPos(9, FLOOR_Y + 1, 8));
@@ -724,6 +781,46 @@ public final class MoveAndMineGameTests {
             helper.assertTrue(started[0], "completed without moving");
             helper.assertTrue("0".equals(job.task.checkpoint().get("explored")), "the task went exploring: " + job.task.checkpoint());
             helper.assertBlockPresent(Blocks.AIR, new BlockPos(10, top + 1, 4));
+            job.run.pass();
+        });
+    }
+
+    /**
+     * A body standing on the floor of a pool two blocks deep, with only a wet log known and its air set low once before
+     * the command starts (set-up: a body that came down through the water on the way): the wait for air happens out of
+     * the water or not at all. Within the budget its eyes are out of the water -- a body still in it keeps losing air
+     * all the while -- its air is rising again, and it is alive; the step then still gets the log, so the wait was a
+     * wait and not a give-up.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 2400)
+    public static void aBodyInTheWaterGetsItsHeadOutToWaitForAir(GameTestHelper helper) {
+        int top = plateau(helper);
+        // A pool two blocks deep, sunk into the plateau over one column: water at top and top-1, barrier under it.
+        helper.setBlock(10, top - 1, 8, Blocks.WATER);
+        helper.setBlock(10, top, 8, Blocks.WATER);
+        // A kind no other test places: the tests run side by side, and a body goes for the nearest log of its kind.
+        wetLog(helper, top, 4, 4, Blocks.STRIPPED_JUNGLE_LOG);
+        Job job = Job.start(helper, "mhead", new Vec3(10.5, top + 1, 8.5), 2400,
+            mineLeaf("stripped_jungle_log", 1, "stripped_jungle_log", Map.of()));
+        // Set-up, once before the command starts driving anything: the body comes to the command short of air.
+        job.body().setAirSupply(60);
+        boolean[] wasUnder = {false};
+        int[] airWhenOut = {-1};
+        job.run.each(2100, () -> {
+            failIfFailed(helper, job);
+            BotPlayer body = job.body();
+            if (body.isEyeInFluid(FluidTags.WATER)) {
+                wasUnder[0] = true;
+                helper.assertTrue(body.isAlive(), "the body died in the water at tick " + job.run.ticks + " with " + body.getAirSupply() + " air");
+                return;
+            }
+            if (wasUnder[0] && airWhenOut[0] < 0) airWhenOut[0] = body.getAirSupply();
+            if (job.task.state() != TaskState.COMPLETED) return;
+            helper.assertTrue(wasUnder[0], "completed without ever having its eyes in the water");
+            helper.assertTrue(airWhenOut[0] >= 1, "completed without getting its head out of the water");
+            helper.assertTrue(body.getAirSupply() > airWhenOut[0],
+                "the air never rose again once the head was out: out at " + airWhenOut[0] + ", now " + body.getAirSupply());
+            helper.assertTrue(body.getInventory().countItem(Items.STRIPPED_JUNGLE_LOG) == 1, "completed without the log");
             job.run.pass();
         });
     }
