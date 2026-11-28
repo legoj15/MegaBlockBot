@@ -139,7 +139,10 @@ container, moves an item or loads a chunk.
   read by `BlockBiomes`, see `docs/resolver.md`) with `PlannerConfig.otherBiome` (6000, twice a trade's base) when the
   body stands in none of those biomes and the block is not in its sight: the price of the journey to a biome that
   does place it, so where a trade gives the item the trade is the cheaper way (the mending book near a taiga village
-  is traded for, not mined from the mountain ore). A block the body can see is here whatever the map says, and cost
+  is traded for, not mined from the mountain ore). A kill pays the same when no biome that spawns the mob
+  (`KillMob.biomes`) is the body's; nothing in a snapshot says a mob is in sight, so the biome alone decides. And a
+  trade a villager shows only at level 2 or above is not usable through a job site (a villager given one is a
+  novice) until some villager has been seen offering the item. A block the body can see is here whatever the map says, and cost
   only reorders: where the mine is the only source it is still the plan. A snapshot with no biome prices everything
   as it always did.
 - `nearbyBlocks` (the sight, `BodySight`): block id to the horizontal distance of the nearest such block, for the blocks

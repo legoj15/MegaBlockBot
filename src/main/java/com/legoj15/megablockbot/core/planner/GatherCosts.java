@@ -37,7 +37,8 @@ import java.util.function.ToLongFunction;
  * <p>What the body can see (the snapshot's sight, design 4.1): once the snapshot holds any sight, a mining or
  * harvesting source whose block is in it costs {@link PlannerConfig#sightCharge} on top, growing with the block's
  * horizontal distance, and one whose block is not costs {@link PlannerConfig#unseenPenalty()} on top, which is more
- * than any seen block's charge. A use-on source's fluid or block target is charged the same way. Every source whose
+ * than any seen block's charge. A use-on source's fluid or block target is charged the same way.
+ * A kill whose mob no biome near spawns pays the journey a block no biome near places does. Every source whose
  * block is out of sight is charged alike, so a snapshot that holds
  * none of the choices' blocks orders them as it always did. A snapshot with no sight at all adds nothing: charging
  * only block sources would move them against kills, fishing, trades, crafts and a strategy's proposal, and today's
@@ -156,6 +157,13 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
             return "a mob that lives in water: hunting under water is not built yet";
         }
         if (source instanceof Source.Trade trade && !(trade.chance() > 0)) return "the offer never comes up";
+        // A villager given a job site is a novice and shows a novice's offers; the offers of a higher level come
+        // only after trading it up, which no task does. Unless somebody was already seen offering the item, such
+        // a trade is two hundred rolls of a villager that cannot show it (a live plan chose a shepherd's dye
+        // trade, level 2, for its emeralds). A trade with no job site (the wandering trader's) is not rolled.
+        if (source instanceof Source.Trade trade && trade.level() > 1 && trade.jobSite() != null && !offered(trade)) {
+            return "offered only by a villager traded up to level " + trade.level() + ": trading one up is not planned yet";
+        }
         // One item per trade: a trade that takes one or more of that item back leaves the stock no higher.
         if (source instanceof Source.Trade trade && trade.cost().getOrDefault(trade.item(), 0) >= 1) {
             return "the trade charges the item it sells";
@@ -249,7 +257,12 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
         if (source instanceof Source.Harvest harvest) {
             return sighted(ceilDiv(config.harvest(), source.yield()), harvest.block());
         }
-        if (source instanceof Source.KillMob kill) return ceilDiv(fightCost(kill), source.yield());
+        if (source instanceof Source.KillMob kill) {
+            // A mob no biome near spawns is a journey away like a block no biome near places (a strider for its
+            // string, from a taiga). Nothing in the snapshot says a mob is in sight, so the biome alone decides.
+            long cost = ceilDiv(fightCost(kill), source.yield());
+            return elsewhere(kill.biomes()) ? saturatingAdd(cost, config.otherBiome()) : cost;
+        }
         if (source instanceof Source.UseOn use) {
             if (!toolObtainable(use)) return UNOBTAINABLE;
             long cost = ceilDiv(config.useOn(), source.yield());
@@ -283,6 +296,14 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
         seen.sort(Comparator.comparingLong(GatherCosts::totalCharge)
             .thenComparing(offer -> offer.charge().toString()));
         return seen.get(0).charge();
+    }
+
+    /** Whether the body has seen a villager offer the trade's item: such a villager needs no making. */
+    private boolean offered(Source.Trade trade) {
+        for (NotedOffer offer : snapshot.offers()) {
+            if (offer.result().equals(trade.item())) return true;
+        }
+        return false;
     }
 
     private static long totalCharge(NotedOffer offer) {
@@ -346,8 +367,12 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
      * snapshot with no biome, or a block no biome is bound to, never pays it.
      */
     private boolean awayFromItsBiomes(Source.MineBlock mine) {
-        return !mine.biomes().isEmpty() && !snapshot.biome().isEmpty() && !mine.biomes().contains(snapshot.biome())
-            && !snapshot.nearbyBlocks().containsKey(mine.block());
+        return elsewhere(mine.biomes()) && !snapshot.nearbyBlocks().containsKey(mine.block());
+    }
+
+    /** Whether the biomes named are known, the body's own is known, and it is none of them. */
+    private boolean elsewhere(Set<String> biomes) {
+        return !biomes.isEmpty() && !snapshot.biome().isEmpty() && !biomes.contains(snapshot.biome());
     }
 
     /**

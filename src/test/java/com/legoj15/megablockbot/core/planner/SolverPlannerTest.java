@@ -1533,7 +1533,7 @@ final class SolverPlannerTest {
 
     /** The trade of a villager with a job site: a leatherworker, whose block is the lectern. */
     private static Source.Trade saddleTrade(Map<ItemKey, Integer> cost, double chance, ItemKey jobSite) {
-        return new Source.Trade("trade:minecraft:leatherworker#saddle", SADDLE, "minecraft:leatherworker", 2, cost,
+        return new Source.Trade("trade:minecraft:leatherworker#saddle", SADDLE, "minecraft:leatherworker", 1, cost,
                 Map.of(), chance, jobSite);
     }
 
@@ -1551,7 +1551,7 @@ final class SolverPlannerTest {
         assertEquals("trade", trade.taskKind());
         assertEquals("trade:minecraft:leatherworker#saddle", trade.source());
         assertEquals("2", trade.params().get("count"), "two trades for two saddles");
-        assertEquals("2", trade.params().get("level"));
+        assertEquals("1", trade.params().get("level"));
         assertEquals("minecraft:emerald=6", trade.params().get("cost"));
         assertEquals(0.5, Double.parseDouble(trade.params().get("chance")));
         // Two trades at six emeralds each: twelve are gathered before the trade runs.
@@ -3157,6 +3157,56 @@ final class SolverPlannerTest {
         Plan plan = planned(planner, request(new Goal.HaveItem(EMERALD, 1), standingIn(TAIGA, Map.of()), Exclusions.NONE));
         assertTrue(sources(plan).contains("mine:minecraft:emerald_ore"), sources(plan).toString());
         assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), EMERALD, 1);
+    }
+
+    @Test
+    void aMobNoBiomeNearSpawnsIsNotTheCheapFightItLooksLike() {
+        // A thread dropped by a strider (no blow: the cheapest fight) and by a cave spider (a blow of 2). A strider's
+        // biomes are the nether's, so from a taiga the spider is the way; where the biome is not known the plan is as
+        // it was. (The item is this test's own: the fixture's string has sources of its own.)
+        ItemKey thread = ItemKey.of("thread");
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(thread);
+        builder.addSource(new Source.KillMob("kill:minecraft:strider", thread, "minecraft:strider", false, 1.0, false,
+                20.0, 0.0, true, false, Set.of("minecraft:nether_wastes")));
+        builder.addSource(new Source.KillMob("kill:minecraft:cave_spider", thread, "minecraft:cave_spider", false, 1.0,
+                false, 16.0, 2.0, true, false, Set.of(TAIGA, MEADOW)));
+        SolverPlanner planner = planner(book(), builder.build());
+        Goal.HaveItem wanted = new Goal.HaveItem(thread, 1);
+
+        assertEquals(List.of("kill:minecraft:cave_spider"),
+                sources(planned(planner, request(wanted, standingIn(TAIGA, Map.of()), Exclusions.NONE))));
+        assertEquals(List.of("kill:minecraft:strider"), sources(planned(planner, request(wanted, EMPTY, Exclusions.NONE))),
+                "with no biome known the cheaper fight is the plan, as it was");
+    }
+
+    @Test
+    void aTradeOfferedOnlyAtAHigherLevelIsNotPlannedThroughAVillagerThatHasToBeMade() {
+        // Emeralds for one log at a shepherd of level 2 or for eight at a fletcher of level 1. A villager given a job
+        // site is a novice, so the level-2 offer cannot be rolled for; once somebody was seen offering emeralds
+        // there is a villager to go to and the level no longer matters.
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(EMERALD);
+        builder.addSource(new Source.Trade("trade:minecraft:shepherd:2", EMERALD, "minecraft:shepherd", 2,
+                Map.of(OAK_LOG, 1), Map.of(), 1.0, OAK_PLANKS));
+        builder.addSource(new Source.Trade("trade:minecraft:fletcher:1", EMERALD, "minecraft:fletcher", 1,
+                Map.of(OAK_LOG, 8), Map.of(), 1.0, OAK_PLANKS));
+        SolverPlanner planner = planner(book(), builder.build());
+        Goal.HaveItem emerald = new Goal.HaveItem(EMERALD, 1);
+
+        Plan made = planned(planner, request(emerald, EMPTY, Exclusions.NONE));
+        assertTrue(sources(made).contains("trade:minecraft:fletcher:1"), sources(made).toString());
+        assertFalse(sources(made).contains("trade:minecraft:shepherd:2"), sources(made).toString());
+
+        // With the fletcher out of it nothing is left to plan through, until a villager is seen offering emeralds.
+        Exclusions noFletcher = without("trade:minecraft:fletcher:1");
+        assertEquals(Failure.Kind.NO_SOURCE, unplannable(planner, request(emerald, EMPTY, noFletcher)).kind());
+        Snapshot.Builder seen = Snapshot.builder().gameTime(0).dimension("minecraft:overworld").pos(new Pos(0, 64, 0));
+        seen.offer(new NotedOffer(UUID.randomUUID(), new Pos(3, 64, 3), EMERALD, StackFacts.plain(1),
+                Map.of(OAK_LOG, 1), 0L));
+        Plan known = planned(planner, request(emerald, seen.build(), noFletcher));
+        assertTrue(sources(known).contains("trade:minecraft:shepherd:2"),
+                "a villager seen offering it needs no making: " + sources(known));
     }
 
     // ─── The fingerprint and determinism (item 8) ────────────────────────────────────────────────

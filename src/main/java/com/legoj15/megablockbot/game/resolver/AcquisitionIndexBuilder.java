@@ -301,22 +301,37 @@ public final class AcquisitionIndexBuilder {
      * {@link #SPAWNED_BY_CODE}. An evoker, a vindicator, a ravager or a warden is in none of them: one stands only
      * where a mansion or a raid put it, and a live plan set out to kill twelve evokers for its emeralds. Null when
      * the lists could not be read; the spawn category alone decides then, as it did before.
+     *
+     * <p>Each comes with the biomes it spawns in: those whose list names it, and those a structure that spawns it
+     * stands in. A mob the code spawns has none, which is "anywhere" to the planner. A strider's are the nether's,
+     * and a plan made in a taiga set out to kill striders for its string: a strider has no blow, so it was the
+     * cheapest fight on the list.
      */
-    private Set<String> spawnedMobs() {
+    private Map<String, Set<String>> spawnedMobs() {
         try {
-            Set<String> spawned = new TreeSet<>(SPAWNED_BY_CODE.keySet());
+            Map<String, Set<String>> spawned = new TreeMap<>();
+            for (String byCode : SPAWNED_BY_CODE.keySet()) spawned.put(byCode, new TreeSet<>());
             RegistryAccess access = server.registryAccess();
-            for (Biome biome : access.registryOrThrow(Registries.BIOME)) {
+            for (Holder.Reference<Biome> biome : access.registryOrThrow(Registries.BIOME).holders().toList()) {
+                String biomeId = biome.key().location().toString();
                 for (MobCategory category : MobCategory.values()) {
-                    for (MobSpawnSettings.SpawnerData data : biome.getMobSettings().getMobs(category).unwrap()) {
-                        spawned.add(BuiltInRegistries.ENTITY_TYPE.getKey(data.type).toString());
+                    for (MobSpawnSettings.SpawnerData data : biome.value().getMobSettings().getMobs(category).unwrap()) {
+                        String mob = BuiltInRegistries.ENTITY_TYPE.getKey(data.type).toString();
+                        if (SPAWNED_BY_CODE.containsKey(mob)) continue;
+                        spawned.computeIfAbsent(mob, k -> new TreeSet<>()).add(biomeId);
                     }
                 }
             }
             for (Structure structure : access.registryOrThrow(Registries.STRUCTURE)) {
+                Set<String> stands = new TreeSet<>();
+                for (Holder<Biome> biome : structure.biomes()) {
+                    biome.unwrapKey().ifPresent(key -> stands.add(key.location().toString()));
+                }
                 for (StructureSpawnOverride override : structure.spawnOverrides().values()) {
                     for (MobSpawnSettings.SpawnerData data : override.spawns().unwrap()) {
-                        spawned.add(BuiltInRegistries.ENTITY_TYPE.getKey(data.type).toString());
+                        String mob = BuiltInRegistries.ENTITY_TYPE.getKey(data.type).toString();
+                        if (SPAWNED_BY_CODE.containsKey(mob)) continue;
+                        spawned.computeIfAbsent(mob, k -> new TreeSet<>()).addAll(stands);
                     }
                 }
             }
@@ -328,7 +343,7 @@ public final class AcquisitionIndexBuilder {
     }
 
     private void entities() {
-        Set<String> spawned = spawnedMobs();
+        Map<String, Set<String>> spawned = spawnedMobs();
         List<EntityType<?>> types = new ArrayList<>();
         BuiltInRegistries.ENTITY_TYPE.forEach(types::add);
         types.sort(Comparator.comparing(t -> BuiltInRegistries.ENTITY_TYPE.getKey(t).toString()));
@@ -347,12 +362,13 @@ public final class AcquisitionIndexBuilder {
             double attack = attributes.hasAttribute(Attributes.ATTACK_DAMAGE)
                 ? attributes.getBaseValue(Attributes.ATTACK_DAMAGE) : 0.0;
             MobCategory category = type.getCategory();
-            boolean spawnsNaturally = category != MobCategory.MISC && (spawned == null || spawned.contains(entityId));
+            boolean spawnsNaturally = category != MobCategory.MISC && (spawned == null || spawned.containsKey(entityId));
+            Set<String> spawnsIn = spawned == null ? Set.of() : spawned.getOrDefault(entityId, Set.of());
             boolean aquatic = category == MobCategory.WATER_CREATURE || category == MobCategory.WATER_AMBIENT
                 || category == MobCategory.UNDERGROUND_WATER_CREATURE || category == MobCategory.AXOLOTLS;
             for (Route route : eval.routes(table, EnumSet.of(Tool.PLAIN), true, LootEval.StateRule.MINED)) {
                 index.addSource(new Source.KillMob("kill:" + entityId, ItemKey.of(route.item()), entityId, route.byPlayer(),
-                    route.expected(), route.random(), health, attack, spawnsNaturally, aquatic));
+                    route.expected(), route.random(), health, attack, spawnsNaturally, aquatic, spawnsIn));
             }
         }
     }

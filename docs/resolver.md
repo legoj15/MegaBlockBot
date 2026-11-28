@@ -108,15 +108,22 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
   walked — the same overworld/nether/end split by tag as the ore ranges — and each configured feature among them is
   taken through the game's own flattening (`PlacedFeature.getFeatures`, the random selectors and patches), written
   out through `ConfiguredFeature.DIRECT_CODEC` and its block ids collected the way `NaturalBlocks` collects them,
-  cached per configured feature (sixty biomes share most of their features). A block is **bound** when, in every
-  dimension group where some biome places it, fewer than half of that group's biomes do (emerald ore: about ten of
-  the overworld's sixty; iron: all but the void); the map holds only bound blocks, each with the sorted ids of the
-  biomes that place it. A block the terrain settings or `PLACED_BY_CODE` names is never bound, and one no biome's
+  cached per configured feature (sixty biomes share most of their features). A block is **bound** unless every
+  dimension group places it in at least half of its biomes: emerald ore (about ten of the overworld's sixty) is the
+  mountains', and iron (every overworld biome but the void, none of the nether's or the end's) is the overworld's,
+  which costs a body in the overworld nothing and tells one in the nether the truth. The map holds only bound
+  blocks, each with the sorted ids of the biomes that place it. A block the terrain settings or `PLACED_BY_CODE` names is never bound, and one no biome's
   features name is not in the map at all. What it misses is what `NaturalBlocks` misses: structures, and blocks a
   feature's code places with nothing in its configuration to read. A configured feature that fails to write out or
   throws costs that feature (counted in the notes), never the section; a failed read is an empty map and a note, and
   every block then prices as one no biome is bound to. The cost model's use of it is
   `PlannerConfig.otherBiome` (see `docs/plan-inputs.md`).
+- Which mobs the world spawns, and where (`KillMob.spawnsNaturally`, `KillMob.biomes`): a mob counts as spawning on
+  its own account when a biome's spawn list names it, a structure's spawn override does (a fortress its blazes, a
+  monument its guardians), or the game's code spawns it (`SPAWNED_BY_CODE`: the phantom). An evoker, a vindicator, a
+  ravager, a warden are in none of them and are not hunted. The biomes are those whose list names the mob and those
+  the structures that spawn it stand in; a mob the code spawns has none. Found by live plans that set out to kill
+  twelve evokers for emeralds and, from a taiga, striders for string.
 - Kill sources: entity types that have attributes (a living entity), other than the player and the armor stand. Each
   carries what the fight is, from the type's default attributes: `health` (max health), `attack` (attack damage, 0
   when it has none) and `spawnsNaturally` (its spawn category is not `MISC`: a golem or a villager stands only where a

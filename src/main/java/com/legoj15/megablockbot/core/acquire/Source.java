@@ -40,8 +40,9 @@ public sealed interface Source {
      * @param ore       where the block generates as an ore, or null when no ore placed feature produces it
      * @param generated true when the world generator places the block (a feature or the terrain names it); false for
      *                  one that stands only in a structure or where someone placed it
-     * @param biomes    the biomes whose features place the block, when fewer than half the biomes of its dimension
-     *                  do; empty when it is widespread, placed by the terrain or by code, or not known
+     * @param biomes    the biomes whose features place the block; empty when every dimension's biomes mostly do,
+     *                  when the terrain or the game's code places it, or when it is not known. An ore every
+     *                  overworld biome places still names them: it is not to be had in the nether
      */
     record MineBlock(String id, ItemKey item, String block, ToolClass toolClass, ToolTier minTier, boolean toolRequired,
                      boolean needsSilkTouch, boolean needsShears, double yield, boolean random, OreRange ore,
@@ -85,9 +86,12 @@ public sealed interface Source {
      * defaults. {@code spawnsNaturally} is false for a kind the world does not spawn on its own account (an iron
      * golem, a villager): one stands only where a village or a player made it, and finding one is not planned.
      * {@code aquatic} is true for a kind that lives in water (a fish, a squid, a dolphin, an axolotl).
+     * {@code biomes} are the biomes that spawn it, by their own spawn lists and by the structures that stand in
+     * them (a strider's are the nether's, a blaze's the fortress's); empty when the game's code spawns it or it is
+     * not known.
      */
     record KillMob(String id, ItemKey item, String entity, boolean playerKillOnly, double yield, boolean random,
-                   double health, double attack, boolean spawnsNaturally, boolean aquatic)
+                   double health, double attack, boolean spawnsNaturally, boolean aquatic, Set<String> biomes)
         implements Source {
         /** The health of the mob the planner's base price of a kill is for: a cow's. */
         public static final double BASE_HEALTH = 10.0;
@@ -96,6 +100,13 @@ public sealed interface Source {
             Objects.requireNonNull(id, "id");
             Objects.requireNonNull(item, "item");
             Objects.requireNonNull(entity, "entity");
+            biomes = biomes == null ? Set.of() : java.util.Collections.unmodifiableSet(new TreeSet<>(biomes));
+        }
+
+        /** The form that does not say where the mob spawns: a fixture that is not about where it is found. */
+        public KillMob(String id, ItemKey item, String entity, boolean playerKillOnly, double yield, boolean random,
+                       double health, double attack, boolean spawnsNaturally, boolean aquatic) {
+            this(id, item, entity, playerKillOnly, yield, random, health, attack, spawnsNaturally, aquatic, Set.of());
         }
 
         /** A harmless mob of a cow's health that spawns on its own: what a fixture that is not about the fight needs. */

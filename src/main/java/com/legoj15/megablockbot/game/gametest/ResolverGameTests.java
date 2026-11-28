@@ -129,8 +129,10 @@ public final class ResolverGameTests {
         helper.assertTrue(emerald.contains("minecraft:windswept_hills"),
             "the windswept hills do not place emerald ore: " + emerald);
         helper.assertTrue(!emerald.contains("minecraft:plains"), "the plains place emerald ore: " + emerald);
+        // Iron is the overworld's: every biome of it but the void, and no biome of the nether.
         Set<String> iron = mine(helper, index, "minecraft:raw_iron", "minecraft:iron_ore", false).biomes();
-        helper.assertTrue(iron.isEmpty(), "iron ore is bound to biomes: " + iron);
+        helper.assertTrue(iron.contains("minecraft:plains") && iron.contains("minecraft:windswept_hills")
+            && !iron.contains("minecraft:nether_wastes"), "iron ore is said to be placed in " + iron);
         Set<String> stone = mine(helper, index, "minecraft:cobblestone", "minecraft:stone", false).biomes();
         helper.assertTrue(stone.isEmpty(), "stone is bound to biomes: " + stone);
         Set<String> jungleLog = mine(helper, index, "minecraft:jungle_log", "minecraft:jungle_log", false).biomes();
@@ -381,6 +383,12 @@ public final class ResolverGameTests {
         helper.assertTrue(kill(helper, index, "minecraft:blaze_rod", "minecraft:blaze").spawnsNaturally(), "a blaze is said not to spawn");
         helper.assertTrue(kill(helper, index, "minecraft:phantom_membrane", "minecraft:phantom").spawnsNaturally(), "a phantom is said not to spawn");
         helper.assertTrue(!kill(helper, index, "minecraft:emerald", "minecraft:evoker").spawnsNaturally(), "an evoker is said to spawn on its own");
+        // And where: a strider's string is the nether's, a spider's is to be had in a taiga, a blaze is the fortress's.
+        Set<String> strider = kill(helper, index, "minecraft:string", "minecraft:strider").biomes();
+        helper.assertTrue(strider.contains("minecraft:nether_wastes") && !strider.contains("minecraft:taiga"), "striders are said to spawn in " + strider);
+        helper.assertTrue(kill(helper, index, "minecraft:string", "minecraft:spider").biomes().contains("minecraft:taiga"), "spiders are said not to spawn in a taiga");
+        Set<String> blaze = kill(helper, index, "minecraft:blaze_rod", "minecraft:blaze").biomes();
+        helper.assertTrue(blaze.contains("minecraft:nether_wastes") && !blaze.contains("minecraft:plains"), "blazes are said to spawn in " + blaze);
         helper.succeed();
     }
 

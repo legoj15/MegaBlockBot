@@ -43,9 +43,10 @@ final class BlockBiomes {
     private enum Dimension { OVERWORLD, NETHER, END }
 
     /**
-     * A block is bound when, in every dimension group where some biome places it, fewer than this share of that
-     * group's biomes do. Emerald ore is placed in about ten of the overworld's sixty; iron in all but the void, so a
-     * half tells the mountain-only ore from the everywhere one.
+     * A block is bound unless every dimension group places it in at least this share of its biomes. Emerald ore is
+     * placed in about ten of the overworld's sixty and is the mountains'; iron in all but the void, and in no biome
+     * of the nether or the end, so it is the overworld's, which is all a body standing in the overworld needs to
+     * know and what one standing in the nether must be told.
      */
     private static final double BIND_SHARE = 0.5;
 
@@ -91,21 +92,22 @@ final class BlockBiomes {
             }
         }
 
-        // A block placed by half or more of one group's biomes is not bound, whatever another group does with it.
-        Set<String> widespread = new TreeSet<>();
-        for (Map.Entry<Dimension, Map<String, Set<String>>> group : placedBy.entrySet()) {
-            int groupSize = groupSizes.get(group.getKey());
-            for (Map.Entry<String, Set<String>> placing : group.getValue().entrySet()) {
-                if (placing.getValue().size() >= groupSize * BIND_SHARE) widespread.add(placing.getKey());
-            }
-        }
+        // Every block some biome places, with all the biomes that do.
         Map<String, Set<String>> out = new TreeMap<>();
         for (Map<String, Set<String>> group : placedBy.values()) {
             for (Map.Entry<String, Set<String>> placing : group.entrySet()) {
-                if (widespread.contains(placing.getKey()) || neverBound.contains(placing.getKey())) continue;
+                if (neverBound.contains(placing.getKey())) continue;
                 out.computeIfAbsent(placing.getKey(), k -> new TreeSet<>()).addAll(placing.getValue());
             }
         }
+        // A block that most biomes of every dimension place is to be had wherever a body stands: not bound.
+        out.keySet().removeIf(block -> {
+            for (Map.Entry<Dimension, Integer> group : groupSizes.entrySet()) {
+                Set<String> placing = placedBy.getOrDefault(group.getKey(), Map.of()).get(block);
+                if (placing == null || placing.size() < group.getValue() * BIND_SHARE) return false;
+            }
+            return true;
+        });
         return out;
     }
 
