@@ -151,7 +151,7 @@ public final class BotSpeech {
         } else {
             text.append("Goal: ").append(goal(view.goal(), names)).append(" (")
                 .append(view.status().name().toLowerCase(Locale.ROOT)).append(").");
-            text.append(' ').append(step(view));
+            text.append(' ').append(step(view, names));
             text.append(onTheStep(stepTicks, progress));
             if (view.reflexHeld()) text.append(" A reflex holds the body.");
             if (view.totalReplans() > 0) text.append(" Replans: ").append(view.totalReplans()).append('.');
@@ -197,7 +197,7 @@ public final class BotSpeech {
     }
 
     /** The step the bot is on, as its place among the plan's leaves: {@code Step 3 of 5: craft (get 4 stick).} */
-    private static String step(ExecutorView view) {
+    private static String step(ExecutorView view, java.util.function.Function<String, String> names) {
         List<ExecutorView.NodeView> leaves = new ArrayList<>();
         for (ExecutorView.NodeView node : view.nodes()) {
             if (node.taskKind() != null) leaves.add(node);
@@ -219,6 +219,6 @@ public final class BotSpeech {
         }
         if (current == null) return "All " + leaves.size() + " steps are done.";
         String place = "Step " + (index + 1) + " of " + leaves.size() + (current.state() == NodeState.ACTIVE ? "" : " (next)");
-        return place + ": " + current.taskKind() + " (" + goal(current.goal()) + ")." + (view.planPending() ? " Replanning." : "");
+        return place + ": " + current.taskKind() + " (" + goal(current.goal(), names) + ")." + (view.planPending() ? " Replanning." : "");
     }
 }

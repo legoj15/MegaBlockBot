@@ -399,9 +399,14 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
         return total;
     }
 
-    /** How many tool tiers the bot's best tool of the source's class is below the source's required tier. */
+    /**
+     * How many tool tiers the bot's best tool of the source's class is below the source's required tier. A block that
+     * drops to a bare hand requires none: its class and tier only say what breaks it fastest, and charging a missing
+     * axe on every log made thirty-two sticks dearer than a journey for ore (a live plan mined emeralds rather than
+     * sell sticks for them).
+     */
     private int tiersBelow(Source.MineBlock mine) {
-        if (mine.toolClass() == null) return 0;
+        if (mine.toolClass() == null || !mine.toolRequired()) return 0;
         ToolTier best = snapshot.bestTool(mine.toolClass());
         return Math.max(0, mine.minTier().ordinal() - best.ordinal());
     }

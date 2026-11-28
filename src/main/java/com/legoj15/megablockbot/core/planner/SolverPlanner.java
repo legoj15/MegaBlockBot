@@ -814,6 +814,10 @@ public final class SolverPlanner implements Planner {
          * trade eats is out of the stock before the shortfall is trusted (P12c item 1). Committing nodes (a tool
          * prerequisite, a whole trade, a strategy's nodes) is what makes {@link Decision#committed()} true.
          */
+        private static final int PASSED_OVER_NOTED = 3;
+        /** How many of an item's sources a plan's note prices, cheapest first: enough to see what the choice was between. */
+        private static final int PRICES_NOTED = 8;
+
         private Decision decide(ItemKey item, long demand) {
             long absolute = held(item) + demand;
             if (absolute > Integer.MAX_VALUE) {
@@ -828,6 +832,9 @@ public final class SolverPlanner implements Planner {
             List<NodeSpec> prerequisite = List.of();
             State afterPrerequisite = null;
             long gatherCost = CostModel.UNOBTAINABLE;
+            // The cheaper sources that could not be prepared, each with why: said in the plan's notes when a dearer
+            // one is taken, since the steps alone do not say why the cheaper way was not.
+            List<String> passedOver = new ArrayList<>();
             for (int i = 0; i < ranked.size() && chosen < 0; i++) {
                 Source source = ranked.get(i);
                 // A trade and a use-on source that spends its tool are committed whole — the payment, the tools — so
@@ -842,8 +849,11 @@ public final class SolverPlanner implements Planner {
                     prerequisite = ready.nodes();
                     afterPrerequisite = mark();
                     if (!strategies.isEmpty()) gatherCost = gatherTotal(source, demand, !prerequisite.isEmpty());
-                } else if (gatherFailure == null) {
-                    gatherFailure = ready.failure();
+                } else {
+                    if (gatherFailure == null) gatherFailure = ready.failure();
+                    if (passedOver.size() < PASSED_OVER_NOTED) {
+                        passedOver.add(source.id() + " (" + ready.failure().detail() + ")");
+                    }
                 }
                 restore(base);
             }
@@ -871,6 +881,18 @@ public final class SolverPlanner implements Planner {
             }
             restore(afterPrerequisite);
             noteSkippedSources(item, ranked.get(chosen));
+            for (String passed : passedOver) note(item.id() + ": the cheaper " + passed + " could not be planned");
+            // Where the next way is of another kind (a mine against a trade, a kill against a harvest) the prices the
+            // choice was made on are said: a plan that takes the long way round is then answerable from its notes.
+            boolean kinds = false;
+            for (Source other : ranked) kinds |= other.getClass() != ranked.get(chosen).getClass();
+            if (kinds) {
+                StringBuilder prices = new StringBuilder(item.id()).append(": by price a unit:");
+                for (int i = 0; i < ranked.size() && i < PRICES_NOTED; i++) {
+                    prices.append(i == 0 ? " " : ", ").append(ranked.get(i).id()).append(' ').append(costs.costOf(ranked.get(i)));
+                }
+                note(prices.toString());
+            }
             return new Decision(prerequisite, !prerequisite.isEmpty(), emitted ? -1 : chosen, gatherFailure, null);
         }
 

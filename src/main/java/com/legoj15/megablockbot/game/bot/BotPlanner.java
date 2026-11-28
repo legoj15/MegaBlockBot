@@ -1,5 +1,6 @@
 package com.legoj15.megablockbot.game.bot;
 
+import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.core.acquire.AcquisitionIndex;
 import com.legoj15.megablockbot.core.exec.PlanTicket;
 import com.legoj15.megablockbot.core.goal.Goal;
@@ -57,7 +58,15 @@ final class BotPlanner {
     /** Starts planning on the shared thread. The planner and the request are both immutable, so nothing races. */
     static PlanTicket plan(PlanRequest request) {
         Planner current = planner();
-        return new Ticket(pool().submit(() -> current.plan(request)));
+        return new Ticket(pool().submit(() -> {
+            PlanOutcome outcome = current.plan(request);
+            // What the plan could not consider and why (a source skipped, a trade whose payment could not be planned):
+            // the one place it is written down, since the steps alone do not say why the cheaper way was not taken.
+            if (outcome instanceof PlanOutcome.Planned planned && !planned.plan().notes().isEmpty()) {
+                MegaBlockBot.LOGGER.info("Plan notes for {}: {}", request.goal(), String.join("; ", planned.plan().notes()));
+            }
+            return outcome;
+        }));
     }
 
     static long inputFingerprint(Goal goal, Snapshot snapshot, Exclusions exclusions) {

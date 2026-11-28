@@ -237,6 +237,8 @@ public final class TradeTask extends BodyTask {
     private int shortfallTotal;
     private int windowTicks;
     private int reachTicks;
+    /** The villager {@link #reachTicks} is counted for. */
+    @Nullable private UUID reachFor;
     /** Tries to find the job site a place in this roll, and whether the last one sent the body closer to the villager. */
     private int placeTries;
     /**
@@ -1142,6 +1144,11 @@ public final class TradeTask extends BodyTask {
                 // The walk to it is counted too (a taker may stand 48 blocks off behind a wall): a villager the body
                 // cannot get to in the named time, four times the wait for a window, is let go like one whose
                 // window stays shut. Without this the wait had no bound but the step's own hour.
+                if (!who.getUUID().equals(reachFor)) {
+                    // The count is one villager's: the next one starts its own.
+                    reachFor = who.getUUID();
+                    reachTicks = 0;
+                }
                 if (++reachTicks > REACH_WAIT_TICKS) {
                     MegaBlockBot.LOGGER.info("{}: could not get to the {} at {} in {} ticks; the roll ends",
                         body.getGameProfile().getName(), profession, who.blockPosition().toShortString(),

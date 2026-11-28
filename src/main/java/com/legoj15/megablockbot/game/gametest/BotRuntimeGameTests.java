@@ -1215,6 +1215,11 @@ public final class BotRuntimeGameTests {
         helper.getLevel().addFreshEntity(taker);
         taker.setNoAi(false);
         rig.atEnd(taker::discard);
+        // The lectern this test keeps standing is taken out of the shared test world with it: a villager of a later
+        // test looks 48 blocks for a job site.
+        rig.atEnd(() -> {
+            for (BlockPos left : lecternsIn(helper)) helper.setBlock(left, Blocks.AIR);
+        });
         rig.give(Items.STONE, 1);
         boolean[] took = {false};
         int[] settled = {0};

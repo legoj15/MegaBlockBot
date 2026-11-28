@@ -121,6 +121,8 @@ abstract class StationTask extends BodyTask {
      * retreat is a dozen blocks, not a hundred. A station further off is no station of this task's.
      */
     static final int RETURN_RADIUS = 24;
+    /** How far around a kept job site its villager is looked for: the trade task's own search radius. */
+    private static final int KEPT_LOOK = (int) TradeTask.SEARCH_RADIUS;
     /** How many times in a row the body walks back to a station and finds it still out of reach before the task gives up. */
     static final int RETURNS_ALLOWED = 3;
     /** The navigator's goal for a walk back to the station: within this many blocks of it. */
@@ -330,6 +332,9 @@ abstract class StationTask extends BodyTask {
             if (!level.isLoaded(pos) || !memory.isPlaced(dimension, pos) || !body.canInteractWithBlock(pos, 0.0)) continue;
             if (memory.isKept(dimension, pos)) continue; // a job site kept for a villager is not a leftover
             if (!tidyMayTakeUp(level, body, pos)) continue;
+            // A smithing table, a stonecutter, a blast furnace or a smoker is a station and a job site both: one a
+            // villager that has traded works at is that villager's, by the rule the job-site search below keeps.
+            if (TradeTask.isJobSiteOfAProfession(level.getBlockState(pos).getBlock()) && TradeTask.keptByATrader(level, pos)) continue;
             double distance = pos.distToCenterSqr(body.getEyePosition());
             if (distance < bestDistance) {
                 bestDistance = distance;
@@ -358,9 +363,20 @@ abstract class StationTask extends BodyTask {
         for (BlockPos at : memory.placedIn(dimension)) {
             if (!level.isLoaded(at)) continue; // a read never loads a chunk
             BlockState state = level.getBlockState(at);
-            if (!TradeTask.isJobSiteOfAProfession(state.getBlock())) continue;
+            if (!TradeTask.isJobSiteOfAProfession(state.getBlock())) {
+                // A kept site somebody else broke: the mark and the note go with the block, or they would be
+                // carried, and saved, for a position that holds nothing of the body's any more.
+                if (memory.isKept(dimension, at)) memory.forgetPlaced(dimension, at);
+                continue;
+            }
+            // The take-up walks no farther than this (takeStationUp): a site beyond it would be chosen after every
+            // goal and never taken. The trade task's own search takes a far one up when it next rolls there.
+            if (at.distSqr(body.blockPosition()) > (double) RETURN_RADIUS * RETURN_RADIUS) continue;
             if (memory.isKept(dimension, at)) {
                 if (TradeTask.aVillagerWorksAt(level, at)) continue;
+                // Nobody is seen working there, which is only an answer where the villagers around it are loaded:
+                // at the edge of what is loaded the one it was kept for may simply not be in the world yet.
+                if (!level.hasChunksAt(at.offset(-KEPT_LOOK, 0, -KEPT_LOOK), at.offset(KEPT_LOOK, 0, KEPT_LOOK))) continue;
                 // Nobody's brain names it any more: the villager it was kept for is gone or has lost the profession,
                 // and with it the offer the site was kept for. The mark is off before the block goes.
                 memory.forgetKept(dimension, at);
@@ -435,6 +451,12 @@ abstract class StationTask extends BodyTask {
         @Override
         protected TickResult work(BotPlayer body) {
             return complete(body);
+        }
+
+        @Override
+        protected boolean gathersSpills() {
+            // A barrel somebody filled, a lectern with a book on it: what it held is picked up with it.
+            return true;
         }
 
         @Override
