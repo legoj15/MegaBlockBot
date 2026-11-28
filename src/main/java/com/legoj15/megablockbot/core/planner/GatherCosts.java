@@ -290,7 +290,7 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
     public Map<ItemKey, Integer> chargedFor(Source.Trade trade) {
         List<NotedOffer> seen = new ArrayList<>();
         for (NotedOffer offer : snapshot.offers()) {
-            if (offer.result().equals(trade.item())) seen.add(offer);
+            if (isThisTrade(offer, trade)) seen.add(offer);
         }
         if (seen.isEmpty()) return trade.cost();
         seen.sort(Comparator.comparingLong(GatherCosts::totalCharge)
@@ -298,10 +298,27 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
         return seen.get(0).charge();
     }
 
-    /** Whether the body has seen a villager offer the trade's item: such a villager needs no making. */
+    /** Whether the body has seen a villager offer this trade: such a villager needs no making. */
     private boolean offered(Source.Trade trade) {
         for (NotedOffer offer : snapshot.offers()) {
-            if (offer.result().equals(trade.item())) return true;
+            if (isThisTrade(offer, trade)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Whether a noted offer is an offer of this trade: it gives the trade's item and charges something the trade
+     * charges (in whatever numbers: the number is what a note is for, and a second item, the book an enchanted book
+     * also costs, may be on one side only). Many villagers give emeralds, each for something else; a weaponsmith
+     * seen taking coal for them is no fletcher taking sticks, and a plan that took its note for the fletcher's
+     * price walked to the village with three hundred sticks and nobody to sell them to. A trade that charges
+     * nothing the index knows of is anybody's.
+     */
+    public static boolean isThisTrade(NotedOffer offer, Source.Trade trade) {
+        if (!offer.result().equals(trade.item())) return false;
+        if (trade.cost().isEmpty() || offer.charge().isEmpty()) return true;
+        for (ItemKey charged : offer.charge().keySet()) {
+            if (trade.cost().containsKey(charged)) return true;
         }
         return false;
     }
@@ -319,10 +336,8 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
      */
     private long jobSiteCost(Source.Trade trade) {
         if (paymentPrice == null || trade.jobSite() == null || snapshot.count(trade.jobSite()) > 0) return 0;
-        // A villager the body has seen offer the item has the profession: the plan asks for no job site then.
-        for (NotedOffer offer : snapshot.offers()) {
-            if (offer.result().equals(trade.item())) return 0;
-        }
+        // A villager the body has seen offer this trade has the profession: the plan asks for no job site then.
+        if (offered(trade)) return 0;
         return paymentPrice.applyAsLong(trade.jobSite());
     }
 

@@ -3209,6 +3209,29 @@ final class SolverPlannerTest {
                 "a villager seen offering it needs no making: " + sources(known));
     }
 
+    @Test
+    void aNotedOfferOfTheItemForSomethingElseIsAnotherTrade() {
+        // A weaponsmith was seen giving an emerald for fifteen coal. The trade the plan has is the fletcher's, an
+        // emerald for eight logs: it is still planned at its own charge and still brings its own job site, for a
+        // villager that takes coal is no villager that takes logs. (The note used to price every emerald trade, and
+        // a plan walked to the village with its sticks and nobody to sell them to.)
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(EMERALD);
+        builder.addSource(new Source.Trade("trade:minecraft:fletcher:1", EMERALD, "minecraft:fletcher", 1,
+                Map.of(OAK_LOG, 8), Map.of(), 1.0, OAK_PLANKS));
+        SolverPlanner planner = planner(book(), builder.build());
+        Snapshot.Builder seen = Snapshot.builder().gameTime(0).dimension("minecraft:overworld").pos(new Pos(0, 64, 0));
+        seen.offer(new NotedOffer(UUID.randomUUID(), new Pos(3, 64, 3), EMERALD, StackFacts.plain(1),
+                Map.of(COAL, 15), 0L));
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(EMERALD, 2), seen.build(), Exclusions.NONE));
+        NodeSpec trade = leaves(plan).stream().filter(leaf -> leaf.taskKind().equals("trade")).findFirst().orElseThrow();
+        assertEquals("minecraft:oak_log=8", trade.params().get("cost"), "the trade is paid in what it charges");
+        assertNull(trade.params().get("villager"), "the villager noted is not this trade's");
+        assertEquals(0, gathered(plan, COAL), "no coal is gathered for a trade that takes logs");
+        assertTrue(gathered(plan, OAK_LOG) >= 16, "sixteen logs for two emeralds, and the job site's: " + leaves(plan));
+    }
+
     // ─── The fingerprint and determinism (item 8) ────────────────────────────────────────────────
 
     @Test

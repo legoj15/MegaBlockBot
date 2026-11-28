@@ -1343,7 +1343,7 @@ public final class SolverPlanner implements Planner {
         private NotedOffer notedFor(Source.Trade trade, ComponentCheck check) {
             List<NotedOffer> seen = new ArrayList<>();
             for (NotedOffer offer : snapshot.offers()) {
-                if (!offer.result().equals(trade.item())) continue;
+                if (!GatherCosts.isThisTrade(offer, trade)) continue;
                 if (check == null || check.test(offer.facts())) seen.add(offer);
             }
             if (seen.isEmpty()) return null;

@@ -239,6 +239,8 @@ public final class TradeTask extends BodyTask {
     private int shortfallTotal;
     private int windowTicks;
     private int reachTicks;
+    /** The items the plan brought to pay with; empty when the leaf names none, and any offer of the item will do. */
+    private final Set<ItemKey> plannedCharge;
     /** The villager {@link #reachTicks} is counted for. */
     @Nullable private UUID reachFor;
     /** Tries to find the job site a place in this roll, and whether the last one sent the body closer to the villager. */
@@ -283,6 +285,16 @@ public final class TradeTask extends BodyTask {
         this.sourceId = leaf.source();
         this.itemKey = ItemKey.of(required(leaf, "item"));
         this.profession = required(leaf, "profession");
+        // What the plan brought to pay with, by item ("minecraft:stick=32"): the offer this leaf is for charges these.
+        Set<ItemKey> charged = new HashSet<>();
+        String costText = leaf.params().get("cost");
+        if (costText != null) {
+            for (String part : costText.split(",")) {
+                int equals = part.indexOf('=');
+                if (equals > 0) charged.add(ItemKey.of(part.substring(0, equals).trim()));
+            }
+        }
+        this.plannedCharge = Set.copyOf(charged);
         this.goalCount = leaf.goal() instanceof Goal.HaveItem g && g.key().equals(itemKey) ? g.count() : -1;
         this.check = leaf.goal() instanceof Goal.HaveItem g ? g.check() : null;
         this.moreCount = intParam(leaf.params(), "count", 1);
@@ -739,7 +751,7 @@ public final class TradeTask extends BodyTask {
         if (menu == null) return TickResult.RUNNING;
         note(body, who); // the body's own memory: the next plan prices the payment by it
         inspected.add(who.getUUID());
-        int offer = offerFor(who);
+        int offer = offerFor(body, who);
         close(body);
         if (offer >= 0) return pay(body, who, offer);
         if (site != null) return roll(body); // this villager was made by a roll: roll it again
@@ -807,13 +819,31 @@ public final class TradeTask extends BodyTask {
         charge.merge(ItemKeys.of(stack.getItem()), stack.getCount(), Integer::sum);
     }
 
-    /** The index of the first offer whose result satisfies the leaf's goal, or -1 when none does. */
-    private int offerFor(Villager who) {
+    /**
+     * The index of the offer this leaf is for, or -1 when the villager shows none: the first whose result satisfies
+     * the leaf's goal and that charges something the plan brought for it. An offer of the item for something else is
+     * another trade (emeralds for coal, where the plan brought sticks): it is taken only when the body can pay it as
+     * it stands, and otherwise is nobody's answer, so the search goes on and a villager is made for the trade planned.
+     */
+    private int offerFor(BotPlayer body, Villager who) {
         MerchantOffers offers = who.getOffers();
+        int payable = -1;
         for (int i = 0; i < offers.size(); i++) {
-            if (satisfies(offers.get(i))) return i;
+            MerchantOffer offer = offers.get(i);
+            if (!satisfies(offer)) continue;
+            if (plannedCharge.isEmpty() || !java.util.Collections.disjoint(chargesOf(offer).keySet(), plannedCharge)) return i;
+            if (payable < 0 && canPay(body, offer)) payable = i;
         }
-        return -1;
+        return payable;
+    }
+
+    /** Whether the body carries what one use of the offer charges. */
+    private static boolean canPay(BotPlayer body, MerchantOffer offer) {
+        for (Map.Entry<ItemKey, Integer> charge : chargesOf(offer).entrySet()) {
+            Item charged = itemOf(charge.getKey());
+            if (charged == null || MenuHand.carriedCount(body, charged) < charge.getValue()) return false;
+        }
+        return true;
     }
 
     private boolean satisfies(MerchantOffer offer) {
@@ -1191,7 +1221,7 @@ public final class TradeTask extends BodyTask {
             windowTicks = 0;
         }
         note(body, who);
-        int offer = offerFor(who);
+        int offer = offerFor(body, who);
         close(body);
         if (offer >= 0) return pay(body, who, offer);
         phase = Phase.TAKING_SITE; // not this roll: the site comes up and the villager loses the profession again
