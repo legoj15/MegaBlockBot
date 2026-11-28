@@ -216,6 +216,16 @@ runs wherever the command tree is built (a worker thread while data loads).
   the librarian reroll: a fresh world (seed 4242), a named chest of emeralds, leather and sugar cane beside the bot,
   an adult villager without a profession summoned into the taiga village at 80 -496, then the mending-book goal
   through `bot-goal.ps1`. Its header says what is set up and what the bot does itself.
+- `scripts/evidence-goggles.ps1 -Node <node>` is the evidence run for the assembly table: a fresh BuildCraft world,
+  a named chest holding the rig and the raw materials, then `make 1 goggles` through `bot-goal.ps1`.
+- **A real player in the world** (a deliver goal needs somebody to give to, and the M1 evidence asks for a client
+  watching): `./gradlew :<node>:runClient -PquickWorld=<save>` boots the dev client into `versions/<node>/run/saves/
+  <save>` (a dev server's world folder copied there works as a save). With the McDevBridge jar (and any mod the world
+  needs) in `versions/<node>/run/mods` and `MCDEVBRIDGE_INTERACTIVE=0` in the environment, the client is driven over
+  the bridge's loopback HTTP: `/command` runs a server command, `/chat` speaks or runs a command as the player (so
+  the player owns the bot it spawns and its chat reaches the bot), `/screenshot` writes the frame. A fresh run
+  directory shows the game's first-run screen: click its `Continue` through `/screenclick` and the world loads. The
+  language model is read from `run/config/megablockbot/language.json` of that tree when the game starts.
 - The first three scripts import `scripts/lib/MbbNodes.psm1` for the command-line sweep that finds and kills a node's
   leftover JVMs (the server JVM by its `versions/<node>/` path, the Gradle client by the wrapper jar and task name).
 - GameTest classes live in `com.legoj15.megablockbot.game.gametest`, use vanilla `@GameTest` with

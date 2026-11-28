@@ -242,8 +242,14 @@ public final class BotNavigator {
     private Object issuer;
     /** Times the engine has been ticked for this body, whatever drove it; a test reads this to tell a double tick. */
     private long engineTicks;
-    /** Chunks the body has looked over while exploring, by chunk key, with the game time it last did. */
-    private final Map<Long, Long> seenChunks = new HashMap<>();
+    /**
+     * Chunks the body has looked over while exploring, by chunk key, with the game time it last did: the ones seen
+     * from the surface, and apart from them the ones an underground search (an explore held at a level) went
+     * through. A column mined through at the level of an ore says nothing of the cows and crops above it.
+     */
+    private Map<Long, Long> seenChunks = new HashMap<>();
+    private final Map<Long, Long> seenOnTheSurface = new HashMap<>();
+    private final Map<Long, Long> seenUnderground = new HashMap<>();
     /** The dimension {@link #seenChunks} is about: the keys mean nothing in another. */
     private String seenDimension = "";
     /** The chunk the body stood in when its surroundings were last marked; null before the first marking of an explore. */
@@ -477,9 +483,11 @@ public final class BotNavigator {
         long now = body.level().getGameTime();
         String here = body.level().dimension().location().toString();
         if (!here.equals(seenDimension)) {
-            seenChunks.clear();
+            seenOnTheSurface.clear();
+            seenUnderground.clear();
             seenDimension = here;
         }
+        seenChunks = maintainY == -1 ? seenOnTheSurface : seenUnderground;
         seenChunks.values().removeIf(seen -> now - seen > SEEN_CHUNK_TICKS);
         IWorldData seen = e.getWorldProvider().getCurrentWorld();
         seen.forgetChunks();

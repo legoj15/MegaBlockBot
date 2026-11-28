@@ -139,6 +139,8 @@ public final class TradeTask extends BodyTask {
      * five seconds, longer than it is busy walking to its new job site, shorter than a night's sleep.
      */
     private static final int WINDOW_WAIT_TICKS = 100;
+    /** Ticks the body may spend getting to a villager that has taken the job before the roll gives it up: 20 s. */
+    private static final int REACH_WAIT_TICKS = 400;
     /**
      * How often the body steps closer to a villager that has wandered off before the job site has a place beside it.
      * A villager walks while the body gets its lectern out; one step closer nearly always finds a place, and eight is
@@ -228,6 +230,7 @@ public final class TradeTask extends BodyTask {
     @Nullable private Failure.MissingInput shortfall;
     private int shortfallTotal;
     private int windowTicks;
+    private int reachTicks;
     /** Tries to find the job site a place in this roll, and whether the last one sent the body closer to the villager. */
     private int placeTries;
     /**
@@ -240,6 +243,8 @@ public final class TradeTask extends BodyTask {
     @Nullable private BlockPos lastSite;
     /** Waits in a row that the villager being rolled let pass without taking the job site. */
     private int notTaken;
+    /** The villager {@link #notTaken} is counted for: another villager's waits are not this one's. */
+    @Nullable private UUID notTakenFor;
     private boolean placeCloser;
     /**
      * Villagers that took the job and then would not open their window: not rolled again by this task. Not the
@@ -331,11 +336,19 @@ public final class TradeTask extends BodyTask {
         // A payment that was under way goes on with its villager, and so does a villager whose job site stands: to
         // drop either would leave the site this task put down standing with nobody to answer for it.
         boolean paying = phase == Phase.TRADING && villager != null && villager.isAlive() && offerIndex >= 0;
+        boolean walking = phase == Phase.VILLAGE && walkTo != null && !arrivedAt(body, walkTo);
         if (rolled == null && site == null && !paying) villager = null;
         menu = null;
         opens = 0;
         windowTicks = 0;
         phaseTicks = 0;
+        if (walking) {
+            // The walk to the village, or back to the noted villager, is asked for once and marked as asked before
+            // it ends. A pause that cut it short must not end it: the body would look around where it stands and
+            // roll a stranger instead of paying the villager whose price the plan gathered.
+            walkToward(body, walkTo, walkToName);
+            return;
+        }
         phase = paying ? Phase.TRADING : site != null ? Phase.WAITING_JOB
             : rolled != null && villager != null ? Phase.WAITING_RESET : Phase.LOOKING;
     }
@@ -565,6 +578,7 @@ public final class TradeTask extends BodyTask {
         // rolling with, whatever became of the site it was given — the site is down between rolls, and a roll can lose
         // it without losing the villager. One that has traded keeps its site and is never touched.
         if (villager != null && villager.isAlive() && villager.getUUID().equals(rolled)
+            && !unrollable.contains(villager.getUUID())
             && professionOf(villager).equals(profession) && villager.getVillagerXp() == 0) {
             return villager;
         }
@@ -1033,10 +1047,11 @@ public final class TradeTask extends BodyTask {
             return TickResult.RUNNING;
         }
         if (!body.serverLevel().getBlockState(site).is(jobSiteBlock)) {
-            // The site is gone: there is nothing of it to remember. A look from the top finds the villager again (it
-            // keeps its place in the roll until it trades) and takes the roll on.
-            forgetSite(body);
-            phase = Phase.LOOKING;
+            // The site is gone, by another hand: its item lies where it stood and is fetched like one the task broke
+            // itself (the wait for the reset does that), and the roll goes on from there.
+            siteCameUp(body);
+            phase = Phase.WAITING_RESET;
+            phaseTicks = 0;
             return TickResult.RUNNING;
         }
         if (who == null || !who.isAlive()) {
@@ -1082,6 +1097,10 @@ public final class TradeTask extends BodyTask {
                 MegaBlockBot.LOGGER.info("{}: the villager at {} did not take the job of the {} at {} in {} ticks",
                     body.getGameProfile().getName(), who.blockPosition().toShortString(), jobSiteKey.id(),
                     site.toShortString(), PROFESSION_WAIT_TICKS);
+                if (!who.getUUID().equals(notTakenFor)) {
+                    notTakenFor = who.getUUID();
+                    notTaken = 0;
+                }
                 if (++notTaken >= NOT_TAKEN_LIMIT) {
                     MegaBlockBot.LOGGER.info("{}: the villager at {} is let go: it left the job untaken {} times running",
                         body.getGameProfile().getName(), who.blockPosition().toShortString(), notTaken);
@@ -1098,10 +1117,24 @@ public final class TradeTask extends BodyTask {
         // A new profession, so offers nobody has seen: open the window (a look, as a player must) and note them.
         if (menu == null) {
             if (!body.canInteractWithEntity(who, 1.0)) {
+                // The walk to it is counted too (a taker may stand 48 blocks off behind a wall): a villager the body
+                // cannot get to in the named time, four times the wait for a window, is let go like one whose
+                // window stays shut. Without this the wait had no bound but the step's own hour.
+                if (++reachTicks > REACH_WAIT_TICKS) {
+                    MegaBlockBot.LOGGER.info("{}: could not get to the {} at {} in {} ticks; the roll ends",
+                        body.getGameProfile().getName(), profession, who.blockPosition().toShortString(),
+                        REACH_WAIT_TICKS);
+                    unrollable.add(who.getUUID());
+                    reachTicks = 0;
+                    phase = Phase.TAKING_SITE;
+                    phaseTicks = 0;
+                    return TickResult.RUNNING;
+                }
                 BotNavigator nav = nav(body);
                 if (nav.state() != BotNavigator.State.WORKING) nav.goTo(who.blockPosition(), 1);
                 return TickResult.RUNNING;
             }
+            reachTicks = 0;
             body.interactOn(who, InteractionHand.MAIN_HAND);
             if (!(body.containerMenu instanceof MerchantMenu open)) {
                 if (++windowTicks > WINDOW_WAIT_TICKS) {

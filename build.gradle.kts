@@ -90,6 +90,13 @@ neoForge {
     runs {
         register("client") {
             client()
+            // -PquickWorld=<save> boots the dev client straight into that save of its run directory (run/saves),
+            // with no menu to click through: for an evidence run that needs a real player in the world. Gradle's
+            // own --args cannot do it: it replaces the launcher's arguments and the game's main class with them.
+            providers.gradleProperty("quickWorld").orNull?.let {
+                programArgument("--quickPlaySingleplayer")
+                programArgument(it)
+            }
         }
         register("server") {
             server()
