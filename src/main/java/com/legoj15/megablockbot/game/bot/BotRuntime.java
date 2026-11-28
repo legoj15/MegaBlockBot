@@ -222,6 +222,13 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     public void submit(Goal goal) {
         if (goal instanceof Goal.Deliver deliver && deliver.since() == 0L && body != null) {
             long noted = BotMemory.of(body.getUUID()).lastDeliveryStamp();
+            // The goals still running or queued carry their stamps too, and a restart forgets this field: a goal
+            // that has handed nothing over yet has left no note, and its stamp must not be given out again.
+            ExecutorView live = executor.view();
+            if (live.goal() instanceof Goal.Deliver running) noted = Math.max(noted, running.since());
+            for (Goal queued : live.queue()) {
+                if (queued instanceof Goal.Deliver waiting) noted = Math.max(noted, waiting.since());
+            }
             lastDeliverStamp = Math.max(body.level().getGameTime(), Math.max(lastDeliverStamp, noted) + 1);
             goal = new Goal.Deliver(deliver.key(), deliver.count(), deliver.recipient(), lastDeliverStamp);
         }

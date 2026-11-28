@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
@@ -56,6 +57,8 @@ import net.minecraft.world.item.MobBucketItem;
 import net.minecraft.world.item.SolidBucketItem;
 import net.minecraft.world.item.crafting.Recipe;
 import net.minecraft.world.item.crafting.RecipeHolder;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.MobSpawnSettings;
 import net.minecraft.world.level.block.AttachedStemBlock;
 import net.minecraft.world.level.block.BambooSaplingBlock;
 import net.minecraft.world.level.block.BambooStalkBlock;
@@ -72,6 +75,8 @@ import net.minecraft.world.level.block.SugarCaneBlock;
 import net.minecraft.world.level.block.SweetBerryBushBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
+import net.minecraft.world.level.levelgen.structure.Structure;
+import net.minecraft.world.level.levelgen.structure.StructureSpawnOverride;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
@@ -283,7 +288,47 @@ public final class AcquisitionIndexBuilder {
 
     // ---- entities, fishing, chests -----------------------------------------------------------------------------
 
+    /**
+     * Mobs the game spawns from its own code, with no spawn list to read, each with where in the 1.21.1 sources.
+     * A mob that is neither listed by a biome or a structure nor named here is one the planner does not go hunting.
+     */
+    private static final Map<String, String> SPAWNED_BY_CODE = Map.of(
+        "minecraft:phantom", "PhantomSpawner: over a player who has not slept");
+
+    /**
+     * The mobs the world spawns on its own account: every type some biome's spawn list names, every type a structure
+     * spawns in its bounds (a fortress its blazes, a monument its guardians, an outpost its pillagers), and those of
+     * {@link #SPAWNED_BY_CODE}. An evoker, a vindicator, a ravager or a warden is in none of them: one stands only
+     * where a mansion or a raid put it, and a live plan set out to kill twelve evokers for its emeralds. Null when
+     * the lists could not be read; the spawn category alone decides then, as it did before.
+     */
+    private Set<String> spawnedMobs() {
+        try {
+            Set<String> spawned = new TreeSet<>(SPAWNED_BY_CODE.keySet());
+            RegistryAccess access = server.registryAccess();
+            for (Biome biome : access.registryOrThrow(Registries.BIOME)) {
+                for (MobCategory category : MobCategory.values()) {
+                    for (MobSpawnSettings.SpawnerData data : biome.getMobSettings().getMobs(category).unwrap()) {
+                        spawned.add(BuiltInRegistries.ENTITY_TYPE.getKey(data.type).toString());
+                    }
+                }
+            }
+            for (Structure structure : access.registryOrThrow(Registries.STRUCTURE)) {
+                for (StructureSpawnOverride override : structure.spawnOverrides().values()) {
+                    for (MobSpawnSettings.SpawnerData data : override.spawns().unwrap()) {
+                        spawned.add(BuiltInRegistries.ENTITY_TYPE.getKey(data.type).toString());
+                    }
+                }
+            }
+            return spawned;
+        } catch (RuntimeException e) {
+            notes.count("mob spawn lists could not be read: every mob with a spawn category counts as spawning");
+            return null;
+        }
+    }
+
     private void entities() {
+        Set<String> spawned = spawnedMobs();
         List<EntityType<?>> types = new ArrayList<>();
         BuiltInRegistries.ENTITY_TYPE.forEach(types::add);
         types.sort(Comparator.comparing(t -> BuiltInRegistries.ENTITY_TYPE.getKey(t).toString()));
@@ -293,7 +338,8 @@ public final class AcquisitionIndexBuilder {
             String table = type.getDefaultLootTable().location().toString();
             if (environment.table(table) == null) continue;
             // What the fight is, from the type's own attributes: the planner prices a kill by them. A kind in no
-            // spawn category of its own (MISC: golems, villagers) is one the world does not put there by itself.
+            // spawn category of its own (MISC: golems, villagers), or that no biome and no structure spawns, is one
+            // the world does not put there by itself.
             @SuppressWarnings("unchecked")
             AttributeSupplier attributes = DefaultAttributes.getSupplier((EntityType<? extends LivingEntity>) type);
             double health = attributes.hasAttribute(Attributes.MAX_HEALTH)
@@ -301,7 +347,7 @@ public final class AcquisitionIndexBuilder {
             double attack = attributes.hasAttribute(Attributes.ATTACK_DAMAGE)
                 ? attributes.getBaseValue(Attributes.ATTACK_DAMAGE) : 0.0;
             MobCategory category = type.getCategory();
-            boolean spawnsNaturally = category != MobCategory.MISC;
+            boolean spawnsNaturally = category != MobCategory.MISC && (spawned == null || spawned.contains(entityId));
             boolean aquatic = category == MobCategory.WATER_CREATURE || category == MobCategory.WATER_AMBIENT
                 || category == MobCategory.UNDERGROUND_WATER_CREATURE || category == MobCategory.AXOLOTLS;
             for (Route route : eval.routes(table, EnumSet.of(Tool.PLAIN), true, LootEval.StateRule.MINED)) {
@@ -395,11 +441,17 @@ public final class AcquisitionIndexBuilder {
      * is the only place the use-on task looks for one. A fluid no block holds cannot be scooped, however many buckets
      * are registered holding it.
      */
-    private static Set<Fluid> scoopableFluids() {
+    private Set<Fluid> scoopableFluids() {
         Set<Fluid> sources = new HashSet<>();
         for (Block block : BuiltInRegistries.BLOCK) {
-            FluidState fluid = block.defaultBlockState().getFluidState();
-            if (fluid.isSource()) sources.add(fluid.getType());
+            try {
+                FluidState fluid = block.defaultBlockState().getFluidState();
+                if (fluid.isSource()) sources.add(fluid.getType());
+            } catch (RuntimeException e) {
+                // As in the block section: a modded block that throws costs that block, not every bucket's source.
+                notes.skipped("blocks whose default state threw while the fluids a bucket can scoop were read",
+                    BuiltInRegistries.BLOCK.getKey(block) + " (" + e.getClass().getSimpleName() + ")");
+            }
         }
         return sources;
     }

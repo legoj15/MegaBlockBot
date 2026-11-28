@@ -375,6 +375,12 @@ public final class ResolverGameTests {
         Source.KillMob eye = kill(helper, index, "minecraft:spider_eye", "minecraft:spider");
         helper.assertTrue(Math.abs(eye.yield() - 1.0 / 3) < 1e-9, "spider eyes per spider are " + eye.yield() + ", expected " + 1.0 / 3);
         helper.assertTrue(eye.playerKillOnly(), "spider eyes do not need a player kill: " + eye);
+        // Which mobs the world spawns by itself, from its spawn lists: a cow (a biome's list), a blaze (a fortress's)
+        // and a phantom (the game's own code) do; an evoker stands only where a mansion or a raid put it.
+        helper.assertTrue(kill(helper, index, "minecraft:leather", "minecraft:cow").spawnsNaturally(), "a cow is said not to spawn");
+        helper.assertTrue(kill(helper, index, "minecraft:blaze_rod", "minecraft:blaze").spawnsNaturally(), "a blaze is said not to spawn");
+        helper.assertTrue(kill(helper, index, "minecraft:phantom_membrane", "minecraft:phantom").spawnsNaturally(), "a phantom is said not to spawn");
+        helper.assertTrue(!kill(helper, index, "minecraft:emerald", "minecraft:evoker").spawnsNaturally(), "an evoker is said to spawn on its own");
         helper.succeed();
     }
 

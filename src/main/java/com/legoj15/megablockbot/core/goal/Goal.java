@@ -43,8 +43,9 @@ public sealed interface Goal {
     /**
      * Hand {@code count} of {@code key} to the player {@code recipient} (their UUID as text: the core holds no
      * Minecraft type) by dropping it at their feet. What a player carries is not the body's to read, so the goal is
-     * judged on the deliveries the body noted in its memory at or after {@code since}, the game time the goal was
-     * given — a goal asked again needs a new delivery, and the words carry no clock, so the runtime stamps the time.
+     * judged on the deliveries the body noted in its memory under the goal's own stamp, {@code since}: the game time
+     * the goal was given, pushed past every stamp before it so that no two goals share one — a goal asked again
+     * needs a new delivery, and the words carry no clock, so the runtime stamps the goal.
      */
     record Deliver(ItemKey key, int count, String recipient, long since) implements Goal {
         public Deliver {

@@ -247,8 +247,11 @@ what the body carries in its pack of the sword and axe items and of `provisionFo
 ore that deep those counts are part of the plan's input fingerprint — the fingerprint asks the index rather than the
 plan, so it is ready for the provisions whether or not the plan that came out digs — and a replan after a death, with an
 empty pack, plans them again while a pack that still holds a sword and its food brings nothing; one lying in a container
-the body may take from is fetched by the usual `withdraw` step instead of made again. The weapon rule is the one
-`game.task.Weapons` answers with (a sword or an axe with durability left), and no new collection is read for any of it.
+the body may take from is fetched by the usual `withdraw` step instead of made again. The weapon rule is by item: any
+sword or axe in the pack counts, whatever its wear, because a snapshot holds counts and not durability (the fight
+layer's own rule, `game.task.Weapons`, also asks for durability left, so a sword about to break is brought no
+replacement). The fetch of a provision from a container is best effort like its making, unless the goal's own steps
+use the item too. No new collection is read for any of it.
 
 The level is 0, the top of the deepslate: gold, redstone, lapis and diamond trips are provisioned, iron, copper and
 coal are not, so the short plans of the iron age are as they were. Every provision step is best effort: one that

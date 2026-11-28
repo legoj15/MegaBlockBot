@@ -485,9 +485,16 @@ public final class UseOnTask extends BodyTask {
             noProgress = 0;
             return null;
         }
-        boolean gain = inReach(body, quarry) || quarry.distanceTo(body) < bestDistance - CLOSER_BY;
-        bestDistance = Math.min(bestDistance, quarry.distanceTo(body));
-        if (gain) {
+        // A gain is measured against where the last gain left the body, not against the tick before: a walk covers
+        // a fifth of a block a tick, which is never a gain on its own and is one every three ticks. Measured tick
+        // to tick the watch was a plain timeout, and a body closing steadily on a far quarry gave it up.
+        double distance = quarry.distanceTo(body);
+        if (distance < bestDistance - CLOSER_BY) {
+            bestDistance = distance;
+            noProgress = 0;
+            return null;
+        }
+        if (inReach(body, quarry)) {
             noProgress = 0;
             return null;
         }

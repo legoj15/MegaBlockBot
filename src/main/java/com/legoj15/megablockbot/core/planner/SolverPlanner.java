@@ -339,6 +339,8 @@ public final class SolverPlanner implements Planner {
          * holds, not out of it.
          */
         private final TreeMap<ItemKey, Long> reserved = new TreeMap<>();
+        /** What the plan brings as provisions, by item: empty for a plan that brings none (see withProvisions). */
+        private final TreeMap<ItemKey, Long> provisioned = new TreeMap<>();
         /**
          * One solver-side wrapper per recipe for the whole run: the solver's quantity path matches recipes by
          * identity, so a producers function that built new objects on every call would defeat it.
@@ -1687,7 +1689,10 @@ public final class SolverPlanner implements Planner {
             provisions.addAll(weaponProvision(brought));
             provisions.addAll(foodProvision(brought));
             List<String> said = List.copyOf(notes);
-            if (provisions.isEmpty()) {
+            // Nothing is brought at all: the plan is the goal's own. A provision that lies whole in a container the
+            // body may take from has no step of its own here and is still brought (the withdraw steps fetch it), so
+            // the question is what is brought, not what was planned for it.
+            if (brought.isEmpty()) {
                 restore(asItWas);
                 said.forEach(this::note);
                 return goalStep;
@@ -1710,7 +1715,9 @@ public final class SolverPlanner implements Planner {
             }
             // Best effort, every step of them: a provision that cannot be carried out (no cow within the search) is
             // skipped where it fails, with no retry and no replan, and the goal's own steps go on. Without that a
-            // hunt that finds nothing would spend the goal's replans on a meal.
+            // hunt that finds nothing would spend the goal's replans on a meal. What is brought is remembered, so
+            // that the fetch of a provision from a container is such a step too (withdrawals).
+            provisioned.putAll(brought);
             List<NodeSpec> nodes = new ArrayList<>();
             for (NodeSpec provision : provisions) nodes.add(bestEffort(provision));
             nodes.addAll(replanned.nodes());
@@ -1851,8 +1858,11 @@ public final class SolverPlanner implements Planner {
                     params.put("count", Long.toString(take));
                     params.put("container", box.pos().encode());
                     params.put("dimension", snapshot.dimension());
-                    leaves.add(NodeSpec.leaf(new Goal.HaveItem(item, (int) total), "withdraw", params,
-                            withdrawSource(box.pos())));
+                    NodeSpec leaf = NodeSpec.leaf(new Goal.HaveItem(item, (int) total), "withdraw", params,
+                            withdrawSource(box.pos()));
+                    // An item the plan needs only as a provision: its fetch may fail as its making may, without
+                    // spending the goal's replans. One the goal's own steps use as well is the goal's to have.
+                    leaves.add(entry.getValue() <= provisioned.getOrDefault(item, 0L) ? leaf.asBestEffort() : leaf);
                     if (box.remembered()) {
                         note(item.id() + ": " + take + " from the container at " + box.pos().encode()
                                 + ", as the body remembers it (it cannot see it from here)");

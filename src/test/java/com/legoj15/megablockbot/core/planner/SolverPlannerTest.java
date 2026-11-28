@@ -3461,6 +3461,25 @@ final class SolverPlannerTest {
     }
 
     @Test
+    void aProvisionThatLiesInAContainerIsFetchedAsAStepThePlanCanLose() {
+        // The pack holds the food and a named chest holds the sword: nothing is to be made for the trip, and the
+        // sword is still brought, by a withdraw step that is best effort as the making of one would be. (It was
+        // dropped without a word: with no step planned for any provision the plan went back to the goal's own.)
+        Goal goal = new Goal.HaveItem(DIAMOND_PICKAXE, 1);
+        Snapshot snapshot = snapshotWith(Map.of(BREAD, 8), supplyBox(SHELF_A, Map.of(STONE_SWORD, 1)));
+        Plan plan = planned(provisioningPlanner(true), request(goal, snapshot, Exclusions.NONE));
+
+        assertEquals(1, withdrawn(plan, STONE_SWORD), "the sword is fetched from the chest: " + leaves(plan));
+        NodeSpec fetch = withdrawals(plan).stream()
+                .filter(leaf -> leaf.goal() instanceof Goal.HaveItem have && have.key().equals(STONE_SWORD))
+                .findFirst().orElseThrow();
+        assertTrue(fetch.bestEffort(), "the fetch of a provision is a step the plan can lose");
+        assertEquals(-1, firstLeaf(plan, leaf -> "stone_sword_from_cobblestone".equals(leaf.params().get("recipe"))),
+                "no second sword is made beside the one in the chest: " + leaves(plan));
+        assertEquals(3, gathered(plan, DIAMOND), "the goal's own dig is as it was");
+    }
+
+    @Test
     void aPlanThatStaysOnTheSurfacePacksNothing() {
         SolverPlanner planner = provisioningPlanner(true);
         Goal goal = new Goal.HaveItem(OAK_PLANKS, 4);
