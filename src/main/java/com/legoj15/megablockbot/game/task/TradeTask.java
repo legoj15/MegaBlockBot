@@ -42,7 +42,6 @@ import net.minecraft.tags.StructureTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
-import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.npc.Villager;
 import net.minecraft.world.entity.npc.VillagerData;
 import net.minecraft.world.inventory.ClickType;
@@ -134,6 +133,20 @@ public final class TradeTask extends BodyTask {
      * five seconds, longer than it is busy walking to its new job site, shorter than a night's sleep.
      */
     private static final int WINDOW_WAIT_TICKS = 100;
+    /**
+     * How often the body steps closer to a villager that has wandered off before the job site has a place beside it.
+     * A villager walks while the body gets its lectern out; one step closer nearly always finds a place, and eight is
+     * a villager that will not stand anywhere a block can go.
+     */
+    private static final int PLACE_TRIES = 8;
+    /**
+     * How often running a villager may leave the job site untaken before the task rolls another. One that takes it
+     * does so within a few seconds; one that let two whole waits pass cannot get to where the body puts it (seen on
+     * the host: a villager that stood in one place took none of three), and every further try is half a minute.
+     */
+    private static final int NOT_TAKEN_LIMIT = 2;
+    /** How near the body goes to a wandering villager before it looks for the job site's place again. */
+    private static final double PLACE_CLOSE = 2.0;
 
     /**
      * How hard the task looks for a villager when none is known: rounds of exploring, each one followed by another
@@ -209,6 +222,19 @@ public final class TradeTask extends BodyTask {
     @Nullable private Failure.MissingInput shortfall;
     private int shortfallTotal;
     private int windowTicks;
+    /** Tries to find the job site a place in this roll, and whether the last one sent the body closer to the villager. */
+    private int placeTries;
+    /**
+     * The pick-up of the job site's item after the site is broken, and where the site stood. The shared pick-up (the
+     * kill and harvest tasks' own) walks to a drop by the navigator, then by plain steps, then to its exact cell: an
+     * item that came to rest a block up or in a dip is one walking at it does not reach, and a lectern not picked up
+     * is nine books the next plan has to make again (seen on the host, twice in forty rolls).
+     */
+    private final DropPickup sitePickup = new DropPickup();
+    @Nullable private BlockPos lastSite;
+    /** Waits in a row that the villager being rolled let pass without taking the job site. */
+    private int notTaken;
+    private boolean placeCloser;
     /**
      * Villagers that took the job and then would not open their window: not rolled again by this task. Not the
      * same as {@link #skipped}: an unemployed villager's window never opens, and that one is exactly who is rolled.
@@ -304,7 +330,8 @@ public final class TradeTask extends BodyTask {
         opens = 0;
         windowTicks = 0;
         phaseTicks = 0;
-        phase = paying ? Phase.TRADING : site != null ? Phase.WAITING_JOB : Phase.LOOKING;
+        phase = paying ? Phase.TRADING : site != null ? Phase.WAITING_JOB
+            : rolled != null && villager != null ? Phase.WAITING_RESET : Phase.LOOKING;
     }
 
     private int held(BotPlayer body) {
@@ -368,6 +395,12 @@ public final class TradeTask extends BodyTask {
             }
             if (!notedChecked) {
                 notedChecked = true;
+                if (known instanceof Villager noted && noted.isAlive() && jobless(noted)) {
+                    // It lost the profession since (its job site was taken up): the offers went with it.
+                    MegaBlockBot.LOGGER.info("{}: the villager noted at {} has no profession any more; its offers are forgotten",
+                        body.getGameProfile().getName(), blockPos(notedAt).toShortString());
+                    BotMemory.of(body.getUUID()).forgetOffers(notedVillager);
+                }
                 if (known == null && body.serverLevel().isLoaded(blockPos(notedAt))) {
                     // The place is loaded and the villager is not in the world: the note is of nobody.
                     MegaBlockBot.LOGGER.info("{}: the {} noted at {} is gone; its offers are forgotten",
@@ -379,6 +412,8 @@ public final class TradeTask extends BodyTask {
         List<Villager> candidates = villagers(body);
         for (Villager candidate : candidates) {
             if (skipped.containsKey(candidate.getUUID()) || inspected.contains(candidate.getUUID())) continue;
+            // No profession, no window: it shakes its head at a click. It is somebody to roll, further down.
+            if (jobless(candidate)) continue;
             villager = candidate;
             MegaBlockBot.LOGGER.info("{}: chose the villager at {} ({})", body.getGameProfile().getName(),
                 candidate.blockPosition().toShortString(), professionOf(candidate));
@@ -448,10 +483,7 @@ public final class TradeTask extends BodyTask {
     private static boolean keptByATrader(ServerLevel level, BlockPos at) {
         AABB box = new AABB(at).inflate(SEARCH_RADIUS);
         for (Villager worker : level.getEntitiesOfClass(Villager.class, box, Villager::isAlive)) {
-            if (worker.getVillagerXp() <= 0) continue;
-            if (!worker.getBrain().hasMemoryValue(MemoryModuleType.JOB_SITE)) continue;
-            Optional<GlobalPos> job = worker.getBrain().getMemory(MemoryModuleType.JOB_SITE);
-            if (job.isPresent() && job.get().pos().equals(at)) return true;
+            if (worker.getVillagerXp() > 0 && worksAt(worker, at)) return true;
         }
         return false;
     }
@@ -498,6 +530,19 @@ public final class TradeTask extends BodyTask {
             return villager;
         }
         return null;
+    }
+
+    /** Whether the villager has no trade to show: unemployed, or a nitwit. */
+    private static boolean jobless(Villager villager) {
+        String job = professionOf(villager);
+        return job.equals("minecraft:none") || job.equals("minecraft:nitwit");
+    }
+
+    /** Whether this block is the job site the villager's own brain says it works at. */
+    private static boolean worksAt(Villager worker, BlockPos at) {
+        if (!worker.getBrain().hasMemoryValue(MemoryModuleType.JOB_SITE)) return false;
+        Optional<GlobalPos> job = worker.getBrain().getMemory(MemoryModuleType.JOB_SITE);
+        return job.isPresent() && job.get().pos().equals(at);
     }
 
     private static String professionOf(Villager villager) {
@@ -860,6 +905,8 @@ public final class TradeTask extends BodyTask {
                     + " to make one of the profession " + profession)));
         }
         rolled = villager != null && villager.isAlive() ? villager.getUUID() : null;
+        placeTries = 0;
+        placeCloser = false;
         phase = Phase.PLACING;
         phaseTicks = 0;
         return TickResult.RUNNING;
@@ -879,12 +926,15 @@ public final class TradeTask extends BodyTask {
             phase = Phase.WAITING_JOB;
             return TickResult.RUNNING;
         }
-        if (who.getBoundingBox().getCenter().distanceToSqr(body.position())
-                > (JOB_SITE_NEAR + 2) * (JOB_SITE_NEAR + 2)) {
+        // Near enough to put the site down beside it; after a try that found no place, nearer than that.
+        double near = placeCloser ? PLACE_CLOSE : JOB_SITE_NEAR + 2;
+        if (who.getBoundingBox().getCenter().distanceToSqr(body.position()) > near * near) {
+            body.input().sneak = false;
             BotNavigator nav = nav(body);
             if (nav.state() != BotNavigator.State.WORKING) nav.goTo(who.blockPosition(), 1);
             return TickResult.RUNNING;
         }
+        stopOurCommand(nav(body));
         if (!body.isShiftKeyDown()) {
             body.input().sneak = true;
             return TickResult.RUNNING;
@@ -919,6 +969,14 @@ public final class TradeTask extends BodyTask {
         }
         body.input().sneak = false;
         body.input().clearLook();
+        if (++placeTries <= PLACE_TRIES) {
+            // The villager walked on while the body got ready, and nothing the body reaches from here is beside it:
+            // the body steps up to it and looks again, rather than calling a villager five blocks off unreachable.
+            placeCloser = true;
+            BotNavigator nav = nav(body);
+            if (nav.state() != BotNavigator.State.WORKING) nav.goTo(who.blockPosition(), 1);
+            return TickResult.RUNNING;
+        }
         return tidy(body, TickResult.failed(unreachable("a place beside the villager for the " + jobSiteKey.id(),
             "nowhere to put it down", "found nowhere within " + (int) JOB_SITE_NEAR + " blocks of the villager at "
                 + who.blockPosition().toShortString() + " to put the " + jobSiteKey.id() + " down")));
@@ -945,17 +1003,55 @@ public final class TradeTask extends BodyTask {
             return TickResult.RUNNING;
         }
         if (!professionOf(who).equals(profession)) {
+            // A village has more than one villager without a job, and the site is taken by whichever finds it first:
+            // the roll goes on with the one that works at it, as a player trades with whoever became the librarian.
+            Villager taker = null;
+            for (Villager other : body.serverLevel().getEntitiesOfClass(Villager.class, new AABB(site).inflate(SEARCH_RADIUS),
+                    Villager::isAlive)) {
+                if (other != who && other.getVillagerXp() == 0 && professionOf(other).equals(profession)
+                    && worksAt(other, site)) {
+                    taker = other;
+                    break;
+                }
+            }
+            if (taker != null) {
+                MegaBlockBot.LOGGER.info("{}: the villager at {} took the job of the {} at {}; the roll goes on with it",
+                    body.getGameProfile().getName(), taker.blockPosition().toShortString(), jobSiteKey.id(),
+                    site.toShortString());
+                villager = taker;
+                rolled = taker.getUUID();
+                windowTicks = 0;
+                notTaken = 0;
+                return TickResult.RUNNING;
+            }
+            if (!jobless(who)) {
+                // It took another job (a grindstone stood free): it will not take this one, and waiting is wasted.
+                MegaBlockBot.LOGGER.info("{}: the villager at {} became a {} instead; the {} at {} comes up",
+                    body.getGameProfile().getName(), who.blockPosition().toShortString(), professionOf(who),
+                    jobSiteKey.id(), site.toShortString());
+                unrollable.add(who.getUUID());
+                phase = Phase.TAKING_SITE;
+                phaseTicks = 0;
+                return TickResult.RUNNING;
+            }
             if (phaseTicks > PROFESSION_WAIT_TICKS) {
                 // It never took the job: the site comes up, and the task looks elsewhere for its trader.
                 MegaBlockBot.LOGGER.info("{}: the villager at {} did not take the job of the {} at {} in {} ticks",
                     body.getGameProfile().getName(), who.blockPosition().toShortString(), jobSiteKey.id(),
                     site.toShortString(), PROFESSION_WAIT_TICKS);
+                if (++notTaken >= NOT_TAKEN_LIMIT) {
+                    MegaBlockBot.LOGGER.info("{}: the villager at {} is let go: it left the job untaken {} times running",
+                        body.getGameProfile().getName(), who.blockPosition().toShortString(), notTaken);
+                    unrollable.add(who.getUUID());
+                    notTaken = 0;
+                }
                 phase = Phase.TAKING_SITE;
                 phaseTicks = 0;
                 return TickResult.RUNNING;
             }
             return TickResult.RUNNING;
         }
+        notTaken = 0;
         // A new profession, so offers nobody has seen: open the window (a look, as a player must) and note them.
         if (menu == null) {
             if (!body.canInteractWithEntity(who, 1.0)) {
@@ -1014,7 +1110,7 @@ public final class TradeTask extends BodyTask {
         if (!state.is(jobSiteBlock)) {
             MegaBlockBot.LOGGER.info("{}: the {} at {} comes up (roll {} of {})", body.getGameProfile().getName(),
                 jobSiteKey.id(), site.toShortString(), rolls, MAX_ROLLS);
-            forgetSite(body);
+            siteCameUp(body);
             return true;
         }
         if (phaseTicks > bound) {
@@ -1055,7 +1151,7 @@ public final class TradeTask extends BodyTask {
         if (!level.getBlockState(site).is(jobSiteBlock)) {
             MegaBlockBot.LOGGER.info("{}: the {} at {} comes up (roll {} of {})", body.getGameProfile().getName(),
                 jobSiteKey.id(), site.toShortString(), rolls, MAX_ROLLS);
-            forgetSite(body);
+            siteCameUp(body);
             return true;
         }
         return false;
@@ -1071,17 +1167,20 @@ public final class TradeTask extends BodyTask {
         String still = who == null || !who.isAlive() ? "minecraft:none" : professionOf(who);
         boolean reset = still.equals("minecraft:none") || still.equals("minecraft:nitwit");
         boolean pickedUp = jobSiteItem == null || MenuHand.carriedCount(body, jobSiteItem) >= 1 || siteEarned;
-        // The item of the broken site may lie out of reach: walk to it, as the body walks to any drop.
-        if (!pickedUp && phaseTicks > 20) walkToSiteDrop(body);
-        if (reset && pickedUp) {
-            if (who != null && unrollable.contains(who.getUUID())) {
-                rolled = null;
-                villager = null;
-                return look(body);
-            }
-            return roll(body);
+        // The item of the broken site may lie out of reach: it is walked to, as the body walks to any drop.
+        boolean fetching = !pickedUp && fetchSiteItem(body);
+        boolean letGo = who != null && unrollable.contains(who.getUUID());
+        if (pickedUp && letGo) {
+            // Not one to roll again (it took another job, or would not open its window): another is looked for.
+            rolled = null;
+            villager = null;
+            return look(body);
         }
-        if (phaseTicks <= PROFESSION_WAIT_TICKS) return TickResult.RUNNING;
+        if (reset && pickedUp) return roll(body);
+        // While the item is being fetched the wait is the pick-up's own, which has its bounds; with nothing left to
+        // fetch and nothing in hand the item is lost, and no wait brings it back.
+        if (fetching) return TickResult.RUNNING;
+        if (pickedUp && phaseTicks <= PROFESSION_WAIT_TICKS) return TickResult.RUNNING;
         // The profession did not go, or the item did not come in: the roll waits no longer than its own bound.
         MegaBlockBot.LOGGER.info("{}: gives up rolling the {} (its profession is still {}, and the site's item {}) after"
                 + " {} ticks", body.getGameProfile().getName(), profession, still,
@@ -1090,33 +1189,23 @@ public final class TradeTask extends BodyTask {
         return look(body);
     }
 
-    @Nullable
-    private ItemEntity nearestSiteDrop(BotPlayer body) {
-        ItemEntity nearest = null;
-        double nearestDistance = Double.MAX_VALUE;
-        AABB box = site == null ? new AABB(body.blockPosition()).inflate(8.0) : new AABB(site).inflate(8.0);
-        for (ItemEntity drop : body.serverLevel().getEntitiesOfClass(ItemEntity.class, box,
-                candidate -> !candidate.isRemoved() && candidate.getItem().is(jobSiteItem))) {
-            double distance = drop.distanceToSqr(body);
-            if (distance < nearestDistance) {
-                nearestDistance = distance;
-                nearest = drop;
-            }
-        }
-        return nearest;
+    /**
+     * The job site this task put down is broken: its item is fetched from where it stood, and what its villager
+     * showed is forgotten, since a villager that has not traded loses those offers with the job. A note left of them
+     * would have the next plan walk back to pay for an offer that is not there.
+     */
+    private void siteCameUp(BotPlayer body) {
+        lastSite = site;
+        sitePickup.start();
+        if (!siteEarned && villager != null) BotMemory.of(body.getUUID()).forgetOffers(villager.getUUID());
+        forgetSite(body);
     }
 
-    private void walkToSiteDrop(BotPlayer body) {
-        ItemEntity drop = nearestSiteDrop(body);
-        if (drop == null) return;
-        BotNavigator nav = nav(body);
-        if (drop.distanceToSqr(body) > 6.25) {
-            if (nav.state() != BotNavigator.State.WORKING) nav.goTo(drop.blockPosition(), 1);
-        } else {
-            if (nav.state() == BotNavigator.State.WORKING) stopOurCommand(nav);
-            body.input().lookAt(drop.position());
-            body.input().forward = 0.5F;
-        }
+    /** One tick of fetching the broken site's item; true while there is one to walk to or wait for. */
+    private boolean fetchSiteItem(BotPlayer body) {
+        if (lastSite == null || jobSiteItem == null) return false;
+        Item wanted = jobSiteItem;
+        return sitePickup.tick(this, body, drop -> drop.getItem().is(wanted), new AABB(lastSite).inflate(8.0));
     }
 
     private void forgetSite(BotPlayer body) {
@@ -1150,6 +1239,10 @@ public final class TradeTask extends BodyTask {
     private TickResult tidyTick(BotPlayer body) {
         if (site != null) breakSite(body, PROFESSION_WAIT_TICKS);
         if (site != null && phaseTicks <= PROFESSION_WAIT_TICKS) return TickResult.RUNNING;
+        // The site's item comes in before the answer is given: one left lying is one the next plan makes again.
+        if (site == null && jobSiteItem != null && MenuHand.carriedCount(body, jobSiteItem) < 1 && fetchSiteItem(body)) {
+            return TickResult.RUNNING;
+        }
         TickResult answer = pending == null ? TickResult.COMPLETED : pending;
         pending = null;
         release(body);
@@ -1169,6 +1262,7 @@ public final class TradeTask extends BodyTask {
 
     @Override
     protected void letGo(BotPlayer body) {
+        sitePickup.rest();
         close(body);
         body.input().reset();
     }

@@ -682,6 +682,18 @@ that undercuts the trade still winning as it always did. The leaf's source id ri
   villager's own `JOB_SITE` memory says which block that is), nor one this task already failed to take up; a second
   trade of the same profession that needs a roll of its own therefore ends `MissingInput` for the job-site item and
   the next plan brings one.
+- **What a real village taught the roll** (live runs of 2026-11-27, taiga village, several villagers without a job):
+  the job site is taken by whichever jobless villager finds it first, so the roll goes on with the one whose brain
+  says it works there (`JOB_SITE`), not only the one the site was put beside; a villager that takes another job
+  instead (a grindstone stood free) or leaves the site untaken twice running (`NOT_TAKEN_LIMIT`) is let go and
+  another is rolled; a villager that wandered while the body got its lectern out is stepped up to (`PLACE_TRIES`)
+  rather than called unreachable; a villager with no profession is never asked for its window. The broken site's
+  item is fetched by the shared `DropPickup` (walking at it missed about one in twenty, and a lectern not picked up
+  is nine books to make again), also when the task tidies up at its end. When a rolled villager's site comes up
+  its noted offers are forgotten: it loses them with the job, and a note left behind had the next plan walk back
+  to pay for an offer that was gone. With these a roll takes about five seconds.
+- Not done: a reroll that is cancelled or aborted leaves its job site standing and remembered, and the plan that
+  follows does not know it stands, so it makes another before the task takes the first one up.
 - `progress()` says what it is doing: looking for a villager, looking at offers, the roll it is on, paying.
 
 ## `use_on`

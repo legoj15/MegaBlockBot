@@ -212,6 +212,10 @@ runs wherever the command tree is built (a worker thread while data loads).
   nothing is carried out: the check that the language layer (the model, when one is configured) turns loose words
   into the right goals. `scripts/phrases/loose-goals.txt` is the list for issue 20, each line with the goal it
   should become. Exit 0 every line was answered, 1 one or more got no answer, 3 no server.
+- `scripts/evidence-mending.ps1 -Node <node> -Profile assisted|strict [-BotAt "x z"]` is the whole evidence run for
+  the librarian reroll: a fresh world (seed 4242), a named chest of emeralds, leather and sugar cane beside the bot,
+  an adult villager without a profession summoned into the taiga village at 80 -496, then the mending-book goal
+  through `bot-goal.ps1`. Its header says what is set up and what the bot does itself.
 - The first three scripts import `scripts/lib/MbbNodes.psm1` for the command-line sweep that finds and kills a node's
   leftover JVMs (the server JVM by its `versions/<node>/` path, the Gradle client by the wrapper jar and task name).
 - GameTest classes live in `com.legoj15.megablockbot.game.gametest`, use vanilla `@GameTest` with

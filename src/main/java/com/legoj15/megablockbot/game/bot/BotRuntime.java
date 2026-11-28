@@ -346,6 +346,7 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
             if (tidyTick(current)) return;
         }
         executor.tick(current, hold);
+        logStepEnd(current.getGameProfile().getName());
         if (planMayHaveChanged) {
             // A task was created this tick: the plan it belongs to is logged once, when it is not the one logged last.
             planMayHaveChanged = false;
@@ -360,6 +361,23 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         boolean active = currentTask != null && (currentTask.state() == TaskState.RUNNING || currentTask.state() == TaskState.PAUSED);
         if (taskWasActive && !active) current.input().reset();
         taskWasActive = active;
+    }
+
+    /** The step the current task is for, and the task whose end was logged last. */
+    private String currentKind = "";
+    private Task<BotPlayer> loggedEnd;
+
+    /**
+     * One INFO line when a step's task ends, saying how: a failed step is retried or replanned by the executor without
+     * a word otherwise, and a live run that keeps starting the same step over cannot be read from the log.
+     */
+    private void logStepEnd(String name) {
+        Task<BotPlayer> task = currentTask;
+        if (task == null || task == loggedEnd || !task.state().terminal()) return;
+        loggedEnd = task;
+        Failure failure = task.failure();
+        MegaBlockBot.LOGGER.info("{} step ended: {} {}{}", name, currentKind, task.state(),
+            failure == null ? "" : ": " + failure.kind() + ", " + BotSpeech.reason(failure));
     }
 
     /** Set when a task is created; the plan is then compared with the one logged last (see {@link #think}). */
@@ -523,8 +541,10 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     @Override
     public Task<BotPlayer> createTask(NodeSpec leaf, Map<String, String> hints) {
         // The registry answers a kind nobody registered with a task that fails at once, naming the kind.
+        if (body != null) logStepEnd(body.getGameProfile().getName());
         Task<BotPlayer> task = TaskRegistry.create(leaf, hints);
         currentTask = task;
+        currentKind = leaf.taskKind() + " (" + BotSpeech.goal(leaf.goal()) + ")";
         planMayHaveChanged = true;
         String identity = NodeIdentity.of(leaf);
         if (!identity.equals(stepIdentity) && body != null) {
