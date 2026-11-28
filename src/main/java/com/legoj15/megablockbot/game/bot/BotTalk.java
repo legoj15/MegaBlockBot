@@ -133,7 +133,7 @@ public final class BotTalk {
             case Intent.SetGoal set -> {
                 boolean busy = runtime.view().goal() != null;
                 runtime.submit(set.goal());
-                runtime.say((busy ? "Queued: " : "On it: ") + BotSpeech.goal(set.goal()) + ".");
+                runtime.say((busy ? "Queued: " : "On it: ") + runtime.goalText(set.goal()) + ".");
             }
             case Intent.Cancel cancel -> {
                 if (runtime.view().goal() == null && runtime.view().queue().isEmpty()) {

@@ -267,7 +267,8 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
                 MegaBlockBot.LOGGER.warn("A task could not say what it is doing", e);
             }
         }
-        String text = BotSpeech.status(view, lastResult == null ? null : BotSpeech.result(lastResult), onStep, progress);
+        String text = BotSpeech.status(view, lastResult == null ? null : BotSpeech.result(lastResult, this::playerName),
+            onStep, progress, this::playerName);
         // The live danger zones beside the reflex line: they are why a plan goes round a place (issue 29).
         if (body != null) {
             String zones = BotMemory.of(body.getUUID()).liveZonePhrase(body.level().getGameTime());
@@ -325,6 +326,11 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         if (feedback != null && !(owner != null && feedback.getEntity() == owner)) {
             feedback.sendSuccess(() -> Component.literal(line), false);
         }
+    }
+
+    /** What a goal is called when the bot speaks of it: a player it names is said by name, not by id. */
+    public String goalText(Goal goal) {
+        return BotSpeech.goal(goal, this::playerName);
     }
 
     /** A player's name by their id, for the words a goal's result says (the id when nobody answers to it). */

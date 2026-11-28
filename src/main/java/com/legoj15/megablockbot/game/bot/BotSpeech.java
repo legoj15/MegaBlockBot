@@ -138,12 +138,19 @@ public final class BotSpeech {
      * task gives for what it is doing now (empty for none): {@code On it for 2m 13s: heading for a block at 1 2 3.}
      */
     static String status(ExecutorView view, String lastResult, long stepTicks, String progress) {
+        return status(view, lastResult, stepTicks, progress, id -> id);
+    }
+
+    /** As above, saying a player by name where a goal names one by id ({@code names}: id to name, or the id). */
+    static String status(ExecutorView view, String lastResult, long stepTicks, String progress,
+                         java.util.function.Function<String, String> names) {
         StringBuilder text = new StringBuilder();
         if (view.goal() == null) {
             text.append("Idle, no goal.");
             if (lastResult != null) text.append(" Last: ").append(lastResult);
         } else {
-            text.append("Goal: ").append(goal(view.goal())).append(" (").append(view.status().name().toLowerCase(Locale.ROOT)).append(").");
+            text.append("Goal: ").append(goal(view.goal(), names)).append(" (")
+                .append(view.status().name().toLowerCase(Locale.ROOT)).append(").");
             text.append(' ').append(step(view));
             text.append(onTheStep(stepTicks, progress));
             if (view.reflexHeld()) text.append(" A reflex holds the body.");
@@ -151,7 +158,7 @@ public final class BotSpeech {
         }
         if (!view.queue().isEmpty()) {
             List<String> queued = new ArrayList<>();
-            for (Goal queuedGoal : view.queue()) queued.add(goal(queuedGoal));
+            for (Goal queuedGoal : view.queue()) queued.add(goal(queuedGoal, names));
             text.append(" Queued: ").append(String.join("; ", queued)).append('.');
         }
         return text.toString();
