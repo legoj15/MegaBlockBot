@@ -20,6 +20,7 @@ import java.util.Set;
 import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
@@ -288,7 +289,9 @@ abstract class StationTask extends BodyTask {
      * stopped before it could take back (a restart, a cancel, a failure): the planner counts the station in the
      * inventory, not in the world, so one left standing would cost a goal its materials. It is the same break and
      * pickup the task ends with, so it ends the same way: the item back in the inventory, or a failure saying why not.
-     * Which task it is depends on the block that stands there.
+     * Which task it is depends on the block that stands there: one of the stations above, or — when the block is some
+     * profession's job site — the job-site take-up, for a lectern a cancelled reroll left standing is as much this
+     * body's to take back as its crafting table.
      */
     public static Task<BotPlayer> takeUp(ServerLevel level, BlockPos standing) {
         BlockState state = level.getBlockState(standing);
@@ -297,15 +300,21 @@ abstract class StationTask extends BodyTask {
         if (state.is(Blocks.SMOKER)) return SmeltTask.takeUp(standing, Items.SMOKER, Blocks.SMOKER);
         if (state.is(Blocks.STONECUTTER)) return StonecutTask.takeUp(standing);
         if (state.is(Blocks.SMITHING_TABLE)) return SmithTask.takeUp(standing);
+        Item item = state.getBlock().asItem();
+        if (item != Items.AIR && TradeTask.isJobSiteOfAProfession(state.getBlock())) {
+            return new JobSiteTakeUp(standing, item, state.getBlock());
+        }
         return CraftTask.takeUp(standing);
     }
 
     /**
-     * The nearest station within reach that this body's memory says it placed and the tidy step may take up, or null.
-     * A crafting table and a smithing table always qualify (a break by hand drops them); a furnace and a stonecutter
-     * while the body carries a tool that makes them drop, for a furnace or a stonecutter broken by hand drops nothing
-     * and there would be no item to wait for — a furnace whether or not it holds anything, for breaking one drops what
-     * it holds beside it and the take-up picks that up too. What {@link #takeUp} is for: a
+     * The nearest block this body left standing that the tidy step may take up, or null: a station within reach that
+     * its memory says it placed — a crafting table and a smithing table always (a break by hand drops them); a
+     * furnace and a stonecutter while the body carries a tool that makes them drop, for one broken by hand drops
+     * nothing and there would be no item to wait for, a furnace whether or not it holds anything, for breaking one
+     * drops what it holds beside it and the take-up picks that up too — or a job site it put down for a reroll that
+     * no villager is to keep ({@link #leftoverJobSite}), wherever in the dimension it stands. A position marked kept
+     * in the body's memory is nobody's to take up, whatever block stands there. What {@link #takeUp} is for: a
      * runtime asks after a restart and when a goal ends.
      */
     @Nullable
@@ -319,6 +328,7 @@ abstract class StationTask extends BodyTask {
         for (BlockPos pos : BlockPos.betweenClosed(centre.offset(-STATION_SEARCH_RADIUS, -STATION_SEARCH_RADIUS, -STATION_SEARCH_RADIUS),
                 centre.offset(STATION_SEARCH_RADIUS, STATION_SEARCH_RADIUS, STATION_SEARCH_RADIUS))) {
             if (!level.isLoaded(pos) || !memory.isPlaced(dimension, pos) || !body.canInteractWithBlock(pos, 0.0)) continue;
+            if (memory.isKept(dimension, pos)) continue; // a job site kept for a villager is not a leftover
             if (!tidyMayTakeUp(level, body, pos)) continue;
             double distance = pos.distToCenterSqr(body.getEyePosition());
             if (distance < bestDistance) {
@@ -326,7 +336,115 @@ abstract class StationTask extends BodyTask {
                 best = pos.immutable();
             }
         }
+        BlockPos site = leftoverJobSite(body, level, memory, dimension);
+        if (site != null && (best == null || site.distToCenterSqr(body.getEyePosition()) < bestDistance)) best = site;
         return best;
+    }
+
+    /**
+     * The nearest remembered placed block in the dimension that is some profession's job-site block and no villager is
+     * to keep, or null. A reroll that was cancelled or aborted leaves its lectern standing and remembered, and the
+     * planner knows only what the body carries, so the plan that follows would make another before the trade task
+     * took the first up; the tidy step takes this one up first instead. A site marked kept is kept only while some
+     * villager's brain names it as its job site — the villager it was kept for keeps the offer only while it keeps
+     * the job — so one nobody works at any more is unmarked and taken up like any other. A villager that has traded
+     * works at its site for good and is never taken from, and a block whose break the body has not the tool for is
+     * left standing (breaking it would drop nothing), remembered for a body that carries one.
+     */
+    @Nullable
+    private static BlockPos leftoverJobSite(BotPlayer body, ServerLevel level, BotMemory memory, String dimension) {
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (BlockPos at : memory.placedIn(dimension)) {
+            if (!level.isLoaded(at)) continue; // a read never loads a chunk
+            BlockState state = level.getBlockState(at);
+            if (!TradeTask.isJobSiteOfAProfession(state.getBlock())) continue;
+            if (memory.isKept(dimension, at)) {
+                if (TradeTask.aVillagerWorksAt(level, at)) continue;
+                // Nobody's brain names it any more: the villager it was kept for is gone or has lost the profession,
+                // and with it the offer the site was kept for. The mark is off before the block goes.
+                memory.forgetKept(dimension, at);
+                MegaBlockBot.LOGGER.info("{}: the job site at {} was kept for a villager that no longer works there;"
+                        + " it is the body's to take up again", body.getGameProfile().getName(), at.toShortString());
+            } else if (TradeTask.keptByATrader(level, at)) {
+                continue;
+            }
+            if (state.getBlock().asItem() == Items.AIR) continue; // nothing would come of the break
+            if (state.requiresCorrectToolForDrops() && !dropsFor(body, state)) continue;
+            double distance = at.distToCenterSqr(body.getEyePosition());
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = at.immutable();
+            }
+        }
+        return best;
+    }
+
+    /**
+     * The take-up for a block that is a villager's job site (the lectern of a reroll): the stations' own break and
+     * pickup, working nothing, for a block that is nobody's station. The item and block come with it, for a job site
+     * can be any profession's.
+     */
+    static final class JobSiteTakeUp extends StationTask {
+        private final Item item;
+        private final Block block;
+        private final String name;
+
+        JobSiteTakeUp(BlockPos standing, Item item, Block block) {
+            super(standing);
+            this.item = item;
+            this.block = block;
+            this.name = BuiltInRegistries.ITEM.getKey(item).getPath().replace('_', ' ');
+        }
+
+        @Override
+        protected Item stationItem() {
+            return item;
+        }
+
+        @Override
+        protected Block stationBlock() {
+            return block;
+        }
+
+        @Override
+        protected String stationName() {
+            return name;
+        }
+
+        @Override
+        protected String stationVerb() {
+            return "put a " + name + " down";
+        }
+
+        @Override
+        protected boolean stationMenuOpen(BotPlayer body) {
+            return false; // a job site is never opened: the take-up only breaks the block and picks its item up
+        }
+
+        @Override
+        protected void beginStation(BotPlayer body) {
+            // nothing to begin: the station's item and block came with the constructor, and there is no work
+        }
+
+        @Override
+        protected boolean workDone(BotPlayer body) {
+            return true; // there is no work: taking the block up is all this task does
+        }
+
+        @Override
+        protected TickResult work(BotPlayer body) {
+            return complete(body);
+        }
+
+        @Override
+        protected boolean takesUpStation(BotPlayer body) {
+            // The stonecut task's rule: a job site broken without the tool it needs drops nothing, so one the body
+            // cannot make drop is left standing, remembered, for a body that carries the tool.
+            if (station == null) return false;
+            BlockState state = body.serverLevel().getBlockState(station);
+            return !state.requiresCorrectToolForDrops() || dropsFor(body, state);
+        }
     }
 
     private static boolean tidyMayTakeUp(ServerLevel level, BotPlayer body, BlockPos pos) {

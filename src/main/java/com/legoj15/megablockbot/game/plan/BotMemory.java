@@ -24,7 +24,8 @@ import net.minecraft.nbt.Tag;
 
 /**
  * What one body remembers between snapshots (design 3.4, 3.5): the blocks it placed, which it may break and take from
- * again, and the containers whose contents it has seen. A snapshot reads the world as it is now and nothing else, so
+ * again, and the containers whose contents it has seen. A placed block can also carry a kept mark: a job site left
+ * standing because a villager is to keep it. A snapshot reads the world as it is now and nothing else, so
  * facts the world cannot tell (who placed a table, what was in a chest the bot walked away from) live here.
  *
  * <p>It also holds the containers the owner named as supply containers (design 3.5): ones the body may take from
@@ -120,6 +121,9 @@ public final class BotMemory {
 
     // Dimension id to BlockPos.asLong() of every block placed there.
     private final Map<String, Set<Long>> placed = new HashMap<>();
+    // Dimension id to BlockPos.asLong() of every placed block kept for a villager (its job site, which the trade
+    // task leaves standing on purpose: see keepPlaced).
+    private final Map<String, Set<Long>> kept = new HashMap<>();
     private final Map<ContainerKey, RememberedContainer> containers = new LinkedHashMap<>();
     private final Map<ContainerKey, SupplyContainer> supply = new LinkedHashMap<>();
     // The villager whose window was open, by its UUID.
@@ -161,14 +165,43 @@ public final class BotMemory {
 
     public void notePlaced(String dimension, BlockPos pos) {
         placed.computeIfAbsent(dimension, d -> new HashSet<>()).add(pos.asLong());
+        forgetKept(dimension, pos); // a block placed again is not kept: the mark is set when a villager earns it again
     }
 
-    /** For a block the body broke again, or one it saw gone. */
+    /** For a block the body broke again, or one it saw gone: a kept mark it carried goes with it. */
     public void forgetPlaced(String dimension, BlockPos pos) {
         Set<Long> inDimension = placed.get(dimension);
         if (inDimension == null) return;
         inDimension.remove(pos.asLong());
         if (inDimension.isEmpty()) placed.remove(dimension);
+        forgetKept(dimension, pos);
+    }
+
+    /**
+     * Marks the placed block at that position as kept for a villager: a job site the trade task leaves standing
+     * because the villager it gave the job to showed the offer the goal asked for. The tidy step and a later trade
+     * task's own look leave a marked site where it stands.
+     */
+    public void keepPlaced(String dimension, BlockPos pos) {
+        kept.computeIfAbsent(dimension, d -> new HashSet<>()).add(pos.asLong());
+    }
+
+    /** Whether the placed block at that position is marked kept for a villager. */
+    public boolean isKept(String dimension, BlockPos pos) {
+        Set<Long> inDimension = kept.get(dimension);
+        return inDimension != null && inDimension.contains(pos.asLong());
+    }
+
+    /**
+     * Takes the kept mark off the placed block at that position. The site was kept for a villager that no longer
+     * works there (it is gone, or it lost the profession when somebody else took the block's job away), and with it
+     * went the offer the site was kept for: the block is the body's to take up again.
+     */
+    public void forgetKept(String dimension, BlockPos pos) {
+        Set<Long> inDimension = kept.get(dimension);
+        if (inDimension == null) return;
+        inDimension.remove(pos.asLong());
+        if (inDimension.isEmpty()) kept.remove(dimension);
     }
 
     public boolean isPlaced(String dimension, BlockPos pos) {
@@ -436,6 +469,17 @@ public final class BotMemory {
         }
         tag.put("placed", placedTag);
 
+        // Kept marks ride with the placed positions they belong to; absent when there is none, so a body that never
+        // kept a job site for a villager saves what it always did.
+        if (!kept.isEmpty()) {
+            CompoundTag keptTag = new CompoundTag();
+            for (Map.Entry<String, Set<Long>> entry : new TreeMap<>(kept).entrySet()) {
+                long[] positions = entry.getValue().stream().mapToLong(Long::longValue).sorted().toArray();
+                keptTag.putLongArray(entry.getKey(), positions);
+            }
+            tag.put("kept", keptTag);
+        }
+
         ListTag containerList = new ListTag();
         for (RememberedContainer container : containers.values()) {
             CompoundTag one = new CompoundTag();
@@ -558,6 +602,15 @@ public final class BotMemory {
                 if (!placedTag.contains(dimension, Tag.TAG_LONG_ARRAY)) continue;
                 Set<Long> positions = memory.placed.computeIfAbsent(dimension, d -> new HashSet<>());
                 for (long pos : placedTag.getLongArray(dimension)) positions.add(pos);
+            }
+        }
+        // A save from before the kept marks (or one whose body kept none) simply has no part to read.
+        if (tag.contains("kept", Tag.TAG_COMPOUND)) {
+            CompoundTag keptTag = tag.getCompound("kept");
+            for (String dimension : keptTag.getAllKeys()) {
+                if (!keptTag.contains(dimension, Tag.TAG_LONG_ARRAY)) continue;
+                Set<Long> positions = memory.kept.computeIfAbsent(dimension, d -> new HashSet<>());
+                for (long pos : keptTag.getLongArray(dimension)) positions.add(pos);
             }
         }
         if (tag.contains("containers", Tag.TAG_LIST)) {

@@ -193,6 +193,8 @@ public final class TradeGameTests {
      * villager offers the bookshelf, and the leaf then ends {@code MissingInput} naming the emeralds — with the
      * lectern still standing and remembered. The offer is what the rolls were for, and a villager that has not traded
      * loses it with its job site: taking the lectern up here would throw the offer away before the plan could pay.
+     * The standing lectern is also marked kept in the body's memory, which is what tells the tidy step and a later
+     * task to leave it there.
      */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = REROLL_TICKS, batch = "trade_arolledofferkeepsitssite")
     public static void aRolledVillagerThatOffersTheItemKeepsItsJobSiteWhenTheBodyCannotPay(GameTestHelper helper) {
@@ -212,6 +214,8 @@ public final class TradeGameTests {
             if (!lecterns.isEmpty()) {
                 helper.assertTrue(BotMemory.of(rig.id()).isPlaced(helper.getLevel().dimension().location().toString(),
                     helper.absolutePos(lecterns.get(0))), "the standing lectern is not remembered as the body's");
+                helper.assertTrue(BotMemory.of(rig.id()).isKept(helper.getLevel().dimension().location().toString(),
+                    helper.absolutePos(lecterns.get(0))), "the standing lectern is not marked kept for its villager");
             }
             rig.assertWindowClosed();
             rig.pass();

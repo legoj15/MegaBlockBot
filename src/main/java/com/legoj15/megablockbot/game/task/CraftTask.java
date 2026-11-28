@@ -109,9 +109,10 @@ public final class CraftTask extends StationTask {
     /**
      * The nearest station this body left standing that the tidy step may take up, or null: a crafting table, or one
      * of the body's own furnaces while the body carries a tool that makes it drop, whether or not it holds anything
-     * (broken, it drops what it holds beside it, and the take-up picks that up too). The runtime asks this after a
-     * load and when a goal ends; the machinery is the base class's ({@link StationTask#leftover}), for both kinds of
-     * station, and this is the public face of it because the base class stays package-private.
+     * (broken, it drops what it holds beside it, and the take-up picks that up too), or a job site the body put down
+     * for a reroll that no villager is to keep (a lectern). The runtime asks this after a load and when a goal ends;
+     * the machinery is the base class's ({@link StationTask#leftover}), and this is the public face of it because the
+     * base class stays package-private.
      */
     @Nullable
     public static BlockPos leftoverStation(BotPlayer body) {

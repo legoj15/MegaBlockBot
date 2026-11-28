@@ -34,6 +34,7 @@ import javax.annotation.Nullable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.GlobalPos;
+import net.minecraft.core.Holder;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action;
 import net.minecraft.resources.ResourceLocation;
@@ -42,8 +43,10 @@ import net.minecraft.tags.StructureTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
+import net.minecraft.world.entity.ai.village.poi.PoiType;
 import net.minecraft.world.entity.npc.Villager;
 import net.minecraft.world.entity.npc.VillagerData;
+import net.minecraft.world.entity.npc.VillagerProfession;
 import net.minecraft.world.inventory.ClickType;
 import net.minecraft.world.inventory.MerchantMenu;
 import net.minecraft.world.item.BlockItem;
@@ -84,10 +87,13 @@ import net.minecraft.world.phys.BlockHitResult;
  *
  * <p>Other villagers' job sites are never touched (only one the body put down itself is taken up), and a villager is
  * never moved, hurt, cured or bred. A job site the task put down for a villager that then showed the offer the goal
- * asks for stays where it is and stays remembered, whether the body could pay at once or not: the offer is what the
- * rolls were for, and a villager that has not traded loses it with its job site. One put down for a villager that
- * never showed the offer is taken up again on every exit. A job site of this body that a villager who has traded
- * works at is never taken up by a later task. Whichever way the task ends, the window is closed and the cursor empty.
+ * asks for stays where it is and stays remembered, marked kept in the body's memory from that moment, whether the
+ * body could pay at once or not: the offer is what the rolls were for, and a villager that has not traded loses it
+ * with its job site. One put down for a villager that never showed the offer is taken up again on every exit. A job
+ * site of this body that a villager who has traded works at, or one marked kept, is never taken up by a later task
+ * or by the runtime's tidy step; a site a cancelled or aborted roll left standing is that step's to take up (see
+ * {@code docs/bot-runtime.md}, "A station left standing"). Whichever way the task ends, the window is closed and the
+ * cursor empty.
  *
  * <p><b>A noted villager.</b> A leaf whose price the plan took from a noted offer names that villager and where it
  * stood ({@code villager}, {@code at}): the task goes there first and looks at that one first, so the price the plan
@@ -456,7 +462,8 @@ public final class TradeTask extends BodyTask {
 
     /**
      * The nearest job-site block this body placed in this dimension that still stands, or null: a site a roll put down
-     * and never took up, recovered rather than replaced.
+     * and never took up, recovered rather than replaced. One marked kept, or one a villager that has traded works at,
+     * is not the body's to take up again.
      */
     @Nullable
     private BlockPos standingSite(BotPlayer body) {
@@ -466,7 +473,8 @@ public final class TradeTask extends BodyTask {
         for (BlockPos at : BotMemory.of(body.getUUID()).placedIn(dimension)) {
             if (!body.serverLevel().isLoaded(at)) continue; // a read never loads a chunk
             if (!body.serverLevel().getBlockState(at).is(jobSiteBlock)) continue;
-            if (leftStanding.contains(at) || keptByATrader(body.serverLevel(), at)) continue;
+            if (leftStanding.contains(at) || BotMemory.of(body.getUUID()).isKept(dimension, at)
+                || keptByATrader(body.serverLevel(), at)) continue;
             double distance = at.distSqr(body.blockPosition());
             if (distance < nearestDistance) {
                 nearestDistance = distance;
@@ -477,13 +485,44 @@ public final class TradeTask extends BodyTask {
     }
 
     /**
+     * Whether some villager profession takes its job at this block (a lectern makes a librarian): the professions'
+     * own job-site predicates read against the point-of-interest registry, the way the trade sampler reads them when
+     * it names a trade's job-site item. Any profession's block counts, not only the leaf's own: a site this body put
+     * down for one roll is left standing whatever profession its villager took there.
+     */
+    static boolean isJobSiteOfAProfession(Block block) {
+        for (VillagerProfession profession : BuiltInRegistries.VILLAGER_PROFESSION) {
+            for (Holder<PoiType> poi : BuiltInRegistries.POINT_OF_INTEREST_TYPE.holders().toList()) {
+                if (!profession.heldJobSite().test(poi)) continue;
+                for (BlockState state : poi.value().matchingStates()) {
+                    if (state.getBlock() == block) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * Whether a villager that has traded works at this job site. Such a site stays: the villager restocks at it, and
      * the trades it has made are why it was put down. The villager's own brain says which block is its job site.
      */
-    private static boolean keptByATrader(ServerLevel level, BlockPos at) {
+    static boolean keptByATrader(ServerLevel level, BlockPos at) {
         AABB box = new AABB(at).inflate(SEARCH_RADIUS);
         for (Villager worker : level.getEntitiesOfClass(Villager.class, box, Villager::isAlive)) {
             if (worker.getVillagerXp() > 0 && worksAt(worker, at)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Whether any villager's brain names this block as the job site it works at, traded or not. A site marked kept is
+     * kept only while somebody does: the villager it was kept for keeps the offer the goal asked for only while it
+     * keeps the job, and nobody's brain naming the block any more means the offer went with the job.
+     */
+    static boolean aVillagerWorksAt(ServerLevel level, BlockPos at) {
+        AABB box = new AABB(at).inflate(SEARCH_RADIUS);
+        for (Villager worker : level.getEntitiesOfClass(Villager.class, box, Villager::isAlive)) {
+            if (worksAt(worker, at)) return true;
         }
         return false;
     }
@@ -773,9 +812,13 @@ public final class TradeTask extends BodyTask {
     private TickResult pay(BotPlayer body, Villager who, int index) {
         MerchantOffer offer = who.getOffers().get(index);
         // The villager this task gave the job shows the offer the rolls were for: its site stays down from here on,
-        // whether the body can pay now or a later plan brings the price.
+        // whether the body can pay now or a later plan brings the price, and is marked kept so the tidy step and a
+        // later task leave it for the villager.
         boolean ours = site != null;
-        if (ours) siteEarned = true;
+        if (ours) {
+            siteEarned = true;
+            BotMemory.of(body.getUUID()).keepPlaced(dimension, site);
+        }
         int total = 0;
         Failure.MissingInput missing = null;
         for (Map.Entry<ItemKey, Integer> charge : chargesOf(offer).entrySet()) {

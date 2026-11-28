@@ -224,6 +224,20 @@ stood there, not a goal's failure; the station stays, remembered. A station the 
 standing and remembered too (the tidy task completes, and looks again at the next goal's end). Covered by
 `BotRuntimeGameTests.aTableLeftStandingByALogoutIsTakenUp`.
 
+A job site this body put down for a reroll is the same question's answer (issue #15, the leftover): a lectern a cancelled
+or aborted roll left standing is remembered as placed, and the planner counts it in the inventory too, never in the
+world, so the plan that follows would make another (nine books) before the trade task took the first up. The tidy step
+therefore also takes up the nearest remembered placed block that is some profession's job-site block (read from the
+point-of-interest registry, as the trade sampler reads it when it names a trade's job-site item), wherever in the
+dimension it stands — unless the memory marks the position kept, which the trade task does the moment the villager it
+rolled showed the offer the goal asked for (exactly when it leaves the site standing), or a villager that has traded
+works at it. A kept site nobody's brain names as its job site any more is unmarked first and taken up like any other:
+the villager it was kept for is gone or has lost the profession, and with it the offer. The take-up is the stations'
+own (`StationTask.takeUp`, whose job-site branch works nothing), which walks to the block when it stands out of reach,
+as far as `StationTask.RETURN_RADIUS` (24) blocks from the body; a break the body carries no tool for is never begun.
+Covered by `BotRuntimeGameTests.aLecternLeftStandingIsTakenUpWhenAGoalEnds` and
+`BotRuntimeGameTests.aKeptLecternIsLeftForTheVillagerThatWorksAtIt`.
+
 ## `smelt`
 
 Leaf params: the craft leaf's with an empty `layout` — `recipe` (a variant id: the game recipe's id, `#` and the fuel
@@ -709,14 +723,17 @@ that undercuts the trade still winning as it always did. The leaf's source id ri
   with the brain; the default stays strict survival.
 - Other villagers' job sites are never touched (only one the body put down itself is taken up), and a villager is never
   moved, hurt, cured or bred. On every exit the window is closed and the cursor emptied. A job site put down for a
-  villager that then showed the offer the goal asks for stays where it is and stays remembered, whether the body
-  could pay at once or not: the offer is what the rolls were for, and a villager that has not traded loses it with
-  its job site (before 2026-11-27 a body that could not pay took the lectern up and threw the offer away). One put
-  down for a villager that never showed the offer is taken up again first, on every exit including the search's own
-  failures. A later task never takes up a job site of this body that a villager who has traded works at (the
-  villager's own `JOB_SITE` memory says which block that is), nor one this task already failed to take up; a second
-  trade of the same profession that needs a roll of its own therefore ends `MissingInput` for the job-site item and
-  the next plan brings one.
+  villager that then showed the offer the goal asks for stays where it is and stays remembered, marked kept in the
+  body's memory from that moment on, whether the body could pay at once or not: the offer is what the rolls were for,
+  and a villager that has not traded loses it with its job site (before 2026-11-27 a body that could not pay took the
+  lectern up and threw the offer away). One put down for a villager that never showed the offer is taken up again
+  first, on every exit including the search's own failures. A later task never takes up a job site of this body that
+  a villager who has traded works at (the villager's own `JOB_SITE` memory says which block that is), nor one marked
+  kept, nor one this task already failed to take up; a second trade of the same profession that needs a roll of its
+  own therefore ends `MissingInput` for the job-site item and the next plan brings one. A site a cancelled or aborted
+  roll leaves standing is no longer the next plan's problem either: the runtime's tidy step takes it up as it takes a
+  crafting table up ("A station left standing"), and a marked site is left while some villager's brain still names it
+  as its job site.
 - **What a real village taught the roll** (live runs of 2026-11-27, taiga village, several villagers without a job):
   the job site is taken by whichever jobless villager finds it first, so the roll goes on with the one whose brain
   says it works there (`JOB_SITE`), not only the one the site was put beside; a villager that takes another job
@@ -727,8 +744,6 @@ that undercuts the trade still winning as it always did. The leaf's source id ri
   is nine books to make again), also when the task tidies up at its end. When a rolled villager's site comes up
   its noted offers are forgotten: it loses them with the job, and a note left behind had the next plan walk back
   to pay for an offer that was gone. With these a roll takes about five seconds.
-- Not done: a reroll that is cancelled or aborted leaves its job site standing and remembered, and the plan that
-  follows does not know it stands, so it makes another before the task takes the first one up.
 - `progress()` says what it is doing: looking for a villager, looking at offers, the roll it is on, paying.
 
 ## `assemble`

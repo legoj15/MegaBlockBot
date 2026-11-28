@@ -65,8 +65,11 @@ import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.npc.Villager;
+import net.minecraft.world.entity.npc.VillagerProfession;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.CraftingMenu;
 import net.minecraft.world.item.Item;
@@ -1153,6 +1156,88 @@ public final class BotRuntimeGameTests {
         });
     }
 
+    /**
+     * A lectern this body placed stands in the arena (set-up, standing in for a reroll that was cancelled or aborted:
+     * the memory holds it as placed and block safety as the body's own) and no villager is near. A goal that already
+     * holds ends at once, and the tidy step that follows every goal's end takes the lectern up as it takes a crafting
+     * table up: the lectern's item ends in the inventory and none stands, so the next plan counts it instead of making
+     * another (nine books).
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 400, batch = "rt_alecternleftstandingista")
+    public static void aLecternLeftStandingIsTakenUpWhenAGoalEnds(GameTestHelper helper) {
+        floor(helper);
+        BlockPos lecternAt = new BlockPos(9, FLOOR_Y + 1, 8);
+        helper.setBlock(lecternAt, Blocks.LECTERN);
+        Rig rig = Rig.spawn(helper, "tlect", null, 400);
+        String dimension = helper.getLevel().dimension().location().toString();
+        BlockPos at = helper.absolutePos(lecternAt);
+        BotMemory.of(rig.id()).notePlaced(dimension, at);
+        // What a real roll leaves behind: the block-safety record of its own placement, so the body may break it again.
+        BlockSafety.of(helper.getLevel().getServer()).noteBotPlaced(rig.body(), helper.getLevel(), at);
+        rig.give(Items.STONE, 1);
+        rig.runtime().submit(new Goal.HaveItem(ItemKey.of("stone"), 1));
+        rig.onEachTick(() -> {
+            GoalResult result = rig.runtime().lastResult();
+            if (result == null) return;
+            if (!lecternsIn(helper).isEmpty() || rig.count(Items.LECTERN) == 0) return; // the tidy step is still at it
+            helper.assertTrue(result.status() == GoalResult.Status.SATISFIED, "the goal ended " + BotSpeech.result(result));
+            helper.assertTrue(lecternsIn(helper).isEmpty(), "a lectern was left standing at " + lecternsIn(helper));
+            helper.assertTrue(rig.count(Items.LECTERN) == 1,
+                "the lectern's item is not in the inventory: " + rig.count(Items.LECTERN));
+            helper.assertTrue(BotMemory.of(rig.id()).placedCount() == 0, "the body still remembers a block it placed");
+            rig.assertHandsEmpty();
+            rig.pass();
+        });
+    }
+
+    /**
+     * The same lectern, marked kept in the body's memory, with a librarian that took its job there (set-up: an
+     * unemployed villager beside the lectern, let to take the job as the trade tests let theirs). After the same goal
+     * the lectern still stands, is still remembered and is still marked kept: the villager has not traded, and the
+     * offer it took the job for is what the site was kept for, so the tidy step leaves it alone.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600, batch = "rt_akeptlecternisleftforthe")
+    public static void aKeptLecternIsLeftForTheVillagerThatWorksAtIt(GameTestHelper helper) {
+        floor(helper);
+        BlockPos lecternAt = new BlockPos(9, FLOOR_Y + 1, 8);
+        helper.setBlock(lecternAt, Blocks.LECTERN);
+        Rig rig = Rig.spawn(helper, "klect", null, 600);
+        String dimension = helper.getLevel().dimension().location().toString();
+        BlockPos at = helper.absolutePos(lecternAt);
+        BotMemory.of(rig.id()).notePlaced(dimension, at);
+        BotMemory.of(rig.id()).keepPlaced(dimension, at);
+        // As a real roll leaves it: the block-safety record of the body's own placement, so nothing but the kept mark
+        // and the villager that works there stand between the lectern and the tidy step's break.
+        BlockSafety.of(helper.getLevel().getServer()).noteBotPlaced(rig.body(), helper.getLevel(), at);
+        Villager taker = EntityType.VILLAGER.create(helper.getLevel());
+        Vec3 beside = helper.absoluteVec(new Vec3(9.5, FLOOR_TOP, 9.5));
+        taker.moveTo(beside.x, beside.y, beside.z, 180.0F, 0.0F);
+        helper.getLevel().addFreshEntity(taker);
+        taker.setNoAi(false);
+        rig.atEnd(taker::discard);
+        rig.give(Items.STONE, 1);
+        boolean[] took = {false};
+        int[] settled = {0};
+        rig.onEachTick(() -> {
+            if (!took[0]) {
+                if (taker.getVillagerData().getProfession() != VillagerProfession.LIBRARIAN) return;
+                took[0] = true;
+                rig.runtime().submit(new Goal.HaveItem(ItemKey.of("stone"), 1));
+                return;
+            }
+            GoalResult result = rig.runtime().lastResult();
+            if (result == null) return;
+            if (++settled[0] < 20) return; // the tidy look of the tick after the result has had its turn
+            helper.assertTrue(result.status() == GoalResult.Status.SATISFIED, "the goal ended " + BotSpeech.result(result));
+            helper.assertTrue(lecternsIn(helper).size() == 1, "the kept lectern was taken up: " + lecternsIn(helper));
+            helper.assertTrue(taker.getVillagerData().getProfession() == VillagerProfession.LIBRARIAN,
+                "the villager that works at the kept lectern lost its job");
+            helper.assertTrue(BotMemory.of(rig.id()).isPlaced(dimension, at), "the lectern is no longer remembered as the body's");
+            helper.assertTrue(BotMemory.of(rig.id()).isKept(dimension, at), "the lectern is no longer marked kept");
+            rig.pass();
+        });
+    }
+
     /** The save form's types and nesting survive the trip through NBT unchanged, a list of mixed things included. */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
     public static void theSaveFormRoundTripsThroughNbt(GameTestHelper helper) {
@@ -1352,6 +1437,19 @@ public final class BotRuntimeGameTests {
     private static AABB arenaBox(GameTestHelper helper) {
         BlockPos corner = helper.absolutePos(BlockPos.ZERO);
         return new AABB(corner.getX(), corner.getY(), corner.getZ(), corner.getX() + 16, corner.getY() + 16, corner.getZ() + 16);
+    }
+
+    /** Every lectern block in the arena, as relative positions. */
+    private static List<BlockPos> lecternsIn(GameTestHelper helper) {
+        List<BlockPos> found = new ArrayList<>();
+        for (int x = 0; x < 16; x++) {
+            for (int y = 0; y < 16; y++) {
+                for (int z = 0; z < 16; z++) {
+                    if (helper.getBlockState(new BlockPos(x, y, z)).is(Blocks.LECTERN)) found.add(new BlockPos(x, y, z));
+                }
+            }
+        }
+        return found;
     }
 
     /** One task ticked the way the executor ticks it, keeping how it ended. */

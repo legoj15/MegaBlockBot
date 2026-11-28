@@ -144,9 +144,9 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
 
     /**
      * A station this body put down (a crafting table, a furnace) and was stopped before it took it up again (a
-     * restart, a cancel, a failure) is taken up before the executor goes on: the planner counts the station in the
-     * inventory, so one left standing would cost a goal its materials. Looked for after a load and whenever a goal
-     * ends; {@link #tidy} is the task doing it.
+     * restart, a cancel, a failure), or a job site it put down for a reroll that no villager is to keep, is taken up
+     * before the executor goes on: the planner counts the block in the inventory, so one left standing would cost a
+     * goal its materials. Looked for after a load and whenever a goal ends; {@link #tidy} is the task doing it.
      */
     private boolean tidyArmed;
     @Nullable
