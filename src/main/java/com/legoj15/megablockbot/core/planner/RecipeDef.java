@@ -16,13 +16,20 @@ import java.util.Objects;
  *                    ({@code minecraft:crafting_table}), or null when it needs none (it fits the inventory's 2x2 grid)
  * @param result      what one run makes
  * @param resultCount how many, at least 1
+ * @param alsoHeld    items that must be in stock while the recipe runs and are not used up, besides the station
+ *                    (BuildCraft's assembly rig: a laser, an engine, a lever); empty for every recipe there is except
+ *                    an assemble one
  */
-public record RecipeDef(String id, String kind, List<Slot> slots, ItemKey station, ItemKey result, int resultCount) {
+public record RecipeDef(String id, String kind, List<Slot> slots, ItemKey station, ItemKey result, int resultCount,
+                        List<ItemKey> alsoHeld) {
     /** The kind of a recipe run in a crafting grid, the inventory's or a table's. */
     public static final String CRAFT = "craft";
 
     /** The kind of a recipe run in a furnace, a blast furnace or a smoker, with its fuel beside the ingredient. */
     public static final String SMELT = "smelt";
+
+    /** The kind of a recipe run at BuildCraft's assembly table, powered by a laser, with its fuel as the last slot. */
+    public static final String ASSEMBLE = "assemble";
 
     /** The kind of a recipe run at a stonecutter: one ingredient in, the recipe chosen from the list the menu offers. */
     public static final String STONECUT = "stonecut";
@@ -35,8 +42,14 @@ public record RecipeDef(String id, String kind, List<Slot> slots, ItemKey statio
         Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(result, "result");
         slots = List.copyOf(slots);
+        alsoHeld = List.copyOf(alsoHeld);
         if (slots.isEmpty()) throw new IllegalArgumentException("recipe " + id + " consumes nothing");
         if (resultCount < 1) throw new IllegalArgumentException("recipe " + id + " makes " + resultCount);
+    }
+
+    /** As above, for a recipe that holds nothing besides its station: every kind but an assemble one. */
+    public RecipeDef(String id, String kind, List<Slot> slots, ItemKey station, ItemKey result, int resultCount) {
+        this(id, kind, slots, station, result, resultCount, List.of());
     }
 
     /**

@@ -22,6 +22,8 @@ import com.legoj15.megablockbot.core.planner.LookInside;
  *       ({@link WithdrawTask}).</li>
  *   <li>{@value #LOOK_INSIDE}: open a container its owner named and note what is in it ({@link LookTask}).</li>
  *   <li>{@value #BUILD}: place a blueprint's blocks at its anchor ({@link BuildTask}, issue 17).</li>
+ *   <li>{@value #ASSEMBLE}: put up BuildCraft's smallest assembly rig and run one recipe of its assembly table
+ *       ({@link AssembleTask}, issue 18).</li>
  * </ul>
  *
  * <p>Called from {@code NavFeature.init()} for now, since the tasks are built on the navigator; the bot runtime
@@ -54,6 +56,8 @@ public final class TaskFeature {
     public static final String BUILD = "build";
     /** The kind a planner leaf for a {@code Source.Trade} gather binds to ({@code SolverPlanner}, issue 15). */
     public static final String TRADE = TradeTask.KIND;
+    /** The kind a planner leaf for an assembly-table recipe binds to (issue 18). */
+    public static final String ASSEMBLE = AssembleTask.KIND;
 
     private TaskFeature() {}
 
@@ -72,5 +76,6 @@ public final class TaskFeature {
         TaskRegistry.register(LOOK_INSIDE, (leaf, hints) -> new LookTask(leaf));
         TaskRegistry.register(BUILD, (leaf, hints) -> new BuildTask(leaf));
         TaskRegistry.register(TRADE, TradeTask::new);
+        TaskRegistry.register(ASSEMBLE, AssembleTask::new);
     }
 }

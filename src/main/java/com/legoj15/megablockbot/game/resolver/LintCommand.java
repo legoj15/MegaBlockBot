@@ -1,14 +1,19 @@
 package com.legoj15.megablockbot.game.resolver;
 
+import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.acquire.AcquisitionIndex;
 import com.legoj15.megablockbot.core.acquire.LintReport;
+import com.legoj15.megablockbot.core.planner.RecipeDef;
 import com.legoj15.megablockbot.game.command.AiPlayerCommand;
+import com.legoj15.megablockbot.game.plan.RecipeBooks;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Set;
+import java.util.TreeSet;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
@@ -44,7 +49,7 @@ final class LintCommand {
             source.sendFailure(Component.literal("The acquisition index has not been built yet."));
             return 0;
         }
-        LintReport report = LintReport.of(index, namespace);
+        LintReport report = LintReport.of(index, assembledResults(), namespace);
         send(source, String.join("\n", report.summaryLines()));
         if (!report.unobtainable().isEmpty()) {
             send(source, "Unobtainable:\n" + String.join("\n", report.itemLines(CHAT_ITEM_LINES)));
@@ -61,6 +66,19 @@ final class LintCommand {
             }
         }
         return report.unobtainable().size();
+    }
+
+    /**
+     * The results of the assemble recipes the planner's own book holds (BuildCraft's assembly table, whose recipes
+     * the recipe manager does not see): the index is built before the book and without it, so the lint asks the book
+     * here, at command time. Such an item counts as craftable, not unobtainable.
+     */
+    private static Set<ItemKey> assembledResults() {
+        Set<ItemKey> results = new TreeSet<>();
+        for (RecipeDef recipe : RecipeBooks.current().all()) {
+            if (RecipeDef.ASSEMBLE.equals(recipe.kind())) results.add(recipe.result());
+        }
+        return results;
     }
 
     private static void send(CommandSourceStack source, String text) {

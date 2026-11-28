@@ -16,6 +16,8 @@ public final class PlanFeature {
         RecipeSources.register(new CraftingRecipeSource());
         RecipeSources.register(new CookingRecipeSource());
         RecipeSources.register(new StationRecipeSource());
+        // BuildCraft read by reflection: the source yields nothing at all when the mod is not on the classpath.
+        RecipeSources.register(new AssemblyRecipeSource());
 
         // Once at server start and after every /reload, after the loader's own data hooks, like the acquisition index.
         Platform.loader().onServerDataLoaded(RecipeBookBuilder::rebuild);

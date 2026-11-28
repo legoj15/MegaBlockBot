@@ -842,9 +842,13 @@ Each adapter turns one recipe family into `RecipeInfo` for the solver:
   produces `RecipeInfo`. Unknown `RecipeManager` types are visible but unplannable, and the
   planner reports them ("needs a Pulverizer recipe adapter"), which is itself useful dev
   output. Recipes kept in private registries are invisible until an adapter exists. The lint
-  can only flag those indirectly, as items with no source. First adapter: BuildCraft (you
-  maintain it). Machines that need power (the assembly table needs laser power) also need a
-  "power this station" strategy, not just a station key.
+  can only flag those indirectly, as items with no source. First adapter: BuildCraft (in, #18:
+  `AssemblyRecipeSource` reads the mod's registry by reflection, so the mod stays optional). The
+  power a machine needs is modelled as part of the recipe rather than a strategy: the assembly
+  table's laser power becomes burn fuel — the Stirling engine makes at most 1 MJ a tick, so the
+  recipe's MJ is its burn ticks, with a margin — and the rig (a laser, an engine, a lever) is
+  `alsoHeld`, items the plan brings and holds beside the station like a fishing rod. A machine
+  no recipe-shaped answer fits still needs a "power this station" strategy.
 - Explicitly not used: JEI/EMI as a recipe source. Neither exists server-side, and the agent
   must work on a dedicated server.
 

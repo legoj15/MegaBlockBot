@@ -110,7 +110,9 @@ import java.util.TreeSet;
  *       each craft, in the form {@link CraftLayout} documents, so a task follows it instead of re-deciding. A
  *       {@code smelt} leaf (a furnace recipe, one variant per fuel class) carries the same params with an empty
  *       {@code layout}: there is no grid to lay out, and the recipe's id names the fuel class its run is sized
- *       for.</li>
+ *       for. An {@code assemble} leaf (an assembly-table recipe, one variant per fuel class) carries the same params
+ *       with an empty {@code layout} and, besides them, {@code held}: the recipe's {@code alsoHeld} item ids,
+ *       comma separated — the rig the plan brought and the leaf runs with (a laser, an engine, a lever).</li>
  *   <li>{@code equip}: none; the goal names the slots. Equipping leaves the working stock as it is: the snapshot
  *       counts worn items.</li>
  *   <li>{@code deposit}: {@code item}, {@code container}, {@code dimension}, and {@code count}, which is how many
@@ -165,6 +167,12 @@ public final class SolverPlanner implements Planner {
     static final int MAX_PASSES = 8;
     /** Rounds a trade's payment may need when planning one charged item eats another's stock. */
     static final int MAX_PAYMENT_ROUNDS = 4;
+    /**
+     * Rounds a demand's crafts may need for the held items of its recipes' rigs (an assemble recipe holds a laser,
+     * an engine and a lever). One round plans every item one recipe holds; the next is only for a recipe whose rig
+     * is different, so a handful covers every rig there is and a cycle is caught before the bound anyway.
+     */
+    static final int MAX_HELD_ROUNDS = 8;
     /** The recipe closure a fingerprint walks stops growing here, so a hostile recipe set cannot make it slow. */
     static final int MAX_CLOSURE_ITEMS = 2048;
     /**
@@ -602,16 +610,37 @@ public final class SolverPlanner implements Planner {
          * amounts and can craft intermediates, gathers that and solves again, a bounded number of times. Only when the
          * shortfall lists nothing (the solver flagged it approximate) are the solve's own missing items gathered, a
          * unit each; a solve that names nothing with a source ends the plan.
+         *
+         * <p>A solve whose steps hold more than their stations (an assemble recipe's rig) goes another way: the steps
+         * are undone, every held item the stock does not hold is planned like any item and relied on, and the solver
+         * is asked again with the rig in the stock (issue #18). The rounds of that are bounded too.
          */
         Step craftDemand(ItemKey key, DemandRecipe demand) {
             List<NodeSpec> nodes = new ArrayList<>();
+            int heldRounds = 0;
             for (int attempt = 0; ; attempt++) {
                 RecipeGraphSolver.Result<String, ItemKey> result = solver.solveLong(demand, spendable());
                 if (result instanceof RecipeGraphSolver.Result.Success<String, ItemKey> success) {
-                    Step crafts = craftNodes(success);
-                    if (crafts.failure() != null) return crafts;
-                    nodes.addAll(crafts.nodes());
-                    return Step.ok(nodes);
+                    State beforeSteps = mark();
+                    Crafts crafts = craftNodes(success);
+                    if (crafts.failure() != null) return Step.fail(crafts.failure());
+                    if (crafts.heldMissing().isEmpty()) {
+                        nodes.addAll(crafts.nodes());
+                        return Step.ok(nodes);
+                    }
+                    if (heldRounds++ >= MAX_HELD_ROUNDS) {
+                        return Step.fail(internal("the held items of " + key.id() + "'s crafts did not settle in "
+                                + MAX_HELD_ROUNDS + " rounds"));
+                    }
+                    // The steps already advanced are undone, so the rig is planned from the stock the solver was asked
+                    // with and the solver is asked again with the rig in place.
+                    restore(beforeSteps);
+                    for (ItemKey heldItem : crafts.heldMissing()) {
+                        Step rig = heldPrerequisite(heldItem);
+                        if (rig.failure() != null) return rig;
+                        nodes.addAll(rig.nodes());
+                    }
+                    continue;
                 }
                 String detail = failureDetail(key, result);
                 if (!(result instanceof RecipeGraphSolver.Result.Failure<String, ItemKey> failure)
@@ -643,8 +672,27 @@ public final class SolverPlanner implements Planner {
             return Step.ok(nodes);
         }
 
-        /** The solver's steps as craft leaves, advancing the working stock through each (the demand step is not one). */
-        private Step craftNodes(RecipeGraphSolver.Result.Success<String, ItemKey> success) {
+        /** What one solve's steps became: the craft leaves, the held items a step needs and the stock does not hold, or the failure. */
+        private record Crafts(List<NodeSpec> nodes, List<ItemKey> heldMissing, Failure failure) {
+            static Crafts ok(List<NodeSpec> nodes) {
+                return new Crafts(nodes, List.of(), null);
+            }
+
+            static Crafts held(List<ItemKey> missing) {
+                return new Crafts(List.of(), missing, null);
+            }
+
+            static Crafts fail(Failure failure) {
+                return new Crafts(List.of(), List.of(), failure);
+            }
+        }
+
+        /**
+         * The solver's steps as craft leaves, advancing the working stock through each (the demand step is not one).
+         * A step whose recipe holds more than its station stops the walk: the held items the stock lacks are reported
+         * and the caller plans them and asks the solver again.
+         */
+        private Crafts craftNodes(RecipeGraphSolver.Result.Success<String, ItemKey> success) {
             List<NodeSpec> nodes = new ArrayList<>();
             List<PlannedStep<String>> steps = success.steps();
             List<List<SlotLayout<ItemKey>>> layouts = success.layouts();
@@ -653,26 +701,42 @@ public final class SolverPlanner implements Planner {
                 if (DEMAND_ID.equals(step.recipeId())) continue; // states the demand; nothing to run
                 RecipeDef recipe = recipes.byId(step.recipeId()).orElse(null);
                 if (recipe == null) {
-                    return Step.fail(internal("the solver planned unknown recipe " + step.recipeId()));
+                    return Crafts.fail(internal("the solver planned unknown recipe " + step.recipeId()));
                 }
+                // The rig must be held when the step runs, not only when the solve was made: an earlier step of this
+                // same solve may have spent the last of it.
+                List<ItemKey> missing = new ArrayList<>();
+                for (ItemKey heldItem : recipe.alsoHeld()) {
+                    if (held(heldItem) < 1) missing.add(heldItem);
+                }
+                if (!missing.isEmpty()) return Crafts.held(missing);
                 List<SlotLayout<ItemKey>> stepLayouts =
                         layouts == null || i >= layouts.size() ? List.of() : layouts.get(i);
                 Failure broken = advance(recipe, step, stepLayouts);
-                if (broken != null) return Step.fail(broken);
+                if (broken != null) return Crafts.fail(broken);
                 long after = held(recipe.result());
                 if (after > Integer.MAX_VALUE) {
-                    return Step.fail(internal("the stock of " + recipe.result().id() + " exceeds what a goal can count"));
+                    return Crafts.fail(internal("the stock of " + recipe.result().id() + " exceeds what a goal can count"));
                 }
                 Map<String, String> params = new TreeMap<>();
                 params.put("recipe", recipe.id());
                 params.put("times", Long.toString(step.crafts()));
                 params.put("station", recipe.station() == null ? "" : recipe.station().id());
                 // A smelt leaf carries no layout: there is no grid to lay out, and the recipe's id already names the
-                // fuel class its run is sized for.
+                // fuel class its run is sized for. Nor does an assemble leaf: its last slot is the fuel and its id
+                // names the class the same way.
                 params.put("layout", RecipeDef.CRAFT.equals(recipe.kind()) ? CraftLayout.encode(stepLayouts) : "");
+                if (!recipe.alsoHeld().isEmpty()) {
+                    StringBuilder heldIds = new StringBuilder();
+                    for (ItemKey heldItem : recipe.alsoHeld()) {
+                        if (heldIds.length() > 0) heldIds.append(',');
+                        heldIds.append(heldItem.id());
+                    }
+                    params.put("held", heldIds.toString());
+                }
                 nodes.add(NodeSpec.leaf(new Goal.HaveItem(recipe.result(), (int) after), recipe.kind(), params, ""));
             }
-            return Step.ok(nodes);
+            return Crafts.ok(nodes);
         }
 
         /** The solver's answer as one detail line: the missing items it named, and which budget ran out. */
@@ -716,6 +780,8 @@ public final class SolverPlanner implements Planner {
             addStock(recipe.result(), step.crafts() * recipe.resultCount());
             // The station is not drawn, but the craft counts on holding it: a table that lies in a container is taken.
             if (recipe.station() != null) relied.merge(recipe.station(), 1L, (a, b) -> Math.max(a, b));
+            // So is the rig a recipe holds beside its station: planned once, relied on, never drawn.
+            for (ItemKey heldItem : recipe.alsoHeld()) relied.merge(heldItem, 1L, (a, b) -> Math.max(a, b));
             return null;
         }
 
@@ -1123,6 +1189,46 @@ public final class SolverPlanner implements Planner {
                         : List.of(NodeSpec.group(new Goal.HaveItem(site, 1), step.nodes())));
             } finally {
                 planningJobSite.remove(trade.profession());
+            }
+        }
+
+        /** Held items whose plan is being asked for, so a rig item whose own recipe is one that holds it cannot loop. */
+        private final TreeSet<ItemKey> planningHeld = new TreeSet<>();
+
+        /**
+         * An item a recipe holds while it runs and does not use up, besides its station (an assemble recipe's rig: a
+         * laser, an engine, a lever), planned like the rod of a fishing source and the job site of a trade: brought
+         * in like any item, kept for the whole plan, relied on, never drawn, and one serves every step of every recipe
+         * that holds it in the plan — once one is in the working stock the next plans nothing (issue #18). A held item
+         * whose own plan needs a recipe that holds it is a cycle and fails naming the item.
+         */
+        private Step heldPrerequisite(ItemKey item) {
+            // A held tool is any tool of its class at its tier or better: what is held it for is the breaking it
+            // does, and a better pickaxe breaks what a wooden one does.
+            for (ToolClass toolClass : ToolClass.values()) {
+                for (ToolTier tier : ToolTier.values()) {
+                    if (item.equals(config.toolItem(toolClass, tier)) && carriedTier(toolClass).atLeast(tier)) {
+                        relyOnTool(toolClass, tier);
+                        return Step.ok(List.of());
+                    }
+                }
+            }
+            if (held(item) >= 1) {
+                relied.merge(item, 1L, (a, b) -> Math.max(a, b));
+                return Step.ok(List.of());
+            }
+            if (!planningHeld.add(item)) {
+                return Step.fail(new Failure.NoSource(item, "", "the held " + item.id()
+                        + " can only be had from a recipe that runs with " + item.id() + " held: a cycle"));
+            }
+            try {
+                Step step = itemPlan(item, 1);
+                if (step.failure() != null) return step;
+                relied.merge(item, 1L, (a, b) -> Math.max(a, b));
+                return Step.ok(step.nodes().isEmpty() ? List.of()
+                        : List.of(NodeSpec.group(new Goal.HaveItem(item, 1), step.nodes())));
+            } finally {
+                planningHeld.remove(item);
             }
         }
 
@@ -1901,9 +2007,9 @@ public final class SolverPlanner implements Planner {
 
     /**
      * A stable 64-bit hash of what the plan depends on (design 3.4): the goal, the dimension, the best tools, the
-     * counts of the items in the goal's recipe closure (every item reachable through recipe ingredients and
-     * stations, the tools the sources it can be gathered from require, what a trade charges, and the weapon and food a
-     * plan that digs below {@link PlannerConfig#provisionBelowY} packs) and, for a goal
+     * counts of the items in the goal's recipe closure (every item reachable through recipe ingredients, stations
+     * and held items, the tools the sources it can be gathered from require, what a trade charges, and the weapon and
+     * food a plan that digs below {@link PlannerConfig#provisionBelowY} packs) and, for a goal
      * the planner cannot see into (a build or a custom goal), of the whole inventory; and what {@code Stockpile}
      * reads (the container's known contents), {@code Equip} reads (what is worn) and a goal with a component check reads
      * (the facts of the stacks of its item that the body holds), and what each container the body may take from holds
@@ -2081,7 +2187,7 @@ public final class SolverPlanner implements Planner {
 
     /**
      * The items a plan for the goal reads the stock of: the goal's items and everything their recipes, stations,
-     * gather sources' tools and trade payments lead to, and the provisions a plan that digs past
+     * held items, gather sources' tools and trade payments lead to, and the provisions a plan that digs past
      * {@link PlannerConfig#provisionBelowY} would pack (brief K19). Walked over the recipe book and the index whole (the
      * exclusions are hashed as a set of their own, not subtracted from this walk), up to
      * {@link #MAX_CLOSURE_ITEMS} items.
@@ -2113,6 +2219,8 @@ public final class SolverPlanner implements Planner {
             for (RecipeDef recipe : recipes.producers(item)) {
                 for (RecipeDef.Slot slot : recipe.slots()) queue.addAll(slot.alternatives());
                 if (recipe.station() != null) queue.add(recipe.station());
+                // The rig a recipe holds is read like a station: a laser in a container is one the plan takes.
+                queue.addAll(recipe.alsoHeld());
             }
             for (Source source : index.sources(item)) {
                 if (source instanceof Source.MineBlock deep && deep.ore() != null

@@ -79,8 +79,8 @@ returns hints for where to look after a restart, never facts.
 
 Registered here (`BotFeature.init`): `craft`, `smelt`, `stonecut`, `smith` and `equip` — the tasks that need no
 movement. `navigate`, `reach`, `mine`, `fish`, `kill`, `harvest`, `use_on`, `recover_drops`, `deposit`, `deliver`,
-`withdraw`, `look_inside`, `build` and `trade` are registered by the navigation work (`TaskFeature.init`, called from
-`NavFeature.init`), not here.
+`withdraw`, `look_inside`, `build`, `trade` and `assemble` are registered by the navigation work
+(`TaskFeature.init`, called from `NavFeature.init`), not here.
 
 What the navigation tasks need from this runtime:
 
@@ -730,6 +730,82 @@ that undercuts the trade still winning as it always did. The leaf's source id ri
 - Not done: a reroll that is cancelled or aborted leaves its job site standing and remembered, and the plan that
   follows does not know it stands, so it makes another before the task takes the first one up.
 - `progress()` says what it is doing: looking for a villager, looking at offers, the roll it is on, paying.
+
+## `assemble`
+
+Leaf params: the craft leaf's with an empty `layout` — `recipe` (a `RecipeDef` id in the bot's own book; the recipe's
+last slot is the fuel and the others the inputs), `times` (runs), `station` (`buildcraftunofficial:assembly_table`) and
+`held` (the rig's other pieces as registry ids, comma separated and in the rig's order: the laser, the Stirling engine,
+the lever). Goal: `HaveItem(result, count)`, absolute as ever, so a task started again makes only what is still missing.
+`game.task.AssembleTask`, registered in `TaskFeature` (issue 18): BuildCraft's assembly table makes nothing without
+laser power and a laser makes none without an engine, so the task is the whole rig.
+
+- **The site.** Three cells in a straight level line on solid ground with air above — table, laser, engine, in that
+  order away from the body — and a fourth on the floor beside the engine for the lever, all free, dry, unoccupied and
+  cells block safety lets this body build on, none of them the body's own, none inside a live danger zone (the body
+  stands there for eight minutes). Found by searching the stances within `AssembleTask.SITE_RADIUS` (8) blocks of the
+  body, nearest first; the floor under each cell must offer a top face the stance's eyes can see and reach
+  (`Level.clip`, as `TableSites` aims a table's click). None found is `NoPlace` ("put an assembly rig down"), the kind
+  the executor gives the goal up at once with. The body walks to the stance, two cells before the table end of the
+  line, and makes every click of the rig from there.
+- **The order, and the laser's aim.** A laser faces away from where its placer looks and nothing rotates it later, so
+  it goes down first: a click on the top face of the floor under its cell, made from the stance after a one-tick turn
+  (the game aims a placement by the rotation the turn ends in), the stance far enough that the look three cells down
+  the line is more level than steep. Its `facing` is read back — the vanilla `BlockStateProperties.FACING` — and must
+  point back along the line at the table's cell; a laser that faced another way comes up again and the task fails
+  `Internal` saying what it faced. Then the table, in the cell between the stance and the laser; then the engine
+  beside the laser (a cell beyond the laser is hidden from the stance by the laser itself; an engine turns itself to
+  whatever takes power next to it); then the lever beside the engine, and a use-click on it until its `POWERED` reads
+  true. The rig is taken down with a pickaxe (BuildCraft's machines drop to nothing else), which the plan brings as
+  one of the recipe's held items. Every block placed is noted (`BotMemory.notePlaced`, `BlockSafety.noteBotPlaced`), so it
+  may be broken again.
+- **Fuel, inputs, queue.** The engine's menu is opened by a use-click (not sneaking) and its fuel put into menu slot
+  0; the table's menu likewise and the inputs for all the runs into menu slots 0 to 11, one right-clicked item at a
+  time through `MenuHand`. The recipe is queued by the button the table's own catalogue gives it: the position, in the
+  tile's `recipesStates` map's own order, of the key whose `output` stack is the leaf's item, pressed with
+  `clickMenuButton` — the call a client's click on the button row ends in, as the stonecut task presses its choice.
+  The position is read again each time (it shifts when other recipes appear) and the state with it: a recipe that
+  reads `POSSIBLE` or `PAUSED` is pressed, one already queued is left alone, for the button that queues a recipe also
+  pauses it. A table that lists no recipe of the leaf's item within `AssembleTask.QUEUE_WAIT_TICKS` (100) ticks of the
+  inputs arriving is `NoProgress`.
+- **The wait.** A redstone chipset costs 10,000 MJ at about one MJ a tick: over eight minutes. `waiting()` is true, the
+  body stands clear of the line, and the status line says the power the table holds (`AssembleTask.progress()`); an
+  INFO line says it every 1,000 ticks against what `getTarget()` says the active recipe needs. A table whose power has
+  not risen for `AssembleTask.STALL_DIAGNOSE_TICKS` (1200, sixty seconds — past the engine's redstone poll, the laser's
+  target rescan and its battery's soft start) is diagnosed in the log — the lever's `POWERED`, the laser's `facing`,
+  the engine's burn time if it can be read — and after a second such time (`STALL_FAIL_TICKS`) fails `NoProgress`
+  saying what was read. The product is pushed into an inventory beside the table or dropped at it, so it is looked for
+  within `PRODUCT_RADIUS` (4) blocks of the table and picked up through `DropPickup`; another run owed re-queues the
+  recipe, and the count held is asked before any of it.
+- **Taking down.** On the completion's way out and on every failure's after a block was placed (`AssembleTask.tidy`),
+  the lever, the engine, the laser and the table come up in that order — the lever first, so the engine stops — each
+  broken with the tool that breaks it best (`StationTask.selectBreakingTool`) and what falls out of it picked up: its
+  own item and whatever the table's buffer or the engine still held. A piece the rules refuse, one whose break would
+  drop nothing, one whose item the inventory has no room for and one that will not come up within
+  `TAKE_DOWN_WAIT_TICKS` (400) ticks is left standing, remembered as the body's, and named in the log. Done when the
+  body holds the goal's count.
+- **Pause, resume, abort.** A pause leaves the rig running, for it needs no body: the menu is closed, the cursor
+  emptied, the input reset, the engine goes on burning and the table keeps its power. A resume walks back and goes on
+  from what the world shows — the build is gone through again and places only what is missing, the fuel and the inputs
+  only what is carried (what went in before is in the engine and the table), the queue only what is not queued, and
+  the wait starts from the power the table holds now. An abort closes any menu, releases the input and leaves the rig
+  standing and remembered; the log says where it stands, and nothing else in this code knows how to take an assembly
+  rig up, so the pieces are the next plan's to gather again.
+- **BuildCraft is not compiled in.** No `buildcraft` import anywhere: blocks and items by registry id, the laser's
+  facing and the lever's state through vanilla properties, and the table's tile by member name — `recipesStates` and
+  each key's `output` for the queue, `power` (a long of micro-JJ, declared in the tile's superclass) for the wait, and
+  `getTarget()` for the status line. A member the work depends on that is not there is a logged line and the task's
+  own clean `Internal` naming it; `getTarget()` and the engine's `burnTime` (diagnosis only) are read when they can be
+  and said to be unreadable when they cannot.
+- **Time**: the kind has its own budget (`BotRuntime.ASSEMBLE_BUDGET_TICKS`, 240000 ticks — about twenty-three runs at
+  the pace one laser sets, with the stall watch bounding a rig that has stopped for good).
+- Failures: `TargetGone` (a recipe id the book has not got, a table that stood and is gone), `MissingInput` (the
+  station, a held piece, an input or the fuel not carried, named with the count — nothing is put down for an assemble
+  that cannot run), `NoRoom` (before anything is put down), `NoPlace` (nowhere for the rig), `Unreachable` (the game
+  would not let a block down or open a menu, or the body could not get to its stance), `NoProgress` (the recipe never
+  listed, the lever would not switch, the power never rose), `Internal` (a BuildCraft member that was not there, a
+  laser that faced the wrong way). No test can run: the suite has no BuildCraft, and stand-in blocks would test the
+  stand-ins — a live run is the only test this task has.
 
 ## `use_on`
 

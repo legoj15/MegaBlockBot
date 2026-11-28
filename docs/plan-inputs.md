@@ -58,6 +58,34 @@ Everything runs on the server thread; every product is immutable and published a
   crafting source skips and notes. `SmithingTrimRecipe`s (armour trims) are skipped and counted in one note: their
   result is the base item with a trim component, not an item of its own, which the planner's item-count goals cannot
   ask for. `StonecutTask` and `SmithTask` run the two kinds (see `docs/bot-runtime.md`).
+- `AssemblyRecipeSource` (issue #18) reads BuildCraft's assembly-table recipes, which the mod keeps in its own static
+  registry (`buildcraft.lib.recipe.AssemblyRecipeRegistry.REGISTRY`) rather than in the `RecipeManager`. Every
+  BuildCraft class is reached by name through reflection, so the source builds and runs with or without the mod: when
+  the registry class cannot be loaded it yields nothing, with no error and no note — a world without BuildCraft is the
+  normal case. Before reading, it calls `buildcraft.silicon.BCSiliconRecipes.ensureInitialized()` when the class is
+  there, ignoring a failure: the mod fills the registry when the server is about to start, and the book may be read
+  before that. Each recipe's outputs come from `getOutputPreviews()`, the inputs for one output from
+  `getInputsFor(output)` (objects with public `ingredient`, a vanilla `Ingredient`, and `count` fields) and the energy
+  from `getRequiredMicroJoulesFor(output)`, a long in millionths of an MJ. One `RecipeDef` per recipe, output and fuel
+  class, kind `assemble`, station `buildcraftunofficial:assembly_table`, id
+  `assembly:<registry name>#<output item id>#<fuel class>`; the slots are the inputs (their ingredient's items and
+  counts, sorted, so a set with no order of its own reads the same twice) and the fuel last, sized by the recipe's
+  energy: the Stirling engine makes at most 1 MJ a tick while it burns, so a run needs the recipe's MJ in burn ticks,
+  times a margin of 1.5 (the engine warms up and the laser loses some), rounded up to whole items of the class — the
+  classes are the cooking source's (`coal`, `planks`, `logs`, `sticks`, read through `CookingRecipeSource.fuelOf`). A
+  run whose fuel does not fit one stack (64) is left out and counted in one note, and so is an output that is not a
+  plain item (gates and facades carry components that differ from the item's defaults), the way the station source
+  counts smithing trims.
+- `alsoHeld`: items that must be in stock while a recipe runs and are not used up, besides the station. Only an
+  assemble recipe names any — the rig the assembly table needs around it: `buildcraftunofficial:laser`,
+  `buildcraftunofficial:engine_stone` and `minecraft:lever`. The solver knows one station per recipe and nothing of
+  these (solver-core's contract is unchanged), so the planner brings them itself (`SolverPlanner`): when the steps a
+  solve returns hold items the working stock does not, the steps are undone, every missing piece is planned like any
+  item — a group node like the fishing rod's — and relied on, never drawn, and the solver is asked again with the rig
+  in the stock. One rig serves every assemble step of a plan, and one whose own plan needs the recipe it is held for
+  is a cycle that fails naming the item. An assemble leaf carries the craft leaf's params with an empty `layout` and,
+  besides them, `held`: the `alsoHeld` item ids, comma separated. The recipe's last slot is the fuel; the others are
+  the inputs.
 - Campfire cooking stays unread. Every campfire recipe has a furnace twin the book already holds, and a campfire
   cannot be taken up again: breaking it gives charcoal, not a campfire, so the planner would lose a station per use.
   The summary line counts the type among those no source reads, for example

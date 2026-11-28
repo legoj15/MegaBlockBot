@@ -161,7 +161,10 @@ now (see above); the milk bucket, once a code row, is one of them.
 The lint has four lists: an item with a source counts as with a source; else a craftable one as craftable only; else
 an item with a known way is listed obtainable with no strategy yet (the file shows each such item with its ways,
 `id: way from, way from`); the rest is unobtainable. The chat summary counts all four, and `itemLines` (the capped
-chat list) stays the unobtainable one.
+chat list) stays the unobtainable one. The results of `assemble` recipes (BuildCraft's assembly table) are not in the
+recipe manager, so they are not in the index's `craftable()`; the lint reads them from the planner's own recipe book
+at command time (the index is built before the book) and counts them as craftable too, so an item whose only way is an
+assembly table is obtainable, not unobtainable.
 
 ## What it does not know (also printed by the lint)
 

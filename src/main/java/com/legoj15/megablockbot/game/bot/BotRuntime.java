@@ -30,6 +30,7 @@ import com.legoj15.megablockbot.game.nav.BotNavigator;
 import com.legoj15.megablockbot.game.plan.BotMemory;
 import com.legoj15.megablockbot.game.reflex.ReflexConstants;
 import com.legoj15.megablockbot.game.plan.SnapshotCollector;
+import com.legoj15.megablockbot.game.task.AssembleTask;
 import com.legoj15.megablockbot.game.task.CraftTask;
 import com.legoj15.megablockbot.game.task.FishTask;
 import com.legoj15.megablockbot.game.task.TaskRegistry;
@@ -114,6 +115,16 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
      */
     static final int TRADE_BUDGET_TICKS = 72_000;
 
+    /**
+     * The {@code assemble} kind's own task budget. The table works at its own pace: a redstone chipset costs 10,000 MJ
+     * at about one MJ a tick, so one run takes about 10,200 ticks — eight and a half minutes — and the rig the task
+     * puts up has one laser and one engine, so the pace is the same for every run of the leaf. 240,000 ticks, three
+     * hours and twenty minutes of game time, is some twenty-three runs: enough for a leaf that makes a stack of
+     * chipsets, and the task's own stall watch (a table whose power has not risen for two minutes fails
+     * {@code NoProgress}) is what bounds a rig that has stopped for good.
+     */
+    static final int ASSEMBLE_BUDGET_TICKS = 240_000;
+
     private final GoalExecutor<BotPlayer> executor;
 
     /** The instance of the body this brain last served: replaced on a respawn, which hands the brain to a new one. */
@@ -185,7 +196,8 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
             defaults.totalReplanCeiling(), defaults.maxRepairReplans(), defaults.maxDeathsPerGoal(),
             defaults.deathExclusionRadius(), defaults.hazardExclusionRadius(), defaults.defaultTaskBudgetTicks(),
             Map.of(RecipeDef.SMELT, SMELT_BUDGET_TICKS, "build", BUILD_BUDGET_TICKS, FishTask.KIND, FISH_TASK_BUDGET_TICKS,
-                "trade", TRADE_BUDGET_TICKS, UseOnTask.KIND, USE_ON_BUDGET_TICKS), defaults.stuckTicks(),
+                "trade", TRADE_BUDGET_TICKS, UseOnTask.KIND, USE_ON_BUDGET_TICKS, AssembleTask.KIND,
+                ASSEMBLE_BUDGET_TICKS), defaults.stuckTicks(),
             defaults.preemptMaxPausedTicks(),
             defaults.preemptMaxCount(), defaults.preemptWindowTicks(), defaults.planRerunLimit(),
             defaults.planTimeoutTicks());

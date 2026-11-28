@@ -405,12 +405,22 @@ final class SolverPlannerTest {
                 }
                 gain(stock, tools, ItemKey.of(params.get("item")), trades);
             }
-            case "craft", "smelt" -> {
+            case "craft", "smelt", "assemble" -> {
                 RecipeDef recipe = book.byId(params.get("recipe")).orElse(null);
                 if (recipe == null) return "leaf plans unknown recipe " + params.get("recipe");
                 long times = Long.parseLong(params.get("times"));
                 if (recipe.station() != null && stock.getOrDefault(recipe.station(), 0) < 1) {
                     return "leaf " + params.get("recipe") + " needs a " + recipe.station().id() + " in stock";
+                }
+                // An assemble leaf holds its rig while it runs, as its task does: nothing is spent, but each piece
+                // must be in stock when the leaf starts.
+                String heldIds = params.get("held");
+                if (heldIds != null && !heldIds.isEmpty()) {
+                    for (String id : heldIds.split(",")) {
+                        if (stock.getOrDefault(ItemKey.of(id), 0) < 1) {
+                            return "leaf " + params.get("recipe") + " needs a " + id + " held";
+                        }
+                    }
                 }
                 String failure = craftByLayout(recipe, params, times, stock, tools);
                 if (failure != null) return failure;
@@ -459,8 +469,8 @@ final class SolverPlannerTest {
     /**
      * Takes exactly the items the leaf's layout names, slot by slot, craft by craft: what an executor that follows
      * it does. A leaf with no layout is run the way an executor without one would, taking the first alternative in
-     * stock for each slot; the layout tests check that every craft leaf has one. A smelt leaf carries an empty
-     * layout (there is no grid to lay out), so it always runs that way.
+     * stock for each slot; the layout tests check that every craft leaf has one. A smelt or assemble leaf carries an
+     * empty layout (there is no grid to lay out), so it always runs that way.
      */
     private static String craftByLayout(RecipeDef recipe, Map<String, String> params, long times,
                                         Map<ItemKey, Integer> stock, Map<ToolClass, ToolTier> tools) {
@@ -2263,6 +2273,105 @@ final class SolverPlannerTest {
             assertTrue(runs * 8 >= count, count + " ingots are covered by " + runs + " runs");
             assertRunsToTheGoal(plan, ironBook(), IRON_STOCK, IRON_TOOLS, IRON_INGOT, count);
         }
+    }
+
+    // ─── Assembly recipes are planned with their rig held (issue #18) ────────────────────────────
+
+    private static final ItemKey REDSTONE = ItemKey.of("redstone");
+    private static final ItemKey ASSEMBLY_TABLE = ItemKey.of("buildcraftunofficial:assembly_table");
+    private static final ItemKey LASER = ItemKey.of("buildcraftunofficial:laser");
+    private static final ItemKey STONE_ENGINE = ItemKey.of("buildcraftunofficial:engine_stone");
+    private static final ItemKey LEVER = ItemKey.of("lever");
+    private static final ItemKey CHIPSET = ItemKey.of("buildcraftunofficial:chipset_redstone");
+    private static final ItemKey GOGGLES = ItemKey.of("buildcraftunofficial:goggles");
+
+    /** The one assembly recipe of the fixture, shaped the way the source writes one: a redstone chipset. */
+    private static RecipeDef chipsetRecipe() {
+        return new RecipeDef("assembly:chipset_redstone#buildcraftunofficial:chipset_redstone#coal", RecipeDef.ASSEMBLE,
+                List.of(one(REDSTONE), one(COAL)), ASSEMBLY_TABLE, CHIPSET, 1, List.of(LASER, STONE_ENGINE, LEVER));
+    }
+
+    /** The base book plus the chipset and a crafting recipe that needs it (the goggles of issue #18). */
+    private static SimpleRecipeBook gogglesBook() {
+        return bookWith(chipsetRecipe(), recipe("goggles_from_chipset", GOGGLES, 1, CRAFTING_TABLE, one(CHIPSET)));
+    }
+
+    /**
+     * The base index plus redstone and the rig's pieces, each mined by hand like a log; the pieces named in
+     * {@code without} are left with no source at all.
+     */
+    private static AcquisitionIndex rigIndex(ItemKey... without) {
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        for (ItemKey item : List.of(REDSTONE, ASSEMBLY_TABLE, LASER, STONE_ENGINE, LEVER)) {
+            if (List.of(without).contains(item)) continue;
+            builder.addItem(item);
+            builder.addSource(new Source.MineBlock("mine:minecraft:" + item.path(), item, "minecraft:" + item.path(),
+                    null, ToolTier.HAND, false, false, false, 1.0, false, null));
+        }
+        return builder.build();
+    }
+
+    /** The plan's one assemble leaf. */
+    private static NodeSpec assembleLeaf(Plan plan) {
+        List<NodeSpec> assembles = leaves(plan).stream().filter(leaf -> leaf.taskKind().equals("assemble")).toList();
+        assertEquals(1, assembles.size(), leaves(plan).toString());
+        return assembles.get(0);
+    }
+
+    @Test
+    void anAssemblyRecipeIsPlannedWithItsRigHeldAndTheRigSurvivesThePlan() {
+        SolverPlanner planner = planner(gogglesBook(), rigIndex());
+        Plan plan = planned(planner, request(new Goal.HaveItem(GOGGLES, 1), EMPTY, Exclusions.NONE));
+
+        List<NodeSpec> planLeaves = leaves(plan);
+        NodeSpec assemble = assembleLeaf(plan);
+        assertEquals("assembly:chipset_redstone#buildcraftunofficial:chipset_redstone#coal",
+                assemble.params().get("recipe"));
+        assertEquals("1", assemble.params().get("times"));
+        assertEquals("buildcraftunofficial:assembly_table", assemble.params().get("station"));
+        assertEquals("buildcraftunofficial:laser,buildcraftunofficial:engine_stone,minecraft:lever",
+                assemble.params().get("held"), "the leaf names the rig it runs with");
+        assertEquals("", assemble.params().get("layout"), "an assemble leaf carries no layout");
+
+        assertEquals(1, gathered(plan, REDSTONE, "mine"), "the chipset takes one redstone: " + planLeaves);
+        assertEquals(1, gathered(plan, COAL, "mine"), "the chipset's fuel is one coal: " + planLeaves);
+        // The rig comes once: a table to stand at and three pieces held.
+        assertEquals(1, gathered(plan, ASSEMBLY_TABLE, "mine"), planLeaves.toString());
+        assertEquals(1, gathered(plan, LASER, "mine"), planLeaves.toString());
+        assertEquals(1, gathered(plan, STONE_ENGINE, "mine"), planLeaves.toString());
+        assertEquals(1, gathered(plan, LEVER, "mine"), planLeaves.toString());
+
+        Executed executed = assertRunsToTheGoal(plan, gogglesBook(), Map.of(), Map.of(), GOGGLES, 1);
+        assertEquals(1, executed.stock().getOrDefault(ASSEMBLY_TABLE, 0), "the table is kept, never spent");
+        assertEquals(1, executed.stock().getOrDefault(LASER, 0), "the laser is kept, never spent");
+        assertEquals(1, executed.stock().getOrDefault(STONE_ENGINE, 0), "the engine is kept, never spent");
+        assertEquals(1, executed.stock().getOrDefault(LEVER, 0), "the lever is kept, never spent");
+    }
+
+    @Test
+    void twoChipsetsStillNeedOnlyOneRig() {
+        SolverPlanner planner = planner(gogglesBook(), rigIndex());
+        Plan plan = planned(planner, request(new Goal.HaveItem(CHIPSET, 2), EMPTY, Exclusions.NONE));
+
+        NodeSpec assemble = assembleLeaf(plan);
+        assertEquals("2", assemble.params().get("times"), "two chipsets are two runs");
+        assertEquals(2, gathered(plan, REDSTONE, "mine"));
+        assertEquals(2, gathered(plan, COAL, "mine"));
+        assertEquals(1, gathered(plan, ASSEMBLY_TABLE, "mine"), "one table for both runs: " + leaves(plan));
+        assertEquals(1, gathered(plan, LASER, "mine"), "one rig for both runs: " + leaves(plan));
+        assertEquals(1, gathered(plan, STONE_ENGINE, "mine"), leaves(plan).toString());
+        assertEquals(1, gathered(plan, LEVER, "mine"), leaves(plan).toString());
+        assertRunsToTheGoal(plan, gogglesBook(), Map.of(), Map.of(), CHIPSET, 2);
+    }
+
+    @Test
+    void aRigPieceThatCannotBeHadMakesTheGoalUnplannableNamingIt() {
+        // The lever has no source and no recipe: the rig cannot be completed, so nothing that needs the table can
+        // be planned, and the failure names the piece that is missing.
+        Failure failure = unplannable(planner(gogglesBook(), rigIndex(LEVER)),
+                request(new Goal.HaveItem(GOGGLES, 1), EMPTY, Exclusions.NONE));
+        assertEquals(Failure.Kind.NO_SOURCE, failure.kind(), failure.toString());
+        assertEquals(LEVER, ((Failure.NoSource) failure).key(), "the failure names the rig piece that cannot be had");
     }
 
     // ─── Leaf params (items 13 and 15) ───────────────────────────────────────────────────────────

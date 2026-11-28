@@ -4,6 +4,7 @@ import com.legoj15.megablockbot.core.ItemKey;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * The obtainability lint (design 4.3) over an {@link AcquisitionIndex}: which items a survival player cannot get at
@@ -22,6 +23,15 @@ public record LintReport(String namespace, int total, int withSource, int crafta
                          List<String> notes) {
 
     public static LintReport of(AcquisitionIndex index, String namespace) {
+        return of(index, Set.of(), namespace);
+    }
+
+    /**
+     * As above, with the results of recipes the index cannot see (an {@code assemble} recipe, which lives in a mod's
+     * own registry rather than the recipe manager and is in the planner's book instead): they count as craftable, so
+     * an item whose only way is one is obtainable, not unobtainable.
+     */
+    public static LintReport of(AcquisitionIndex index, Set<ItemKey> alsoCraftable, String namespace) {
         int total = 0;
         int withSource = 0;
         int craftableOnly = 0;
@@ -32,7 +42,7 @@ public record LintReport(String namespace, int total, int withSource, int crafta
             if (namespace != null && !item.namespace().equals(namespace)) continue;
             total++;
             if (!index.sources(item).isEmpty()) withSource++;
-            else if (index.craftable().contains(item)) craftableOnly++;
+            else if (index.craftable().contains(item) || alsoCraftable.contains(item)) craftableOnly++;
             else if (!index.knownWays(item).isEmpty()) {
                 noStrategy.add(item);
                 ways.addAll(index.knownWays(item));
