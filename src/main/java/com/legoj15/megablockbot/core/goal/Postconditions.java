@@ -115,16 +115,18 @@ public final class Postconditions {
     }
 
     /**
-     * The deliveries the snapshot carries for the goal's recipient and item, counted from the game time the goal was
-     * given: a handing-over the body noted before that belongs to an earlier goal, however much of it is still lying
-     * there. Never UNKNOWN — the body's own memory is always there to read.
+     * The deliveries the snapshot carries that were noted for this goal: the goal's recipient and item, and the
+     * goal's own stamp ({@code since}, which the runtime makes different for every deliver goal it is given). A
+     * handing-over noted for another goal, earlier or later, is that goal's, however much of it is still lying
+     * there: two requests for the same item are two deliveries. Never UNKNOWN — the body's own memory is always
+     * there to read.
      */
     private Postcondition deliver(Goal.Deliver g) {
         return snapshot -> {
             int delivered = 0;
             for (Delivery delivery : snapshot.deliveries()) {
                 if (delivery.recipient().equals(g.recipient()) && delivery.item().equals(g.key())
-                        && delivery.gameTime() >= g.since()) {
+                        && delivery.gameTime() == g.since()) {
                     delivered += delivery.count();
                 }
             }

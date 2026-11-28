@@ -928,6 +928,19 @@ final class SolverPlannerTest {
     }
 
     @Test
+    void aDeliverPlannedAgainGathersOnlyWhatIsStillOwed() {
+        // Six sticks were asked for and four are handed over already (the snapshot carries the notes made for this
+        // goal). The plan made again makes sticks once, for the two still owed, not for all six.
+        String player = "11111111-2222-3333-4444-555555555555";
+        Goal.Deliver goal = new Goal.Deliver(STICK, 6, player, 50);
+        Snapshot partWay = Snapshot.builder().gameTime(60).item(OAK_PLANKS, 2)
+                .delivery(new com.legoj15.megablockbot.core.snapshot.Delivery(player, STICK, 4, 50)).build();
+        Plan plan = planned(planner(), request(goal, partWay, Exclusions.NONE));
+        List<NodeSpec> leaves = leaves(plan);
+        assertEquals(List.of("craft", "deliver"), leaves.stream().map(NodeSpec::taskKind).toList(), leaves.toString());
+    }
+
+    @Test
     void deliverPlansTheItemsThenOneDeliverLeafThatSpendsThem() {
         Goal.Deliver goal = new Goal.Deliver(STICK, 2, "11111111-2222-3333-4444-555555555555");
         Plan plan = planned(planner(), request(goal, snapshot(Map.of(OAK_PLANKS, 2), Map.of()), Exclusions.NONE));

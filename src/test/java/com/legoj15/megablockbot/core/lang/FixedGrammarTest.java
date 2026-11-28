@@ -211,6 +211,14 @@ class FixedGrammarTest {
     }
 
     @Test
+    void aGiveTailAfterACommandThatGathersNothingLeavesThatCommandAlone() {
+        // "then give it to me" belongs to a gather command. After a status it is words the grammar does not
+        // know, and the status is still answered.
+        List<Intent> intents = parse("status then give it to me");
+        assertTrue(intents.stream().anyMatch(intent -> intent instanceof Intent.Status), intents.toString());
+    }
+
+    @Test
     void deliverWordsFromTheConsoleSetNoGoal() {
         assertUnknown(parseFromConsole("give me 3 oak planks"));
         assertUnknown(parseFromConsole("bring me a stone pickaxe"));

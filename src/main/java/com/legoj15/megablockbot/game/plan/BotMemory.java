@@ -317,6 +317,15 @@ public final class BotMemory {
      * ones come in, so a body that trades all day does not carry, and save, every stack it ever handed over.
      */
     public void noteDelivery(String recipient, ItemKey item, int count, long gameTime) {
+        // One note a goal: a hand-over of many stacks adds to the note it began, so the bound below is a bound on
+        // goals remembered, never on how much of one goal is.
+        for (int i = deliveries.size() - 1; i >= 0; i--) {
+            Delivery noted = deliveries.get(i);
+            if (noted.gameTime() == gameTime && noted.recipient().equals(recipient) && noted.item().equals(item)) {
+                deliveries.set(i, new Delivery(recipient, item, noted.count() + count, gameTime));
+                return;
+            }
+        }
         deliveries.add(new Delivery(recipient, item, count, gameTime));
         if (deliveries.size() <= MAX_DELIVERIES) return;
         deliveries.subList(0, deliveries.size() - MAX_DELIVERIES).clear();
@@ -327,12 +336,19 @@ public final class BotMemory {
         return List.copyOf(deliveries);
     }
 
-    /** How many of the item the body has handed to that player at or after {@code since} (the goal's own count). */
+    /** The highest stamp any noted delivery carries, or 0: the next deliver goal's stamp is above it. */
+    public long lastDeliveryStamp() {
+        long last = 0;
+        for (Delivery delivery : deliveries) last = Math.max(last, delivery.gameTime());
+        return last;
+    }
+
+    /** How many of the item the body has handed to that player for the goal stamped {@code since}. */
     public int deliveredSince(String recipient, ItemKey item, long since) {
         int total = 0;
         for (Delivery delivery : deliveries) {
             if (delivery.recipient().equals(recipient) && delivery.item().equals(item)
-                    && delivery.gameTime() >= since) {
+                    && delivery.gameTime() == since) {
                 total += delivery.count();
             }
         }

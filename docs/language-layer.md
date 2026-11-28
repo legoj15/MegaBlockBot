@@ -94,7 +94,7 @@ far better. `GoalArguments.check` is the only place model-named values become a 
 | `stockpile` | `item`, `count`, `position` | item exists; count required, 1 to 10000; position `{x, y, z}` whole numbers |
 | `build` | `blueprint`, `position` | blueprint in `context.blueprints()` ignoring case and extra spaces (the goal carries the listed spelling) |
 | `go_to` | `position` or `to_owner`, optional `radius` | radius 0 to 256; default 2 for a position, 3 for the owner; `to_owner` is refused while the owner is online in another dimension (issue #27) |
-| `deliver` | `item`, `count` (default 1) | item exists; count 1 to 10000; the recipient is the owner, whose id the context carries (issue #19); refused while the owner is online in another dimension, and when nobody is behind the message (the console) |
+| `deliver` | `item`, `count` (default 1) | item exists; count 1 to 10000; the recipient is whoever spoke, whose id the context carries (issue #19); refused while the owner is online in another dimension, and when nobody is behind the message (the console) |
 
 An item, enchantment or blueprint named as `""` or as blanks is refused as such ("needs a name"), before anything is
 made of it: an enchantment `""` would otherwise become `minecraft:`, which is taken as named while the game's

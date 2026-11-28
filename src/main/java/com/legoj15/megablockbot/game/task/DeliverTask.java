@@ -232,9 +232,10 @@ final class DeliverTask extends BodyTask {
      */
     @Nullable
     private TickResult watchTheChase(BotPlayer body, double distance) {
-        boolean gain = distance < bestDistance - CLOSER_BY;
-        bestDistance = Math.min(bestDistance, distance);
-        if (gain) {
+        // A gain is measured against where the last gain left the body, not against the tick before: a walk covers
+        // a fifth of a block a tick, which is never a gain on its own and is one every three ticks.
+        if (distance < bestDistance - CLOSER_BY) {
+            bestDistance = distance;
             noProgress = 0;
             return null;
         }
@@ -271,7 +272,10 @@ final class DeliverTask extends BodyTask {
             body.lookAt(EntityAnchorArgument.Anchor.EYES, aim);
             ItemStack toGive = stack.copyWithCount(ofIt);
             inventory.removeItem(slot, ofIt);
-            if (body.drop(toGive, false, false) == null || inventory.countItem(item) != before - ofIt) {
+            boolean thrown = body.drop(toGive, false, false) != null;
+            // A drop the game refused threw nothing: the stack goes back where it came from, so nothing is lost.
+            if (!thrown) inventory.placeItemBackInInventory(toGive);
+            if (!thrown || inventory.countItem(item) != before - ofIt) {
                 release(body);
                 return TickResult.failed(new Failure.Internal(new IllegalStateException(
                     "dropping " + ofIt + " of " + itemKey.id() + " did not leave the inventory"),
@@ -279,7 +283,8 @@ final class DeliverTask extends BodyTask {
             }
             dropped += ofIt;
             gave = true;
-            BotMemory.of(body.getUUID()).noteDelivery(recipientId, itemKey, ofIt, body.level().getGameTime());
+            // Noted under the goal's own stamp, which is what the goal is judged by.
+            BotMemory.of(body.getUUID()).noteDelivery(recipientId, itemKey, ofIt, since);
             MegaBlockBot.LOGGER.info("{} handed {} {} to {}",
                 body.getGameProfile().getName(), ofIt, itemKey.id(), recipientName);
             break; // one stack a tick, as a player drops

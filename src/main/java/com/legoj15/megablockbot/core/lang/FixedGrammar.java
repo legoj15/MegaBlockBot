@@ -213,7 +213,12 @@ public final class FixedGrammar implements LanguageLayer {
         // "craft a quarry then give it to me": the separator takes "then" for its own, but this clause is the tail of
         // the one before it, so it goes back there before anything is read.
         for (int i = 1; i < clauses.length; i++) {
-            if (clauses[i].strip().equals(THEN_GIVE_TAIL) && !clauses[i - 1].isBlank()) {
+            String before = clauses[i - 1].strip();
+            int space = before.indexOf(' ');
+            // Only a gather command has something to give: after a status or a cancel the words stay their own
+            // clause, and the command before them is read as it always was.
+            boolean gathers = GATHER_VERBS.contains(space < 0 ? before : before.substring(0, space));
+            if (clauses[i].strip().equals(THEN_GIVE_TAIL) && gathers) {
                 clauses[i - 1] = clauses[i - 1] + " then " + THEN_GIVE_TAIL;
                 clauses[i] = "";
             }

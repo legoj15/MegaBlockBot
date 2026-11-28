@@ -489,13 +489,16 @@ Leaf params: `item`, `count` (the total the goal asks for), `recipient` (the pla
 is the `Goal.Deliver` itself (issue #19), so the executor judges it on the deliveries the snapshot carries.
 
 - **The goal and how it is judged.** `Goal.Deliver(key, count, recipient, since)`: satisfied when the body has noted
-  dropping `count` of the item at the recipient's feet at or after `since`, the game time the goal was given (the
-  words carry no clock, so `BotRuntime.submit` stamps it; a goal asked again needs a new delivery). What a player
-  carries is not the body's to read, so the body's own note is the only record: `DeliverTask` writes each stack it
-  hands over into `BotMemory` (`noteDelivery`: recipient, item, count, game time; saved with the brain, the oldest
-  past 64 notes dropped), `SnapshotCollector` puts the notes at or after the goal's `since` into the snapshot (only
-  when a `Deliver` goal is being planned or judged), and `Postconditions` counts them. A resumed or replanned task
-  drops only what is still owed, reading the same notes.
+  dropping `count` of the item at the recipient's feet for this goal. `since` is the goal's stamp: the game time it
+  was given (the words carry no clock, so `BotRuntime.submit` stamps it), pushed past every earlier deliver goal's
+  stamp so that no two share one. What a player carries is not the body's to read, so the body's own note is the
+  only record: `DeliverTask` adds each stack it hands over to the goal's note in `BotMemory` (`noteDelivery`:
+  recipient, item, count, the goal's stamp; one note a goal, saved with the brain, the oldest past 64 goals
+  dropped), `SnapshotCollector` puts the notes into the snapshot (only when a `Deliver` goal is being planned or
+  judged), and `Postconditions` counts the ones that carry the goal's own stamp. So a goal asked again needs a new
+  delivery, also when it was asked while the first was still under way; a resumed task drops only what is still
+  owed, and a plan made again gathers only that. (Before 2026-11-27 a note carried the time of the drop and counted
+  for every goal given before it: a second request was satisfied by the first one's hand-over.)
 - **The plan** (`SolverPlanner.deliverPlan`): the ordinary item plan for the count, then one `deliver` leaf. The
   items are spent by the leaf — they leave the working stock, as a deposit's do — so anything the plan asks of the
   item after it gathers it again.

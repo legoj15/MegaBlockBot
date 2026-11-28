@@ -167,9 +167,10 @@ final class GoalArguments {
     }
 
     /**
-     * A delivery to the owner (issue #19): the goal carries the owner's id, and only the owner's — the model has no
-     * tool that names another player, so neither has this kind a field for one. Refused as the grammar's deliver
-     * forms are when the owner is online in another dimension (issue #27).
+     * A delivery to whoever spoke (issue #19), as the grammar's "give me" is: the goal carries the speaker's id, and
+     * only theirs — the model has no tool that names another player, so neither has this kind a field for one.
+     * Whoever may command the body may be handed what it carries. Refused as the grammar's deliver forms are when
+     * the owner is online in another dimension (issue #27).
      */
     private static Goal deliver(JsonObject arguments, LanguageContext context) {
         if (!context.ownerInBotDimension()) {

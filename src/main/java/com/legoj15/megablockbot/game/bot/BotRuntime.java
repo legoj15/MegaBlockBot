@@ -203,13 +203,15 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
 
     /**
      * Starts the goal now, or queues it behind the one running (design 3.4, the FIFO queue). A deliver goal is
-     * stamped with the game time it was given (issue #19): the words carry no clock, and only what is handed over
-     * from that moment counts, so a goal asked again needs a new delivery.
+     * stamped (issue #19): the game time it was given, pushed past the stamp of every deliver goal before it, so no
+     * two share one. A hand-over is noted under its goal's stamp and counted only for that goal, so a goal asked
+     * again needs a new delivery, also when it was asked in the same tick or while the first was still walking.
      */
     public void submit(Goal goal) {
         if (goal instanceof Goal.Deliver deliver && deliver.since() == 0L && body != null) {
-            goal = new Goal.Deliver(deliver.key(), deliver.count(), deliver.recipient(),
-                    body.level().getGameTime());
+            long noted = BotMemory.of(body.getUUID()).lastDeliveryStamp();
+            lastDeliverStamp = Math.max(body.level().getGameTime(), Math.max(lastDeliverStamp, noted) + 1);
+            goal = new Goal.Deliver(deliver.key(), deliver.count(), deliver.recipient(), lastDeliverStamp);
         }
         executor.submit(goal);
     }
@@ -381,6 +383,9 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         if (taskWasActive && !active) current.input().reset();
         taskWasActive = active;
     }
+
+    /** The stamp of the deliver goal given last, so the next one's is above it (see {@link #submit}). */
+    private long lastDeliverStamp;
 
     /** The step the current task is for, and the task whose end was logged last. */
     private String currentKind = "";

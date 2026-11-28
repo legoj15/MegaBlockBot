@@ -63,6 +63,25 @@ class PostconditionsTest {
     }
 
     @Test
+    void aDeliverGoalCountsOnlyTheHandOversNotedForIt() {
+        // Two requests for the same item and player: each is satisfied by its own hand-over. A note carries the
+        // stamp of the goal it was made for, so the three sticks handed over for the second request do not make
+        // the first one done, and the first one's do not make the second.
+        ItemKey stick = ItemKey.of("stick");
+        String player = "11111111-2222-3333-4444-555555555555";
+        Goal.Deliver first = new Goal.Deliver(stick, 3, player, 100);
+        Goal.Deliver second = new Goal.Deliver(stick, 3, player, 101);
+        Snapshot onlyTheSecond = Snapshot.builder()
+                .delivery(new com.legoj15.megablockbot.core.snapshot.Delivery(player, stick, 3, 101)).build();
+        assertFalse(eval(first, onlyTheSecond).isSatisfied());
+        assertTrue(eval(second, onlyTheSecond).isSatisfied());
+        Snapshot onlyTheFirst = Snapshot.builder()
+                .delivery(new com.legoj15.megablockbot.core.snapshot.Delivery(player, stick, 3, 100)).build();
+        assertTrue(eval(first, onlyTheFirst).isSatisfied());
+        assertFalse(eval(second, onlyTheFirst).isSatisfied());
+    }
+
+    @Test
     void haveToolTierComparesTheBestToolOfThatClass() {
         var goal = new Goal.HaveToolTier(ToolClass.PICKAXE, ToolTier.IRON);
         Snapshot held = Snapshot.builder().tool(ToolClass.PICKAXE, ToolTier.DIAMOND).build();

@@ -17,6 +17,7 @@ import com.legoj15.megablockbot.core.plan.PlanRequest;
 import com.legoj15.megablockbot.core.plan.Planner;
 import com.legoj15.megablockbot.core.plan.Profile;
 import com.legoj15.megablockbot.core.snapshot.ContainerSight;
+import com.legoj15.megablockbot.core.snapshot.Delivery;
 import com.legoj15.megablockbot.core.snapshot.NotedOffer;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.megablockbot.core.snapshot.StackFacts;
@@ -1336,14 +1337,21 @@ public final class SolverPlanner implements Planner {
         /**
          * The plan for a deliver goal (issue #19): the ordinary item plan for the count, then one {@code deliver} leaf.
          * The items leave the working stock with the leaf, as a deposit's do, so whatever the plan asks of the item
-         * after it gathers it again. Nothing is set aside for what was already delivered: the leaf's goal is judged
-         * on the deliveries noted since the goal was given, and the leaf asks for the whole count, so a task that
-         * resumes (or a plan made again after a part was handed over) drops only what is still owed — the shortfall
-         * the item plan sees is what the body does not hold, and the leaf's {@code count} says the total.
+         * after it gathers it again. What was already handed over for this goal (the snapshot carries the notes) is
+         * not gathered a second time: the items planned are the ones still owed, while the leaf's {@code count}
+         * says the total, since the task counts what it has noted for the goal and drops the rest.
          */
         Step deliverPlan(Goal.Deliver goal) {
             List<NodeSpec> nodes = new ArrayList<>();
-            Step step = itemPlan(goal.key(), goal.count());
+            long delivered = 0;
+            for (Delivery noted : snapshot.deliveries()) {
+                if (noted.gameTime() == goal.since() && noted.recipient().equals(goal.recipient())
+                        && noted.item().equals(goal.key())) {
+                    delivered += noted.count();
+                }
+            }
+            int owed = (int) Math.max(0, goal.count() - delivered);
+            Step step = owed == 0 ? Step.ok(List.of()) : itemPlan(goal.key(), owed);
             if (step.failure() != null) return step;
             nodes.addAll(step.nodes());
             Map<String, String> params = new TreeMap<>();
@@ -1351,7 +1359,7 @@ public final class SolverPlanner implements Planner {
             params.put("count", Integer.toString(goal.count()));
             params.put("recipient", goal.recipient());
             nodes.add(NodeSpec.leaf(goal, "deliver", params, ""));
-            removeStock(goal.key(), goal.count());
+            removeStock(goal.key(), owed);
             return Step.ok(nodes);
         }
 
