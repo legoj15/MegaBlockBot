@@ -127,11 +127,14 @@ public final class AcquisitionIndexBuilder {
     private AcquisitionIndex run() {
         section("items", this::items);
         Map<String, OreRange> ores = section("ore ranges", () -> OreRanges.read(server, notes), Map.of());
-        // Null when the read failed: every block then counts as generated, so one bad feature costs the planner a
-        // wasted search at worst and never its sources.
-        Set<String> generated = section("generated blocks", () -> NaturalBlocks.read(server, notes), null);
-        // Empty when the read failed: no block is then bound anywhere, so the planner prices mines as it always did.
-        Map<String, Set<String>> boundBiomes = section("block biomes", () -> BlockBiomes.read(server, notes), Map.of());
+        // What the generator places is what some biome's features, the terrain or the game's code place. When that
+        // read fails the feature registry as a whole is read instead (it also lists what only a structure places),
+        // and when that fails too every block counts as generated: a wasted search at worst, never a lost source.
+        // With no biome read no block is bound anywhere, and the planner prices mines as it always did.
+        BlockBiomes.Read where = section("block biomes", () -> BlockBiomes.read(server, notes), null);
+        Set<String> generated = where != null ? where.placed()
+            : section("generated blocks", () -> NaturalBlocks.read(server, notes), null);
+        Map<String, Set<String>> boundBiomes = where != null ? where.bound() : Map.of();
         section("block loot", () -> blocks(ores, generated, boundBiomes));
         section("entity loot", this::entities);
         section("fishing", this::fishing);

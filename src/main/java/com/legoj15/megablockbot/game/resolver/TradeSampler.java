@@ -38,13 +38,25 @@ import net.minecraft.world.item.trading.MerchantOffer;
  */
 final class TradeSampler {
     static final int SAMPLES = 64;
+    /**
+     * A listing whose first {@link #SAMPLES} samples gave more distinct results than this is one that draws its
+     * result (an enchanted book: one result per enchantment and level, over a hundred of them), not one that sells a
+     * thing: no fixed listing gives more than a handful.
+     */
+    private static final int VARIED_RESULTS = 8;
+    /**
+     * How many samples such a listing gets. In 64 a book of mending came up once or twice, so its chance was a
+     * guess and its "cheapest price" one roll between 10 and 38 emeralds: a plan gathered 38. In 4096 each of
+     * some forty enchantments comes up about a hundred times, which settles both.
+     */
+    private static final int VARIED_SAMPLES = 4096;
     private static final long SEED = 0x4D42_4254_5241_4445L; // "MBBTRADE"
 
     private TradeSampler() {}
 
     // One distinct result of one listing, before ids are settled.
     private record Result(String profession, int level, int listing, ItemKey item, Map<String, Integer> enchantments,
-                          Map<ItemKey, Integer> cost, ItemKey jobSite, int appearances) {}
+                          Map<ItemKey, Integer> cost, ItemKey jobSite, int appearances, int samples) {}
 
     static List<Source.Trade> sample(MinecraftServer server, BuildNotes notes) {
         ServerLevel level = server.overworld();
@@ -141,7 +153,10 @@ final class TradeSampler {
         RandomSource random = RandomSource.create(SEED ^ (profession + ":" + level + ":" + index).hashCode());
         Map<String, Result> byKey = new TreeMap<>();
         Map<String, Integer> counts = new HashMap<>();
-        for (int sample = 0; sample < SAMPLES; sample++) {
+        int samples = SAMPLES;
+        for (int sample = 0; sample < samples; sample++) {
+            // The short pass is at its last sample: a listing that has shown many results by now gets the long one.
+            if (sample == SAMPLES - 1 && byKey.size() > VARIED_RESULTS) samples = VARIED_SAMPLES;
             MerchantOffer offer = listing.getOffer(trader, random);
             if (offer == null) continue;
             ItemStack stack = offer.getResult();
@@ -166,13 +181,13 @@ final class TradeSampler {
             Result prior = byKey.get(key);
             // Prices vary by roll; the cheapest seen is the one a planner should expect to be able to get.
             if (prior == null || total(cost) < total(prior.cost())) {
-                byKey.put(key, new Result(profession, level, index, item, enchantments, cost, jobSite, 0));
+                byKey.put(key, new Result(profession, level, index, item, enchantments, cost, jobSite, 0, 0));
             }
         }
         for (Map.Entry<String, Result> e : byKey.entrySet()) {
             Result r = e.getValue();
             out.add(new Result(r.profession(), r.level(), r.listing(), r.item(), r.enchantments(), r.cost(), r.jobSite(),
-                counts.get(e.getKey())));
+                counts.get(e.getKey()), samples));
         }
     }
 
@@ -197,7 +212,7 @@ final class TradeSampler {
             String id = baseId(r);
             if (uses.get(r.item().id() + "|" + id) > 1) id += "@" + r.listing();
             trades.add(new Source.Trade(id, r.item(), r.profession(), r.level(), r.cost(), r.enchantments(),
-                (double) r.appearances() / SAMPLES, r.jobSite()));
+                (double) r.appearances() / r.samples(), r.jobSite()));
         }
         return trades;
     }

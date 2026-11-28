@@ -104,6 +104,14 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
   from being mined. The cost of the rule is a block missing from both the read and the list: its item then has no
   mining source and the goal says so at once, which is the cue to add the line. A failed read counts every block as
   generated: a wasted search at worst, never a lost source.
+- Which blocks the generator places at all (`MineBlock.generated`) is the same read's other answer: what some biome's
+  features place, what the terrain settings name and `PLACED_BY_CODE`. The feature registry as a whole (`NaturalBlocks`)
+  is only the fallback when that read fails, because it also lists features no biome places: a village's hay pile is a
+  configured feature that only the village structure uses, and a plan that took hay bales for something lying about
+  set out to mine eighty-five of them.
+- Villager trades are sampled 64 times a listing, and 4096 times for a listing whose first 64 samples gave more than
+  eight distinct results (an enchanted book: one result per enchantment and level). In 64 samples a book of mending
+  came up once or twice, so its chance was a guess and its cheapest price one roll between 10 and 38 emeralds.
 - Which biomes place a bound block (`MineBlock.biomes`, read by `BlockBiomes`): every biome's placed features are
   walked — the same overworld/nether/end split by tag as the ore ranges — and each configured feature among them is
   taken through the game's own flattening (`PlacedFeature.getFeatures`, the random selectors and patches), written

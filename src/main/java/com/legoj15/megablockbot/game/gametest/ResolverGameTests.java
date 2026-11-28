@@ -14,6 +14,7 @@ import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
@@ -105,14 +106,17 @@ public final class ResolverGameTests {
             {"minecraft:diorite", "minecraft:diorite"}, {"minecraft:clay_ball", "minecraft:clay"},
             {"minecraft:sand", "minecraft:sand"}, {"minecraft:glowstone_dust", "minecraft:glowstone"},
             {"minecraft:redstone", "minecraft:redstone_ore"}, {"minecraft:obsidian", "minecraft:obsidian"},
-            {"minecraft:diamond", "minecraft:diamond_ore"}, {"minecraft:raw_gold", "minecraft:gold_ore"}};
+            {"minecraft:diamond", "minecraft:diamond_ore"}, {"minecraft:raw_gold", "minecraft:gold_ore"},
+            {"minecraft:melon_slice", "minecraft:melon"}};
         for (String[] pair : generated) {
             helper.assertTrue(mine(helper, index, pair[0], pair[1], false).generated(), pair[1] + " is not counted as generated");
         }
         String[][] made = {
             {"minecraft:charcoal", "minecraft:campfire"}, {"minecraft:book", "minecraft:bookshelf"},
             {"minecraft:crafting_table", "minecraft:crafting_table"}, {"minecraft:oak_planks", "minecraft:oak_planks"},
-            {"minecraft:redstone", "minecraft:redstone_wire"}};
+            {"minecraft:redstone", "minecraft:redstone_wire"},
+            // In the feature registry (a village's hay pile), but no biome places it: only a structure does.
+            {"minecraft:hay_block", "minecraft:hay_block"}};
         for (String[] pair : made) {
             helper.assertTrue(!mine(helper, index, pair[0], pair[1], false).generated(), pair[1] + " is counted as generated");
         }
@@ -156,6 +160,16 @@ public final class ResolverGameTests {
             t -> t.profession().equals("minecraft:librarian") && t.enchantments().containsKey("minecraft:mending"));
         helper.assertTrue(trade.isPresent(), "no librarian trade for a book of mending; the enchanted book sources are "
             + index.sources(ItemKey.of("minecraft:enchanted_book")));
+        // A novice shows it too, and the listing is sampled long enough to know the book: mending is one of some
+        // forty enchantments, and the cheapest a villager asks for it is ten emeralds (a treasure, level 1).
+        Optional<Source.Trade> novice = find(index, "minecraft:enchanted_book", Source.Trade.class,
+            t -> t.profession().equals("minecraft:librarian") && t.level() == 1
+                && t.enchantments().equals(Map.of("minecraft:mending", 1)));
+        helper.assertTrue(novice.isPresent(), "no novice librarian trade for a book of mending");
+        int emeralds = novice.get().cost().getOrDefault(ItemKey.of("minecraft:emerald"), 0);
+        helper.assertTrue(emeralds >= 10 && emeralds <= 12, "the cheapest sampled price of mending is " + emeralds + " emeralds");
+        helper.assertTrue(novice.get().chance() > 0.01 && novice.get().chance() < 0.05,
+            "the sampled chance of mending is " + novice.get().chance());
         helper.succeed();
     }
 

@@ -53,10 +53,19 @@ final class BlockBiomes {
     private BlockBiomes() {}
 
     /**
-     * Block id to the sorted ids of the biomes whose features place it, holding only the bound blocks. A block the
-     * terrain settings or the game's own code places is never bound; one no biome's features name is not here at all.
+     * What the read found.
+     *
+     * @param bound  block id to the sorted ids of the biomes whose features place it, holding only the bound blocks.
+     *               A block the terrain settings or the game's own code places is never bound.
+     * @param placed every block the generator puts into the world by itself: what some biome's features place,
+     *               what the terrain is made of, and what the game's code places. A block that only a
+     *               structure's own feature holds (the hay of a village's hay pile) is not among them: the
+     *               feature registry lists that pile, but no biome places it, and a plan that priced hay bales
+     *               as lying about set out to mine eighty-five of them for a farmer's wheat.
      */
-    static Map<String, Set<String>> read(MinecraftServer server, BuildNotes notes) {
+    record Read(Map<String, Set<String>> bound, Set<String> placed) {}
+
+    static Read read(MinecraftServer server, BuildNotes notes) {
         RegistryAccess access = server.registryAccess();
         RegistryOps<JsonElement> ops = RegistryOps.create(JsonOps.INSTANCE, access);
         Registry<Biome> biomes = access.registryOrThrow(Registries.BIOME);
@@ -108,7 +117,9 @@ final class BlockBiomes {
             }
             return true;
         });
-        return out;
+        Set<String> placed = new TreeSet<>(neverBound);
+        for (Map<String, Set<String>> group : placedBy.values()) placed.addAll(group.keySet());
+        return new Read(out, placed);
     }
 
     /** The registry's biomes by id, so the read walks them the same way whatever the registry's own order is. */
