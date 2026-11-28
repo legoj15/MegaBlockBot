@@ -41,6 +41,7 @@ import net.minecraft.core.HolderLookup;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.item.ItemEntity;
@@ -1394,6 +1395,59 @@ public final class MoveAndMineGameTests {
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // Delivering to a player (issue #19)
+    // ---------------------------------------------------------------------------------------------------------
+
+    /**
+     * Four cobblestone carried, a deliver leaf for three: the body walks to the recipient standing across the arena,
+     * faces them and drops what is owed at their feet. One cobblestone stays held, three lie as item entities within
+     * two blocks of the recipient, and the body's memory holds the delivery — the note the goal is judged on.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 1200)
+    public static void deliverDropsTheOwedItemsAtTheRecipientsFeet(GameTestHelper helper) {
+        room(helper, 3);
+        ServerPlayer recipient = helper.makeMockServerPlayerInLevel();
+        Vec3 across = helper.absoluteVec(new Vec3(12.5, FLOOR_Y + 1, 12.5));
+        recipient.setPos(across.x, across.y, across.z);
+        Job job = Job.start(helper, "mdel1", new Vec3(3.5, FLOOR_Y + 1, 3.5), 1200,
+            deliverLeaf(helper, recipient, "cobblestone", 3));
+        job.body().getInventory().setItem(0, new ItemStack(Items.COBBLESTONE, 4));
+        BotMemory memory = BotMemory.of(job.run.id);
+        job.run.atEnd(() -> BotMemory.forget(job.run.id));
+        job.run.each(1050, () -> {
+            failIfFailed(helper, job);
+            if (job.task.state() != TaskState.COMPLETED) return;
+            helper.assertTrue(job.body().getInventory().countItem(Items.COBBLESTONE) == 1,
+                "the body holds " + job.body().getInventory().countItem(Items.COBBLESTONE) + " cobblestone, not the 1 left");
+            int lying = 0;
+            for (ItemEntity drop : helper.getLevel().getEntitiesOfClass(ItemEntity.class,
+                new AABB(across.x - 2, across.y - 2, across.z - 2, across.x + 2, across.y + 2, across.z + 2))) {
+                if (drop.getItem().is(Items.COBBLESTONE)) lying += drop.getItem().getCount();
+            }
+            helper.assertTrue(lying == 3, lying + " cobblestone lie within two blocks of the recipient, not 3");
+            helper.assertTrue(memory.deliveredSince(recipient.getUUID().toString(), ItemKey.of("cobblestone"), 0L) == 3,
+                "the memory notes " + memory.deliveries() + ", not 3 cobblestone to the recipient");
+            job.run.pass();
+        });
+    }
+
+    /** A recipient who is not online: the leaf ends Unreachable at once, and what was carried stays held. */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 200)
+    public static void deliverToNobodyFailsUnreachable(GameTestHelper helper) {
+        room(helper, 3);
+        Job job = Job.start(helper, "mdel2", new Vec3(3.5, FLOOR_Y + 1, 3.5), 200,
+            deliverLeaf(helper, UUID.randomUUID(), "cobblestone", 3));
+        job.body().getInventory().setItem(0, new ItemStack(Items.COBBLESTONE, 4));
+        job.run.each(20, () -> {
+            helper.assertTrue(job.task.state() != TaskState.COMPLETED, "delivered to nobody");
+            if (job.task.state() != TaskState.FAILED) return;
+            helper.assertTrue(job.task.failure() instanceof Failure.Unreachable, "failed as " + job.task.failure());
+            helper.assertTrue(job.body().getInventory().countItem(Items.COBBLESTONE) == 4, "the body's cobblestone changed");
+            job.run.pass();
+        });
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // Building leaves
     // ---------------------------------------------------------------------------------------------------------
 
@@ -1415,6 +1469,18 @@ public final class MoveAndMineGameTests {
         }
         Map<String, String> params = Map.of("dimension", dimension(helper), "drops", positions.toString(), "deathPos", pos(drops[0]).encode());
         return NodeSpec.leaf(new Goal.Custom(TaskFeature.RECOVER_DROPS, params), TaskFeature.RECOVER_DROPS, params, "");
+    }
+
+    /** A deliver leaf as the planner writes it: the goal names the item, the count and the recipient's UUID. */
+    private static NodeSpec deliverLeaf(GameTestHelper helper, ServerPlayer recipient, String item, int count) {
+        return deliverLeaf(helper, recipient.getUUID(), item, count);
+    }
+
+    /** As above, for a recipient given by id (one who is not online, say). */
+    private static NodeSpec deliverLeaf(GameTestHelper helper, UUID recipient, String item, int count) {
+        Goal.Deliver goal = new Goal.Deliver(ItemKey.of(item), count, recipient.toString(), 0L);
+        return NodeSpec.leaf(goal, TaskFeature.DELIVER, Map.of(
+            "item", ITEM + item, "count", Integer.toString(count), "recipient", recipient.toString()), "");
     }
 
     /** A deposit leaf: the goal says where the container is and what it is to hold, {@code count} how many to move. */

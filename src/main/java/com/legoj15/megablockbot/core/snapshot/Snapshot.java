@@ -1,6 +1,7 @@
 package com.legoj15.megablockbot.core.snapshot;
 
 import com.legoj15.megablockbot.core.EquipSlot;
+import com.legoj15.megablockbot.core.goal.Goal;
 import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.ToolClass;
@@ -31,6 +32,9 @@ import java.util.Map;
  *                    that kind in the loaded surroundings, for the blocks the acquisition index names as a mining or
  *                    harvesting source. A block that is absent was not seen; an empty map means no sight was taken
  *                    (the cost model then adds nothing, so a snapshot without one plans as it always did)
+ * @param deliveries  the deliveries the body noted in its memory at or after the earliest time a snapshot is being
+ *                    taken for a {@link Goal.Deliver} goal (issue #19); nothing when no such goal is being planned or
+ *                    judged, so a snapshot costs no more than its goal reads
  */
 public record Snapshot(
         long gameTime,
@@ -48,7 +52,8 @@ public record Snapshot(
         Map<String, StructureReport> structures,
         Map<String, Observation> observations,
         List<NotedOffer> offers,
-        Map<String, Integer> nearbyBlocks) {
+        Map<String, Integer> nearbyBlocks,
+        List<Delivery> deliveries) {
 
     public Snapshot {
         items = Map.copyOf(items);
@@ -61,6 +66,7 @@ public record Snapshot(
         observations = Map.copyOf(observations);
         offers = List.copyOf(offers);
         nearbyBlocks = Map.copyOf(nearbyBlocks);
+        deliveries = List.copyOf(deliveries);
     }
 
     public int count(ItemKey key) {
@@ -104,6 +110,7 @@ public record Snapshot(
         private final Map<String, Observation> observations = new HashMap<>();
         private final List<NotedOffer> offers = new ArrayList<>();
         private final Map<String, Integer> nearbyBlocks = new HashMap<>();
+        private final List<Delivery> deliveries = new ArrayList<>();
 
         public Builder gameTime(long t) { gameTime = t; return this; }
         public Builder dimension(String d) { dimension = d; return this; }
@@ -130,6 +137,9 @@ public record Snapshot(
         /** A villager offer the body noted in a trade window. */
         public Builder offer(NotedOffer offer) { offers.add(offer); return this; }
 
+        /** A delivery the body noted in its memory; only the ones a {@link Goal.Deliver} goal may count are collected. */
+        public Builder delivery(Delivery delivery) { deliveries.add(delivery); return this; }
+
         /** Records a block kind in the sight at a horizontal distance; the nearer one is kept when called twice. */
         public Builder nearby(String blockId, int distance) {
             nearbyBlocks.merge(blockId, Math.max(0, distance), Math::min);
@@ -140,7 +150,7 @@ public record Snapshot(
             Map<ItemKey, List<StackFacts>> facts = new HashMap<>();
             stackFacts.forEach((k, v) -> facts.put(k, List.copyOf(v)));
             return new Snapshot(gameTime, dimension, pos, health, hunger, foodUnits, items, equipped, bestTools,
-                    stations, containers, facts, structures, observations, offers, nearbyBlocks);
+                    stations, containers, facts, structures, observations, offers, nearbyBlocks, deliveries);
         }
     }
 }

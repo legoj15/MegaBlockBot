@@ -17,6 +17,7 @@ import com.legoj15.megablockbot.core.planner.LookInside;
  *       ({@link UseOnTask}, issue 28).</li>
  *   <li>{@value #RECOVER_DROPS}: pick up what a death dropped ({@link RecoverDropsTask}).</li>
  *   <li>{@value #DEPOSIT}: put items into a container ({@link DepositTask}).</li>
+ *   <li>{@value #DELIVER}: hand items to a player by dropping them at their feet ({@link DeliverTask}, issue 19).</li>
  *   <li>{@value #WITHDRAW}: take items out of a container its owner named (or the body placed), as a player does
  *       ({@link WithdrawTask}).</li>
  *   <li>{@value #LOOK_INSIDE}: open a container its owner named and note what is in it ({@link LookTask}).</li>
@@ -43,6 +44,8 @@ public final class TaskFeature {
     /** The kind of the node the executor inserts after a death; the name is the executor's ({@code DeathHandling}). */
     public static final String RECOVER_DROPS = "recover_drops";
     public static final String DEPOSIT = "deposit";
+    /** The kind of the one leaf of a deliver goal that hands the items over ({@code SolverPlanner}, issue 19). */
+    public static final String DELIVER = "deliver";
     /** The kind the planner's supply leaves bind to ({@code SolverPlanner}, "withdraw"). */
     public static final String WITHDRAW = "withdraw";
     /** The kind of the one leaf of the body's look at a container it was told to take from ({@code LookInside}). */
@@ -64,6 +67,7 @@ public final class TaskFeature {
         TaskRegistry.register(USE_ON, UseOnTask::new);
         TaskRegistry.register(RECOVER_DROPS, (leaf, hints) -> new RecoverDropsTask(leaf));
         TaskRegistry.register(DEPOSIT, (leaf, hints) -> new DepositTask(leaf));
+        TaskRegistry.register(DELIVER, (leaf, hints) -> new DeliverTask(leaf));
         TaskRegistry.register(WITHDRAW, (leaf, hints) -> new WithdrawTask(leaf));
         TaskRegistry.register(LOOK_INSIDE, (leaf, hints) -> new LookTask(leaf));
         TaskRegistry.register(BUILD, (leaf, hints) -> new BuildTask(leaf));

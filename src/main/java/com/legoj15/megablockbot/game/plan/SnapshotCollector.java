@@ -7,6 +7,7 @@ import com.legoj15.megablockbot.core.ToolClass;
 import com.legoj15.megablockbot.core.ToolTier;
 import com.legoj15.megablockbot.core.goal.Goal;
 import com.legoj15.megablockbot.core.snapshot.ContainerSight;
+import com.legoj15.megablockbot.core.snapshot.Delivery;
 import com.legoj15.megablockbot.core.snapshot.NotedOffer;
 import com.legoj15.megablockbot.core.snapshot.Snapshot;
 import com.legoj15.megablockbot.core.snapshot.StackFacts;
@@ -114,7 +115,24 @@ public final class SnapshotCollector {
         offers(level, dimension, memory, builder);
         BodySight.fill(level, dimension, at, memory, builder);
         addGoalFacts(level, dimension, wants, builder);
+        deliveries(memory, wants, builder);
         return builder.build();
+    }
+
+    /**
+     * The deliveries a {@link Goal.Deliver} among {@code wants} may count: the notes at or after the earliest time
+     * such a goal was given (issue #19). Nothing when no deliver goal is being planned or judged, so a snapshot for
+     * any other goal costs nothing here; the notes before that time belong to an earlier goal and are not carried.
+     */
+    private static void deliveries(BotMemory memory, List<Goal> wants, Snapshot.Builder builder) {
+        long earliest = Long.MAX_VALUE;
+        for (Goal goal : wants) {
+            if (goal instanceof Goal.Deliver deliver) earliest = Math.min(earliest, deliver.since());
+        }
+        if (earliest == Long.MAX_VALUE) return;
+        for (Delivery delivery : memory.deliveries()) {
+            if (delivery.gameTime() >= earliest) builder.delivery(delivery);
+        }
     }
 
     // ---- villager offers ---------------------------------------------------------------------------------------

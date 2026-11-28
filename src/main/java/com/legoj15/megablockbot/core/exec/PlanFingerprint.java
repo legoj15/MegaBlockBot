@@ -36,6 +36,7 @@ final class PlanFingerprint {
         return switch (goal) {
             case Goal.HaveItem g -> g.count();
             case Goal.Stockpile g -> g.count();
+            case Goal.Deliver g -> g.count();
             default -> 0;
         };
     }

@@ -30,8 +30,16 @@ public final class BotSpeech {
         return key.namespace().equals("minecraft") ? path : key.namespace() + ":" + path;
     }
 
-    /** The goal as a request: {@code get 4 oak planks}. */
+    /** The goal as a request: {@code get 4 oak planks}. A player's id is shown as it is. */
     public static String goal(Goal goal) {
+        return goal(goal, id -> id);
+    }
+
+    /**
+     * As above, with the players a goal names turned into names by {@code names} (their id when it answers null or
+     * the id itself): the runtime knows the server, this class reads core types only.
+     */
+    public static String goal(Goal goal, java.util.function.Function<String, String> names) {
         if (goal == null) return "a goal that could not be read";
         return switch (goal) {
             case Goal.HaveItem g -> "get " + g.count() + " " + item(g.key()) + check(g.check());
@@ -40,12 +48,19 @@ public final class BotSpeech {
             case Goal.Equip g -> "equip " + equipment(g.slots());
             case Goal.Stockpile g -> "put " + g.count() + " " + item(g.key()) + " into the container at "
                     + position(g.container());
+            case Goal.Deliver g -> "give " + g.count() + " " + item(g.key()) + " to " + named(g.recipient(), names);
             case Goal.Build g -> "build " + g.blueprint() + " at " + position(g.anchor());
             case Goal.Reach g -> "go within " + g.radius() + " of " + position(g.pos());
             case Goal.Custom g -> LookInside.KIND.equals(g.kind()) && g.params().containsKey(LookInside.PARAM_CONTAINER)
                     ? "look inside the container at " + g.params().get(LookInside.PARAM_CONTAINER).replace(',', ' ')
                     : g.kind() + (g.params().isEmpty() ? "" : " " + new TreeMap<>(g.params()));
         };
+    }
+
+    /** The player's name {@code names} answers for an id, or the id when it has none. */
+    private static String named(String id, java.util.function.Function<String, String> names) {
+        String name = names.apply(id);
+        return name == null || name.isBlank() ? id : name;
     }
 
     private static String check(ComponentCheck check) {
@@ -94,7 +109,12 @@ public final class BotSpeech {
 
     /** One line for a finished goal: what was asked, how it ended, and for a failure the reason. */
     public static String result(GoalResult result) {
-        String asked = goal(result.goal());
+        return result(result, id -> id);
+    }
+
+    /** As above, with the players a goal names turned into names ({@link #goal(Goal, Function)}). */
+    public static String result(GoalResult result, java.util.function.Function<String, String> names) {
+        String asked = goal(result.goal(), names);
         return switch (result.status()) {
             case SATISFIED -> "Done: " + asked + ".";
             case CANCELLED -> "Cancelled: " + asked + ".";

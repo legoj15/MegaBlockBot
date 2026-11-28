@@ -48,7 +48,7 @@ public final class BotTalk {
             if (words == null) continue;
             BotRuntime runtime = BotRuntime.of(body);
             if (runtime == null) continue;
-            interpret(body, runtime, words, null);
+            interpret(body, runtime, words, null, sender);
         }
     }
 
@@ -77,12 +77,19 @@ public final class BotTalk {
      * or null for chat: the answer goes to it as well as to the owner.
      */
     public static void interpret(BotPlayer body, BotRuntime runtime, String text, @Nullable CommandSourceStack source) {
+        ServerPlayer speaker = source != null && source.getEntity() instanceof ServerPlayer player ? player : null;
+        interpret(body, runtime, text, source, speaker);
+    }
+
+    /** As above, with the player behind the words named: chat has no command source to read it from. */
+    public static void interpret(BotPlayer body, BotRuntime runtime, String text, @Nullable CommandSourceStack source,
+                                 @Nullable ServerPlayer speaker) {
         runtime.attach(body);
         MinecraftServer server = body.getServer();
         if (server == null) return;
         CompletableFuture<List<Intent>> answer;
         try {
-            answer = LanguageLayers.current().interpret(text, context(body, runtime));
+            answer = LanguageLayers.current().interpret(text, context(body, runtime, speaker));
         } catch (RuntimeException e) {
             // The contract says a layer never throws; if it does, the owner still gets an answer and the log the trace.
             MegaBlockBot.LOGGER.error("The language layer threw while reading \"{}\"", text, e);
@@ -166,11 +173,15 @@ public final class BotTalk {
     /** The language layer's sentence for a goal that did not work out, or empty when it has none (no model). */
     static CompletableFuture<java.util.Optional<String>> explain(BotPlayer body, BotRuntime runtime,
                                                                   com.legoj15.megablockbot.core.exec.GoalResult result) {
-        return LanguageLayers.current().explain(result, context(body, runtime));
+        return LanguageLayers.current().explain(result, context(body, runtime, null));
     }
 
-    /** What the layer may read for one message (design 3.3): where everyone is, the status, the game's enchantments. */
-    private static LanguageContext context(BotPlayer body, BotRuntime runtime) {
+    /**
+     * What the layer may read for one message (design 3.3): where everyone is, the status, the game's enchantments,
+     * the player behind the words (null from the console) and whether the owner stands in the body's dimension
+     * (issue #27: an owner elsewhere has no position the body can walk to, and an absent one is no barrier).
+     */
+    private static LanguageContext context(BotPlayer body, BotRuntime runtime, @Nullable ServerPlayer speaker) {
         ServerPlayer owner = runtime.ownerOnline();
         Pos botPos = pos(body.blockPosition());
         Pos ownerPos = owner != null && owner.level() == body.level() ? pos(owner.blockPosition()) : botPos;
@@ -178,7 +189,8 @@ public final class BotTalk {
         body.registryAccess().registryOrThrow(Registries.ENCHANTMENT).keySet()
                 .forEach(id -> enchantments.add(id.toString()));
         return new LanguageContext(new RegistryItemSearch(), body.level().dimension().location().toString(), ownerPos,
-                botPos, runtime.statusText(), Blueprints.names(), enchantments);
+                botPos, runtime.statusText(), Blueprints.names(), enchantments,
+                speaker == null ? null : speaker.getUUID().toString(), owner == null || owner.level() == body.level());
     }
 
     private static Pos pos(BlockPos pos) {

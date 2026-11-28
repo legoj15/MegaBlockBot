@@ -26,6 +26,7 @@ public final class NodeIdentity {
             case Goal.HaveToolTier g -> g.toolClass().name();
             case Goal.Equip g -> "equip:" + new java.util.TreeMap<>(g.slots());
             case Goal.Stockpile g -> g.key().id() + "@" + g.container().encode();
+            case Goal.Deliver g -> g.key().id() + "@" + g.recipient();
             case Goal.Build g -> g.blueprint() + "@" + g.anchor().encode();
             case Goal.Reach g -> g.dimension() + "@" + g.pos().encode();
             case Goal.Custom g -> g.kind() + ":" + new java.util.TreeMap<>(g.params());

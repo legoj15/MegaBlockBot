@@ -151,6 +151,41 @@ public final class BotRuntimeGameTests {
     }
 
     /**
+     * The owner's words "get 2 stick and give them to me" (issue #19): one goal that makes the sticks and hands them
+     * over, through the language layer, the planner and the executor. The owner stands across the arena; the goal
+     * ends satisfied with two sticks on the ground by them.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 600)
+    public static void sticksDeliveredToTheOwnerByWords(GameTestHelper helper) {
+        floor(helper);
+        Rig rig = Rig.spawnOwnedStandingAt(helper, "give", 600,
+            new Vec3(3.5, FLOOR_TOP, 3.5), new Vec3(12.5, FLOOR_TOP, 12.5));
+        rig.give(Items.OAK_PLANKS, 2);
+        ServerPlayer owner = rig.owner();
+        Feedback feedback = new Feedback();
+        helper.assertTrue(run(rig.server(), rig.ownerSource(feedback),
+            "aiplayer goal " + rig.name() + " get 2 stick and give them to me") == 1,
+            "the goal command failed: " + feedback.messages);
+        Goal given = rig.runtime().view().goal();
+        helper.assertTrue(given instanceof Goal.Deliver deliver && deliver.key().equals(ItemKey.of("minecraft:stick"))
+            && deliver.count() == 2 && deliver.recipient().equals(owner.getUUID().toString()),
+            "the words did not become a delivery of 2 sticks to the owner: " + given);
+        rig.onEachTick(() -> {
+            GoalResult result = rig.runtime().lastResult();
+            if (result == null) return;
+            helper.assertTrue(result.status() == GoalResult.Status.SATISFIED, "the goal ended " + BotSpeech.result(result));
+            int lying = 0;
+            Vec3 at = owner.position();
+            for (ItemEntity drop : helper.getLevel().getEntitiesOfClass(ItemEntity.class,
+                new AABB(at.x - 2, at.y - 2, at.z - 2, at.x + 2, at.y + 2, at.z + 2))) {
+                if (drop.getItem().is(Items.STICK)) lying += drop.getItem().getCount();
+            }
+            helper.assertTrue(lying == 2, lying + " sticks lie within two blocks of the owner, not 2");
+            rig.pass();
+        });
+    }
+
+    /**
      * Three logs and nothing else: planks, a table, sticks, then the pickaxe, which only the 3x3 grid can make. The
      * table is placed beside the body, used and broken again, and its item is back in the inventory at the end.
      */
@@ -1438,6 +1473,25 @@ public final class BotRuntimeGameTests {
         }
 
         /**
+         * A body owned by a mock player who stands in the world at {@code ownerAt} (issue #19): the player a
+         * delivery is handed to. The player and the files the server wrote for it are gone when the test ends.
+         */
+        static Rig spawnOwnedStandingAt(GameTestHelper helper, String tag, int deadlineTicks, Vec3 bodyAt, Vec3 ownerAt) {
+            ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+            Vec3 absolute = helper.absoluteVec(ownerAt);
+            owner.setPos(absolute.x, absolute.y, absolute.z);
+            Rig rig = new Rig(helper, tag, owner.getGameProfile(), owner);
+            rig.atEnd(() -> {
+                MinecraftServer server = helper.getLevel().getServer();
+                if (server.getPlayerList().getPlayers().contains(owner)) server.getPlayerList().remove(owner);
+                forgetPlayerFiles(server, owner.getUUID());
+            });
+            rig.respawn(helper.absoluteVec(bodyAt));
+            helper.runAtTickTime(deadlineTicks, rig::cleanup);
+            return rig;
+        }
+
+        /**
          * A body owned by a player who is in the world and whose respawn point is {@code relativeHome}: block safety then
          * refuses to let the body break anything within sixteen blocks of it, as around a real bed. The player and the
          * files the server wrote for it are gone when the test ends.
@@ -1458,6 +1512,11 @@ public final class BotRuntimeGameTests {
 
         String name() {
             return name;
+        }
+
+        /** The owner as a player in the world, when the rig made one; null when nobody stands behind it. */
+        ServerPlayer owner() {
+            return ownerPlayer;
         }
 
         UUID id() {

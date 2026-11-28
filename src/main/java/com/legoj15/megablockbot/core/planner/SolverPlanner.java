@@ -402,6 +402,7 @@ public final class SolverPlanner implements Planner {
                     case Goal.HaveToolTier g -> haveToolTier(g);
                     case Goal.Equip g -> equipPlan(g);
                     case Goal.Stockpile g -> stockpilePlan(g);
+                    case Goal.Deliver g -> deliverPlan(g);
                     case Goal.Reach g -> Step.ok(List.of(navigateLeaf(g)));
                     case Goal.Build g -> buildPlan(g);
                     case Goal.Custom g -> strategiesFor(g);
@@ -1332,6 +1333,28 @@ public final class SolverPlanner implements Planner {
             return Step.ok(nodes);
         }
 
+        /**
+         * The plan for a deliver goal (issue #19): the ordinary item plan for the count, then one {@code deliver} leaf.
+         * The items leave the working stock with the leaf, as a deposit's do, so whatever the plan asks of the item
+         * after it gathers it again. Nothing is set aside for what was already delivered: the leaf's goal is judged
+         * on the deliveries noted since the goal was given, and the leaf asks for the whole count, so a task that
+         * resumes (or a plan made again after a part was handed over) drops only what is still owed — the shortfall
+         * the item plan sees is what the body does not hold, and the leaf's {@code count} says the total.
+         */
+        Step deliverPlan(Goal.Deliver goal) {
+            List<NodeSpec> nodes = new ArrayList<>();
+            Step step = itemPlan(goal.key(), goal.count());
+            if (step.failure() != null) return step;
+            nodes.addAll(step.nodes());
+            Map<String, String> params = new TreeMap<>();
+            params.put("item", goal.key().id());
+            params.put("count", Integer.toString(goal.count()));
+            params.put("recipient", goal.recipient());
+            nodes.add(NodeSpec.leaf(goal, "deliver", params, ""));
+            removeStock(goal.key(), goal.count());
+            return Step.ok(nodes);
+        }
+
         private static NodeSpec navigateLeaf(Goal.Reach goal) {
             Map<String, String> params = new TreeMap<>();
             params.put("dimension", goal.dimension());
@@ -1878,6 +1901,7 @@ public final class SolverPlanner implements Planner {
             }
             case Goal.Equip g -> queue.addAll(g.slots().values());
             case Goal.Stockpile g -> queue.add(g.key());
+            case Goal.Deliver g -> queue.add(g.key());
             case Goal.Reach g -> { /* a navigate leaf reads no inventory */ }
             case Goal.Build g -> { /* the caller reads the whole inventory */ }
             case Goal.Custom g -> { /* the caller reads the whole inventory */ }
@@ -1926,6 +1950,7 @@ public final class SolverPlanner implements Planner {
             case Goal.Equip g -> "equip:" + sorted(g.slots().entrySet(), e -> e.getKey().name() + "=" + e.getValue().id());
             case Goal.Stockpile g -> "stock:" + g.key().id() + ":" + g.count() + ":" + g.dimension() + ":"
                     + g.container().encode();
+            case Goal.Deliver g -> "deliver:" + g.key().id() + ":" + g.count() + ":" + g.recipient() + ":" + g.since();
             case Goal.Build g -> "build:" + g.blueprint() + ":" + g.dimension() + ":" + g.anchor().encode();
             case Goal.Reach g -> "reach:" + g.dimension() + ":" + g.pos().encode() + ":" + g.radius();
             case Goal.Custom g -> "custom:" + g.kind() + ":" + sorted(g.params().entrySet(), e -> e.getKey() + "=" + e.getValue());

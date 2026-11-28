@@ -76,6 +76,13 @@ final class SaveCodec {
                 m.put("pos", g.pos().encode());
                 m.put("radius", (long) g.radius());
             }
+            case Goal.Deliver g -> {
+                m.put("type", "deliver");
+                m.put("key", g.key().id());
+                m.put("count", (long) g.count());
+                m.put("recipient", g.recipient());
+                m.put("since", g.since());
+            }
             case Goal.Custom g -> {
                 m.put("type", "custom");
                 m.put("kind", g.kind());
@@ -109,6 +116,8 @@ final class SaveCodec {
                     str(m, "dim"), Pos.parse(str(m, "pos")));
             case "build" -> new Goal.Build(str(m, "blueprint"), str(m, "dim"), Pos.parse(str(m, "pos")));
             case "reach" -> new Goal.Reach(str(m, "dim"), Pos.parse(str(m, "pos")), intOf(m.get("radius"), "radius"));
+            case "deliver" -> new Goal.Deliver(ItemKey.of(str(m, "key")), intOf(m.get("count"), "count"),
+                    str(m, "recipient"), m.containsKey("since") ? (long) m.get("since") : 0L);
             case "custom" -> {
                 Map<String, String> params = new HashMap<>();
                 if (m.containsKey("params") && m.get("params") != null) {

@@ -119,11 +119,15 @@ final class ModelFixtures {
         }
     }
 
+    /** The player behind the words the fixtures send: some id, so deliver goals have someone to go to. */
+    static final String SPEAKER = "11111111-2222-3333-4444-555555555555";
+
     static LanguageContext context() {
         return context(ENCHANTMENTS);
     }
 
     static LanguageContext context(Set<String> enchantments) {
-        return new LanguageContext(new Items(), DIMENSION, OWNER_POS, BOT_POS, STATUS, BLUEPRINTS, enchantments);
+        return new LanguageContext(new Items(), DIMENSION, OWNER_POS, BOT_POS, STATUS, BLUEPRINTS, enchantments,
+                SPEAKER, true);
     }
 }

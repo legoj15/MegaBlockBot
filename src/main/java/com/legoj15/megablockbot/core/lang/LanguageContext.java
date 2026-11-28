@@ -4,6 +4,7 @@ import com.legoj15.megablockbot.core.Pos;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import javax.annotation.Nullable;
 
 /**
  * What a language layer may read while interpreting one message (design 3.3). All Minecraft-free: positions
@@ -18,9 +19,16 @@ import java.util.Set;
  * @param blueprints    the build blueprint names the body knows
  * @param enchantments  the namespaced enchantment ids the game knows ({@code minecraft:efficiency}); empty means
  *                      "not known yet", and a layer then takes an enchantment id as the owner typed it
+ * @param speakerId     the player whose words these are, by UUID as text; null when nobody is behind them (the
+ *                      console), which is when "give me ..." has nobody to give to (issue #19)
+ * @param ownerInBotDimension whether the owner stands in the body's dimension; true when the owner is not online
+ *                      (an absent owner is no barrier, only a present-and-elsewhere one: issue #27), so {@code ~}
+ *                      coordinates, "come here" and the deliver forms are refused exactly when the owner is online
+ *                      in another dimension
  */
 public record LanguageContext(ItemSearch items, String dimension, Pos ownerPos, Pos botPos,
-                              String statusSummary, List<String> blueprints, Set<String> enchantments) {
+                              String statusSummary, List<String> blueprints, Set<String> enchantments,
+                              @Nullable String speakerId, boolean ownerInBotDimension) {
     public LanguageContext {
         Objects.requireNonNull(items, "items");
         Objects.requireNonNull(dimension, "dimension");

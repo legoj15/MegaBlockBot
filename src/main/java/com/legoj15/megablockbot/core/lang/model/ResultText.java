@@ -43,6 +43,8 @@ final class ResultText {
             }
             case Goal.Stockpile pile ->
                     "stockpile " + pile.count() + " " + item(pile.key(), ids) + " in the container at " + pos(pile.container());
+            case Goal.Deliver deliver ->
+                    "deliver " + deliver.count() + " " + item(deliver.key(), ids) + " to the player " + deliver.recipient();
             case Goal.Build build -> "build " + build.blueprint() + " at " + pos(build.anchor());
             case Goal.Reach reach -> "get within " + reach.radius() + " blocks of " + pos(reach.pos());
             case Goal.Custom custom ->

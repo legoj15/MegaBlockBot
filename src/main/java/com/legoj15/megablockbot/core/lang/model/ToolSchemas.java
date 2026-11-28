@@ -26,7 +26,8 @@ final class ToolSchemas {
     static final String SAY = "say";
 
     /** The kinds {@code set_goal} takes, in the order the prompt lists them. */
-    static final List<String> GOAL_KINDS = List.of("have_item", "tool_tier", "equip", "stockpile", "build", "go_to");
+    static final List<String> GOAL_KINDS = List.of(
+            "have_item", "tool_tier", "equip", "stockpile", "build", "go_to", "deliver");
 
     /** The tools of an owner message, in the order the design names them. */
     static final List<ChatBackend.ToolSpec> INTERPRET = List.of(
@@ -37,7 +38,8 @@ final class ToolSchemas {
                             + "optionally with an `enchantment` at least `level`. tool_tier: carry a `tool_class` tool "
                             + "of `tier` or better. equip: wear or hold each of `items`. stockpile: put `count` of `item` "
                             + "into the container at `position`. build: build `blueprint` at `position`. go_to: stand "
-                            + "within `radius` blocks of `position`, or of the owner with `to_owner`. Item ids must "
+                            + "within `radius` blocks of `position`, or of the owner with `to_owner`. deliver: hand "
+                            + "`count` (default 1) of `item` to the owner where they stand. Item ids must "
                             + "exist: if you are not sure of an id, call search_items first.",
                     goalParameters()),
             new ChatBackend.ToolSpec(CANCEL,
@@ -83,8 +85,8 @@ final class ToolSchemas {
 
         return object(
                 kind,
-                property("item", "string", "have_item, stockpile: a registry id like minecraft:stone_pickaxe"),
-                property("count", "integer", "have_item (default 1), stockpile: how many, "
+                property("item", "string", "have_item, stockpile, deliver: a registry id like minecraft:stone_pickaxe"),
+                property("count", "integer", "have_item, stockpile, deliver (default 1): how many, "
                         + FixedGrammar.MIN_COUNT + " to " + FixedGrammar.MAX_COUNT),
                 property("enchantment", "string", "have_item: an enchantment id like minecraft:efficiency"),
                 property("level", "integer", "have_item: the lowest enchantment level, 1 to "

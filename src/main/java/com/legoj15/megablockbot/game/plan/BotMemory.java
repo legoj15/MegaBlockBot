@@ -2,6 +2,7 @@ package com.legoj15.megablockbot.game.plan;
 
 import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.Pos;
+import com.legoj15.megablockbot.core.snapshot.Delivery;
 import com.legoj15.megablockbot.core.snapshot.NotedOffer;
 import com.legoj15.megablockbot.core.snapshot.StackFacts;
 import java.util.ArrayList;
@@ -128,6 +129,13 @@ public final class BotMemory {
     private int sightScans;
     /** Where the body was driven off or killed, in the order noted. */
     private final List<DangerZone> dangerZones = new ArrayList<>();
+    /** What the body has handed to players, in the order noted; the oldest beyond the bound are dropped. */
+    private final List<Delivery> deliveries = new ArrayList<>();
+    /**
+     * How many deliveries are kept: a goal counts only what was handed over after it was given, so a bound well past
+     * one goal's asks is enough, and the notes of a body that hands things over all day do not grow without end.
+     */
+    private static final int MAX_DELIVERIES = 64;
 
     public static BotMemory of(UUID body) {
         return BY_BODY.computeIfAbsent(body, id -> new BotMemory());
@@ -300,6 +308,37 @@ public final class BotMemory {
         return List.copyOf(villagerOffers.values());
     }
 
+    // ---- deliveries --------------------------------------------------------------------------------------------
+
+    /**
+     * Records that the body dropped {@code count} of {@code item} at the feet of the player {@code recipient}
+     * (issue #19). What a player carries is not the body's to read, so this note is the only record a
+     * {@link com.legoj15.megablockbot.core.goal.Goal.Deliver} goal is judged on. The oldest notes are dropped as new
+     * ones come in, so a body that trades all day does not carry, and save, every stack it ever handed over.
+     */
+    public void noteDelivery(String recipient, ItemKey item, int count, long gameTime) {
+        deliveries.add(new Delivery(recipient, item, count, gameTime));
+        if (deliveries.size() <= MAX_DELIVERIES) return;
+        deliveries.subList(0, deliveries.size() - MAX_DELIVERIES).clear();
+    }
+
+    /** Every delivery noted, oldest first. */
+    public List<Delivery> deliveries() {
+        return List.copyOf(deliveries);
+    }
+
+    /** How many of the item the body has handed to that player at or after {@code since} (the goal's own count). */
+    public int deliveredSince(String recipient, ItemKey item, long since) {
+        int total = 0;
+        for (Delivery delivery : deliveries) {
+            if (delivery.recipient().equals(recipient) && delivery.item().equals(item)
+                    && delivery.gameTime() >= since) {
+                total += delivery.count();
+            }
+        }
+        return total;
+    }
+
     // ---- danger zones ------------------------------------------------------------------------------------------
 
     /**
@@ -428,6 +467,19 @@ public final class BotMemory {
             }
             tag.put("villagerOffers", offerList);
         }
+        // Deliveries are saved like everything else the body knows, and read back oldest first (issue #19).
+        if (!deliveries.isEmpty()) {
+            ListTag deliveryList = new ListTag();
+            for (Delivery delivery : deliveries) {
+                CompoundTag one = new CompoundTag();
+                one.putString("recipient", delivery.recipient());
+                one.putString("item", delivery.item().id());
+                one.putInt("count", delivery.count());
+                one.putLong("gameTime", delivery.gameTime());
+                deliveryList.add(one);
+            }
+            tag.put("deliveries", deliveryList);
+        }
         // Danger zones are saved with the brain like everything else the body knows about the world, and dropped by
         // the readers when they lapse (issue 29). Absent when there is none.
         if (!dangerZones.isEmpty()) {
@@ -539,6 +591,16 @@ public final class BotMemory {
                     BlockPos.of(one.getLong("pos")), offers);
             }
         }
+        if (tag.contains("deliveries", Tag.TAG_LIST)) {
+            ListTag list = tag.getList("deliveries", Tag.TAG_COMPOUND);
+            for (int i = 0; i < list.size(); i++) {
+                CompoundTag one = list.getCompound(i);
+                if (!one.contains("recipient", Tag.TAG_STRING) || !one.contains("item", Tag.TAG_STRING)
+                    || one.getInt("count") <= 0) continue;
+                memory.deliveries.add(new Delivery(one.getString("recipient"), ItemKey.of(one.getString("item")),
+                    one.getInt("count"), one.getLong("gameTime")));
+            }
+        }
         if (tag.contains("dangerZones", Tag.TAG_LIST)) {
             ListTag list = tag.getList("dangerZones", Tag.TAG_COMPOUND);
             for (int i = 0; i < list.size(); i++) {
@@ -584,7 +646,7 @@ public final class BotMemory {
     @Override
     public String toString() {
         return "BotMemory(" + placedCount() + " placed blocks, " + containers.size() + " containers, " + supply.size()
-            + " supply containers, " + villagerOffers.size() + " villagers' offers, " + dangerZones.size()
-            + " danger zones)";
+            + " supply containers, " + villagerOffers.size() + " villagers' offers, " + deliveries.size()
+            + " deliveries, " + dangerZones.size() + " danger zones)";
     }
 }

@@ -371,7 +371,9 @@ a postcondition does not pay for it.
 
 **Goal.** A sealed set of typed goals: `HaveItem(key, count, componentCheck?)`,
 `HaveToolTier(toolClass, tier)`, `Equip(slotSet)`, `Stockpile(key, count, container)`,
-`Build(blueprint, anchor)`, `Reach(pos, radius)`; strategies add their own. Each goal maps to a
+`Build(blueprint, anchor)`, `Reach(pos, radius)`, `Deliver(key, count, recipient, since)`
+(the player's UUID as text and the game time the goal was given, from which its noted deliveries count — issue #19);
+strategies add their own. Each goal maps to a
 **postcondition**: a pure function `Snapshot → Evaluation` where `Evaluation` is
 `SATISFIED | UNSATISFIED | UNKNOWN` plus matched, required and the unmet keys. `UNKNOWN` means
 the snapshot cannot tell (a container out of range or in an unloaded chunk) and is never treated

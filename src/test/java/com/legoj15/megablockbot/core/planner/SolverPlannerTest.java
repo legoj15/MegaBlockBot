@@ -433,6 +433,15 @@ final class SolverPlannerTest {
                 lose(shelf, tools, item, count);
                 gain(stock, tools, item, count);
             }
+            case "deliver" -> {
+                ItemKey item = ItemKey.of(params.get("item"));
+                int given = Integer.parseInt(params.get("count"));
+                if (stock.getOrDefault(item, 0) < given) {
+                    return "deliver gives " + given + " of " + item.id() + " but the stock holds "
+                            + stock.getOrDefault(item, 0);
+                }
+                lose(stock, tools, item, given); // the items land at the recipient's feet, not in any stock
+            }
             case "equip", "navigate" -> { /* recorded only; a worn item is still counted in the stock */ }
             default -> { /* a strategy's own task kind: recorded, not simulated */ }
         }
@@ -916,6 +925,27 @@ final class SolverPlannerTest {
         Plan whenHeld = planned(planner(), request(goal, snapshot(Map.of(WOODEN_PICKAXE, 1), Map.of()), Exclusions.NONE));
         assertEquals(1, leaves(whenHeld).size(), "the item is in stock: only the equip leaf remains");
         assertEquals("equip", leaves(whenHeld).get(0).taskKind());
+    }
+
+    @Test
+    void deliverPlansTheItemsThenOneDeliverLeafThatSpendsThem() {
+        Goal.Deliver goal = new Goal.Deliver(STICK, 2, "11111111-2222-3333-4444-555555555555");
+        Plan plan = planned(planner(), request(goal, snapshot(Map.of(OAK_PLANKS, 2), Map.of()), Exclusions.NONE));
+        List<NodeSpec> leaves = leaves(plan);
+        NodeSpec deliverLeaf = leaves.get(leaves.size() - 1);
+        assertEquals("deliver", deliverLeaf.taskKind(), leaves.toString());
+        assertEquals(goal, deliverLeaf.goal(), "the leaf carries the goal itself");
+        assertEquals("minecraft:stick", deliverLeaf.params().get("item"));
+        assertEquals("2", deliverLeaf.params().get("count"));
+        assertEquals(goal.recipient(), deliverLeaf.params().get("recipient"));
+        assertTrue(leaves.size() > 1 && "craft".equals(leaves.get(leaves.size() - 2).taskKind()),
+                "the sticks are made before they are handed over: " + leaves);
+        // The simulated run hands the two over: one craft of sticks makes four from the two planks, the leaf spends
+        // two of them, and what is left is the surplus of the craft, never the delivery.
+        Executed executed = run(plan, Map.of(OAK_PLANKS, 2), Map.of());
+        assertNull(executed.failure(), executed.failure());
+        assertEquals(2, executed.stock().getOrDefault(STICK, 0), "two of the four sticks made were handed over: "
+                + executed.stock());
     }
 
     @Test

@@ -29,6 +29,13 @@ import java.util.regex.Pattern;
  * <p>Commands, one line per form (square brackets optional):
  * <ul>
  *   <li>{@code get|make|craft|have [<count>] <item>} — {@code SetGoal(HaveItem(item, count or 1))}</li>
+ *   <li>{@code give me [<count>] <item>} / {@code bring me [<count>] <item>} — {@code SetGoal(Deliver(item, count or
+ *       1, the speaker))} (issue #19): the same items, handed over at the speaker's feet. An unstated count is one,
+ *       and a leading {@code a} or {@code an} is not part of the item's name. There must be a player behind the words:
+ *       a message from the console has nobody to give to and is {@code Unknown}. The same for any command that makes
+ *       a have-item goal followed by {@code and give it to me}, {@code and give them to me},
+ *       {@code and bring it to me} or {@code then give it to me} — {@code craft a quarry and give it to me} is the
+ *       sentence the issue names.</li>
  *   <li>{@code get|make|craft|have [<count>] <item> with <enchantment id> [<level>]} — the same with a
  *       {@link ComponentCheck}; the enchantment is one id token (a bare id gets the {@code minecraft:}
  *       namespace) and a missing level is 1; any further word after {@code with} is {@code Unknown}, and so is
@@ -78,6 +85,10 @@ import java.util.regex.Pattern;
  * command is {@code Unknown}, listing up to three candidates (the accepted hits when there are several, the
  * closest hits when none is accepted) by display name and id so the owner can say one again exactly. This holds
  * wherever an item is resolved, {@code equip} included.
+ *
+ * <p>An owner online in another dimension has no position the body can walk to (issue #27), so {@code come here},
+ * {@code come} and every coordinate that reads {@code ~} are {@code Unknown} saying so, and no goal is set; the
+ * deliver forms are too, for the same reason. An owner who is not online is not a barrier: only one who is elsewhere.
  *
  * <p>Counts are 1 to 10000, enchantment levels at least 1, the {@code within} radius 0 to 256, and blueprint
  * names match ignoring case and extra whitespace (the goal carries the registry's spelling). A blueprint name with a
@@ -131,6 +142,22 @@ public final class FixedGrammar implements LanguageLayer {
     private static final Pattern COMMAND_SPLIT = Pattern.compile("\\s*;\\s*(?:then\\s+)?|\\s+then\\s+");
 
     private static final Set<String> GATHER_VERBS = Set.of("get", "make", "craft", "have");
+    /** The verbs whose object is to be handed over: {@code give me 3 oak planks}, {@code bring me a stone pickaxe}. */
+    private static final Set<String> DELIVER_VERBS = Set.of("give", "bring");
+    /** The articles the item words of a delivery or a gather may carry without being part of the name. */
+    private static final Set<String> ARTICLES = Set.of("a", "an");
+    /**
+     * The ends that turn a have-item command into a delivery (issue #19): the four wordings the owner has for "and
+     * hand it over". Each is five words, at the very end of the clause.
+     */
+    private static final String[][] DELIVER_TAILS = {
+            {"and", "give", "it", "to", "me"},
+            {"and", "give", "them", "to", "me"},
+            {"and", "bring", "it", "to", "me"},
+            {"then", "give", "it", "to", "me"},
+    };
+    /** The clause the word {@code then} splits off when it is exactly this: it belongs to the clause before it. */
+    private static final String THEN_GIVE_TAIL = "give it to me";
     private static final Map<String, ToolClass> TOOL_CLASSES = enumNames(ToolClass.values());
     private static final Map<String, ToolTier> TOOL_TIERS = enumNames(ToolTier.values());
 
@@ -141,6 +168,8 @@ public final class FixedGrammar implements LanguageLayer {
             "Commands I understand:\n"
             + "get|make|craft|have [count] <item>\n"
             + "get|make|craft|have [count] <item> with <enchantment id> [level]\n"
+            + "give me|bring me [count] <item>\n"
+            + "get|make|craft|have [count] <item> and give it|them to me\n"
             + "tool <pickaxe|axe|shovel|hoe|sword|shears> <hand|wood|stone|iron|diamond|netherite>\n"
             + "equip <item> [<item> ...]\n"
             + "equip <material> armor\n"
@@ -180,8 +209,17 @@ public final class FixedGrammar implements LanguageLayer {
         if (context == null) {
             return List.of(unknown("I have nothing to look items up with right now"));
         }
+        String[] clauses = COMMAND_SPLIT.split(collapse(message.toLowerCase(Locale.ROOT)));
+        // "craft a quarry then give it to me": the separator takes "then" for its own, but this clause is the tail of
+        // the one before it, so it goes back there before anything is read.
+        for (int i = 1; i < clauses.length; i++) {
+            if (clauses[i].strip().equals(THEN_GIVE_TAIL) && !clauses[i - 1].isBlank()) {
+                clauses[i - 1] = clauses[i - 1] + " then " + THEN_GIVE_TAIL;
+                clauses[i] = "";
+            }
+        }
         List<Intent> intents = new ArrayList<>();
-        for (String clause : COMMAND_SPLIT.split(collapse(message.toLowerCase(Locale.ROOT)))) {
+        for (String clause : clauses) {
             if (!clause.isBlank()) intents.add(parseClause(clause.strip(), context));
         }
         if (intents.isEmpty()) return List.of(unknown("I did not catch anything to do there"));
@@ -190,8 +228,13 @@ public final class FixedGrammar implements LanguageLayer {
 
     private Intent parseClause(String clause, LanguageContext context) {
         List<String> tokens = new ArrayList<>(Arrays.asList(clause.split("\\s+")));
+        if (!context.ownerInBotDimension() && readsOwnerCoordinate(tokens)) {
+            return unknown("My owner is in another dimension, so their ~ is not a place I can name; "
+                    + "come here is the same");
+        }
         String verb = tokens.get(0);
         if (GATHER_VERBS.contains(verb)) return parseGather(tokens, context);
+        if (DELIVER_VERBS.contains(verb)) return parseGive(tokens, context);
         switch (verb) {
             case "tool": return parseTool(tokens);
             case "equip": return parseEquip(tokens, context);
@@ -216,6 +259,13 @@ public final class FixedGrammar implements LanguageLayer {
     // ── get|make|craft|have ───────────────────────────────────────────────────────────────────────
 
     private Intent parseGather(List<String> tokens, LanguageContext context) {
+        int tail = deliverTail(tokens);
+        if (tail >= 0) {
+            // "craft a quarry and give it to me": the same items, handed over (issue #19).
+            Intent gather = parseGather(new ArrayList<>(tokens.subList(0, tail)), context);
+            if (!(gather instanceof Intent.SetGoal set)) return gather;
+            return deliverGoal(set.goal(), context);
+        }
         int count = 1;
         int itemStart = 1;
         if (tokens.size() > itemStart && isCountToken(tokens.get(itemStart))) {
@@ -226,6 +276,7 @@ public final class FixedGrammar implements LanguageLayer {
             count = parsed;
             itemStart++;
         }
+        itemStart = pastArticle(tokens, itemStart);
         // The enchanted form is `<verb> [count] <item> with <enchantment id> [level]`, for all four verbs.
         int with = -1;
         for (int i = itemStart; i < tokens.size(); i++) {
@@ -261,6 +312,82 @@ public final class FixedGrammar implements LanguageLayer {
         if (!known.isEmpty() && !known.contains(enchantmentId)) return unknown(unknownEnchantment(enchantmentId, known));
         ComponentCheck check = ComponentCheck.enchantment(enchantmentId, level);
         return new Intent.SetGoal(new Goal.HaveItem(item.key(), count, check));
+    }
+
+    // ── give me / bring me ────────────────────────────────────────────────────────────────────────
+
+    /** {@code give me [<count>] <item>} and {@code bring me [<count>] <item>}: the same items, handed to the speaker. */
+    private Intent parseGive(List<String> tokens, LanguageContext context) {
+        String verb = tokens.get(0);
+        if (tokens.size() < 3 || !tokens.get(1).equals("me")) {
+            return unknown("'" + verb + " me' takes a count and an item: 'give me 3 oak planks'");
+        }
+        int count = 1;
+        int itemStart = 2;
+        if (isCountToken(tokens.get(itemStart))) {
+            Integer parsed = parseInt(tokens.get(itemStart));
+            if (parsed == null || parsed < MIN_COUNT || parsed > MAX_COUNT) {
+                return unknown("I can only get between " + MIN_COUNT + " and " + MAX_COUNT + " of something");
+            }
+            count = parsed;
+            itemStart++;
+        }
+        itemStart = pastArticle(tokens, itemStart);
+        Resolved item = resolveItem(joinWords(tokens, itemStart, tokens.size()), context.items());
+        if (item.error() != null) return unknown(item.error());
+        return deliverGoal(new Goal.HaveItem(item.key(), count), context);
+    }
+
+    /**
+     * The delivery a have-item goal stands for when the words ask for it, or the refusal when they cannot name a
+     * player to give to: no player is behind the message (the console), or the owner the speaker is stands in
+     * another dimension (issue #27).
+     */
+    private Intent deliverGoal(Goal goal, LanguageContext context) {
+        if (context.speakerId() == null) {
+            return unknown("There is nobody behind those words for me to give anything to");
+        }
+        if (!context.ownerInBotDimension()) {
+            return unknown("My owner is in another dimension, so there is nowhere I can bring it to them");
+        }
+        if (goal instanceof Goal.HaveItem have && have.check() == null) {
+            return new Intent.SetGoal(new Goal.Deliver(have.key(), have.count(), context.speakerId()));
+        }
+        return unknown("I can only hand over plain items, not ones asked for by their enchantments");
+    }
+
+    /** Where the words after {@code from} start, past an article that is not part of the item's name ({@code a pickaxe}). */
+    private static int pastArticle(List<String> tokens, int from) {
+        if (tokens.size() > from + 1 && ARTICLES.contains(tokens.get(from))) return from + 1;
+        return from;
+    }
+
+    /**
+     * Where the delivery tail of a have-item clause starts, or -1 when it has none: the last of the four wordings,
+     * whole and at the very end ({@code craft a quarry and give it to me}).
+     */
+    private static int deliverTail(List<String> tokens) {
+        for (int wording = DELIVER_TAILS.length - 1; wording >= 0; wording--) {
+            String[] tail = DELIVER_TAILS[wording];
+            if (tokens.size() <= tail.length) continue;
+            boolean matches = true;
+            for (int i = 0; i < tail.length; i++) {
+                if (!tokens.get(tokens.size() - tail.length + i).equals(tail[i])) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) return tokens.size() - tail.length;
+        }
+        return -1;
+    }
+
+    /** Whether any token reads the owner's own coordinate ({@code ~} or an offset from it), which no dimension of mine can stand in for. */
+    private static boolean readsOwnerCoordinate(List<String> tokens) {
+        for (String token : tokens) {
+            if (token.equals("~") || token.length() > 1 && token.charAt(0) == '~') return true;
+        }
+        return false;
     }
 
     // ── tool ──────────────────────────────────────────────────────────────────────────────────────
@@ -414,6 +541,9 @@ public final class FixedGrammar implements LanguageLayer {
         if (verb.equals("go") && tokens.size() >= 2 && tokens.get(1).equals("to")) return reach(tokens, 2, context);
         if (verb.equals("come")) {
             if (tokens.size() == 1 || (tokens.size() == 2 && tokens.get(1).equals("here"))) {
+                if (!context.ownerInBotDimension()) {
+                    return unknown("My owner is in another dimension, so 'come here' is not a place I can walk to");
+                }
                 return new Intent.SetGoal(new Goal.Reach(context.dimension(), context.ownerPos(), 3));
             }
             if (tokens.size() >= 2 && tokens.get(1).equals("to")) return reach(tokens, 2, context);

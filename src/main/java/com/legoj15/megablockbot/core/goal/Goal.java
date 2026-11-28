@@ -40,6 +40,25 @@ public sealed interface Goal {
     /** The container at that position holds at least {@code count} of {@code key}. */
     record Stockpile(ItemKey key, int count, String dimension, Pos container) implements Goal {}
 
+    /**
+     * Hand {@code count} of {@code key} to the player {@code recipient} (their UUID as text: the core holds no
+     * Minecraft type) by dropping it at their feet. What a player carries is not the body's to read, so the goal is
+     * judged on the deliveries the body noted in its memory at or after {@code since}, the game time the goal was
+     * given — a goal asked again needs a new delivery, and the words carry no clock, so the runtime stamps the time.
+     */
+    record Deliver(ItemKey key, int count, String recipient, long since) implements Goal {
+        public Deliver {
+            Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(recipient, "recipient");
+            if (count < 1) throw new IllegalArgumentException("count must be positive");
+        }
+
+        /** As the words make it, unstamped: the runtime replaces it with the time it was given. */
+        public Deliver(ItemKey key, int count, String recipient) {
+            this(key, count, recipient, 0L);
+        }
+    }
+
     /** The blueprint stands complete at the anchor. */
     record Build(String blueprint, String dimension, Pos anchor) implements Goal {}
 

@@ -23,6 +23,13 @@ no-model implementation; `ModelLanguageLayer` is the one that asks a language mo
   `new ModelLanguageLayer(settings)` from the result (provider `none` behaves exactly as `FixedGrammar`).
 - `FixedGrammar` exposes its count, level and radius limits and its equip-slot rule as public statics, so the model's
   goals are held to the same ranges and filed the same way. Change them there, not here.
+- The grammar's deliver words (issue #19: `give me 3 oak planks`, `bring me a stone pickaxe`, and any have-item
+  command with `and give it/them to me`, `and bring it to me` or `then give it to me` on the end) are grammar forms,
+  so a message of them is understood without a request; the model's own way to ask for a delivery is the `deliver`
+  kind, which goes to the owner. `LanguageContext` says who is speaking (`speakerId`, null from the console: the
+  deliver forms answer that there is nobody to give to) and whether the owner stands in the bot's dimension
+  (`ownerInBotDimension`: the grammar refuses `come here`, `~` coordinates and the deliver forms while the owner is
+  online elsewhere — issue #27 — and so does `GoalArguments`).
 - The supply commands of the grammar (`use chest at <x> <y> <z>`, `forget chest at ...`, `chests`: `Intent.UseChest`,
   `ForgetChest`, `Chests`) are carried out like any grammar intent, and the grammar goes first, so a message of those is
   understood without a request. The model has no tool for them (the seven tools above are unchanged): a loosely worded
@@ -86,7 +93,8 @@ far better. `GoalArguments.check` is the only place model-named values become a 
 | `equip` | `items` (or one `item`) | each must exist; filed by `FixedGrammar.slotFor`; two in one slot is refused |
 | `stockpile` | `item`, `count`, `position` | item exists; count required, 1 to 10000; position `{x, y, z}` whole numbers |
 | `build` | `blueprint`, `position` | blueprint in `context.blueprints()` ignoring case and extra spaces (the goal carries the listed spelling) |
-| `go_to` | `position` or `to_owner`, optional `radius` | radius 0 to 256; default 2 for a position, 3 for the owner |
+| `go_to` | `position` or `to_owner`, optional `radius` | radius 0 to 256; default 2 for a position, 3 for the owner; `to_owner` is refused while the owner is online in another dimension (issue #27) |
+| `deliver` | `item`, `count` (default 1) | item exists; count 1 to 10000; the recipient is the owner, whose id the context carries (issue #19); refused while the owner is online in another dimension, and when nobody is behind the message (the console) |
 
 An item, enchantment or blueprint named as `""` or as blanks is refused as such ("needs a name"), before anything is
 made of it: an enchantment `""` would otherwise become `minecraft:`, which is taken as named while the game's

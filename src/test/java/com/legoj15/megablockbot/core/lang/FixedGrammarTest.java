@@ -59,6 +59,7 @@ class FixedGrammarTest {
             put("dirt", "Dirt");
             put("enchanted_book", "Enchanted Book");
             put("furnace", "Furnace");
+            put("quarry", "Quarry");
         }
 
         private void put(String path, String displayName) {
@@ -126,24 +127,39 @@ class FixedGrammarTest {
         }
     }
 
+    /** The player behind the words, as chat and the goal command have one. */
+    private static final String SPEAKER = "11111111-2222-3333-4444-555555555555";
+
     private List<Intent> parse(String message) {
         return grammar.interpret(message, new LanguageContext(new FakeItems(), DIMENSION, OWNER_POS, BOT_POS,
-                "Idle. No goal.", List.of("cottage", "watch tower"), ENCHANTMENTS)).join();
+                "Idle. No goal.", List.of("cottage", "watch tower"), ENCHANTMENTS, SPEAKER, true)).join();
     }
 
     private List<Intent> parse(String message, String... blueprints) {
         return grammar.interpret(message, new LanguageContext(new FakeItems(), DIMENSION, OWNER_POS, BOT_POS,
-                "Idle. No goal.", List.of(blueprints), ENCHANTMENTS)).join();
+                "Idle. No goal.", List.of(blueprints), ENCHANTMENTS, SPEAKER, true)).join();
     }
 
     private List<Intent> parseWithEnchantments(String message, Set<String> enchantments) {
         return grammar.interpret(message, new LanguageContext(new FakeItems(), DIMENSION, OWNER_POS, BOT_POS,
-                "Idle. No goal.", List.of(), enchantments)).join();
+                "Idle. No goal.", List.of(), enchantments, SPEAKER, true)).join();
     }
 
     private List<Intent> parseWithSearch(String message, ItemSearch items) {
         return grammar.interpret(message, new LanguageContext(items, DIMENSION, OWNER_POS, BOT_POS,
-                "Idle. No goal.", List.of(), ENCHANTMENTS)).join();
+                "Idle. No goal.", List.of(), ENCHANTMENTS, SPEAKER, true)).join();
+    }
+
+    /** The same words with nobody behind them, as the console's are. */
+    private List<Intent> parseFromConsole(String message) {
+        return grammar.interpret(message, new LanguageContext(new FakeItems(), DIMENSION, OWNER_POS, BOT_POS,
+                "Idle. No goal.", List.of(), ENCHANTMENTS, null, true)).join();
+    }
+
+    /** The same words with the owner online in another dimension (issue #27). */
+    private List<Intent> parseWithOwnerElsewhere(String message) {
+        return grammar.interpret(message, new LanguageContext(new FakeItems(), DIMENSION, OWNER_POS, BOT_POS,
+                "Idle. No goal.", List.of(), ENCHANTMENTS, SPEAKER, false)).join();
     }
 
     private static Intent.SetGoal soleSetGoal(List<Intent> intents) {
@@ -170,6 +186,43 @@ class FixedGrammarTest {
             assertEquals(new Goal.HaveItem(ItemKey.of("oak_planks"), 2), soleSetGoal(parse(verb + " 2 oak planks")).goal(),
                     verb);
         }
+    }
+
+    // ── deliver (issue #19) ────────────────────────────────────────────────────────────────────────
+
+    @Test
+    void giveMeAndBringMeBecomeADeliverGoalForTheSpeaker() {
+        assertEquals(new Goal.Deliver(ItemKey.of("oak_planks"), 3, SPEAKER),
+                soleSetGoal(parse("give me 3 oak planks")).goal());
+        assertEquals(new Goal.Deliver(ItemKey.of("stone_pickaxe"), 1, SPEAKER),
+                soleSetGoal(parse("bring me a stone pickaxe")).goal());
+    }
+
+    @Test
+    void aGatherCommandWithAGiveTailBecomesTheSameItemsDelivered() {
+        Goal expected = new Goal.Deliver(ItemKey.of("quarry"), 1, SPEAKER);
+        assertEquals(expected, soleSetGoal(parse("craft a quarry and give it to me")).goal());
+        assertEquals(expected, soleSetGoal(parse("craft a quarry and bring it to me")).goal());
+        assertEquals(expected, soleSetGoal(parse("craft a quarry then give it to me")).goal());
+        assertEquals(new Goal.Deliver(ItemKey.of("dirt"), 2, SPEAKER),
+                soleSetGoal(parse("get 2 dirt and give them to me")).goal());
+        assertEquals(new Goal.Deliver(ItemKey.of("oak_planks"), 2, SPEAKER),
+                soleSetGoal(parse("make 2 oak planks; give it to me")).goal());
+    }
+
+    @Test
+    void deliverWordsFromTheConsoleSetNoGoal() {
+        assertUnknown(parseFromConsole("give me 3 oak planks"));
+        assertUnknown(parseFromConsole("bring me a stone pickaxe"));
+        assertUnknown(parseFromConsole("craft a quarry and give it to me"));
+    }
+
+    @Test
+    void comeHereWithTheOwnerInAnotherDimensionSetsNoGoal() {
+        assertUnknown(parseWithOwnerElsewhere("come here"));
+        assertUnknown(parseWithOwnerElsewhere("come"));
+        assertUnknown(parseWithOwnerElsewhere("goto ~ ~ ~"));
+        assertUnknown(parseWithOwnerElsewhere("give me 3 oak planks"));
     }
 
     @Test
@@ -514,7 +567,7 @@ class FixedGrammarTest {
             }
         };
         List<Intent> intents = grammar.interpret("get 5 dirt",
-                new LanguageContext(broken, DIMENSION, OWNER_POS, BOT_POS, "Idle. No goal.", List.of(), Set.of())).join();
+                new LanguageContext(broken, DIMENSION, OWNER_POS, BOT_POS, "Idle. No goal.", List.of(), Set.of(), SPEAKER, true)).join();
         assertUnknown(intents);
     }
 }

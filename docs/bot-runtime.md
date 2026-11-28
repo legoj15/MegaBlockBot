@@ -80,7 +80,7 @@ returns hints for where to look after a restart, never facts.
 Registered here: `craft`, `smelt`, `stonecut`, `smith` and `equip`. `navigate`, `reach`, `mine`, `fish`, `kill`,
 `harvest`, `recover_drops`, `deposit`, `withdraw`, `look_inside` and `build` are registered by the navigation work
 Registered here: `craft`, `smelt` and `equip`. `navigate`, `reach`, `mine`, `fish`, `kill`, `harvest`, `use_on`,
-`recover_drops`, `deposit`, `withdraw`, `look_inside` and `build` are registered by the navigation work
+`recover_drops`, `deposit`, `deliver`, `withdraw`, `look_inside` and `build` are registered by the navigation work
 (`TaskFeature`), not here.
 
 What the navigation tasks need from this runtime:
@@ -482,6 +482,38 @@ goal is the `Goal.Build` itself, so the executor judges it on the snapshot's str
   read from the world by the task, instead of waiting out the 400-tick watch; the same reason is what a stalled build's
   failure says wherever it ends.
 - `progress()` says how many of the blueprint's blocks stand.
+
+## `deliver`
+
+Leaf params: `item`, `count` (the total the goal asks for), `recipient` (the player's UUID as text). The leaf's goal
+is the `Goal.Deliver` itself (issue #19), so the executor judges it on the deliveries the snapshot carries.
+
+- **The goal and how it is judged.** `Goal.Deliver(key, count, recipient, since)`: satisfied when the body has noted
+  dropping `count` of the item at the recipient's feet at or after `since`, the game time the goal was given (the
+  words carry no clock, so `BotRuntime.submit` stamps it; a goal asked again needs a new delivery). What a player
+  carries is not the body's to read, so the body's own note is the only record: `DeliverTask` writes each stack it
+  hands over into `BotMemory` (`noteDelivery`: recipient, item, count, game time; saved with the brain, the oldest
+  past 64 notes dropped), `SnapshotCollector` puts the notes at or after the goal's `since` into the snapshot (only
+  when a `Deliver` goal is being planned or judged), and `Postconditions` counts them. A resumed or replanned task
+  drops only what is still owed, reading the same notes.
+- **The plan** (`SolverPlanner.deliverPlan`): the ordinary item plan for the count, then one `deliver` leaf. The
+  items are spent by the leaf — they leave the working stock, as a deposit's do — so anything the plan asks of the
+  item after it gathers it again.
+- **The task**: the recipient must be in the body's own level (found by UUID among that level's players, so a player
+  who left the world and one who stands in another dimension are both misses, and the failure says which:
+  `Unreachable` with `different dimension` or `not online`). The approach is a `BotNavigator.follow` (the recipient
+  moves), watched as the kill task watches its quarry: neither within three blocks nor closer for 400 ticks
+  (`BotNavigator.TARGET_STALL_TICKS`) and the leaf ends `Unreachable`. Within three blocks the body faces them (the
+  look written to the input and the rotation, as the kill task faces a mob) and drops one stack a tick with the
+  player's own `drop(stack, false, false)` — the drop-key path, thrown where the body looks — counting what really
+  left the inventory (`MissingInput` naming the item and the shortfall when fewer are carried than owed, with what
+  is carried kept: nothing is dropped unless all of it can be). Pause and resume re-read the world (the recipient is
+  found again, the owed count recounted); abort and every failure release the body and its navigator command.
+- The budget is the deposit task's (the executor's default): a delivery is a walk and a few clicks, and the chase
+  bound is what ends a recipient who keeps away.
+- `progress()` says "bringing 1 quarry to <name>" (the recipient's name, their UUID when they cannot be found).
+- The end-of-goal line goes through `BotSpeech.result`, which says what was given and to whom — the recipient's name
+  is looked up by `BotRuntime` (`goal(goal, names)`), so `BotSpeech` itself stays Minecraft-free.
 
 ## `fish`
 

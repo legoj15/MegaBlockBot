@@ -68,6 +68,7 @@ final class GoalArguments {
                 case "stockpile": return Outcome.accepted(stockpile(arguments, context));
                 case "build": return Outcome.accepted(build(arguments, context));
                 case "go_to": return Outcome.accepted(goTo(arguments, context));
+                case "deliver": return Outcome.accepted(deliver(arguments, context));
                 default:
                     throw new Refusal("unknown kind '" + kind + "'; use one of " + String.join(", ", ToolSchemas.GOAL_KINDS));
             }
@@ -155,11 +156,32 @@ final class GoalArguments {
 
     private static Goal goTo(JsonObject arguments, LanguageContext context) {
         boolean toOwner = flag(arguments, "to_owner");
+        if (toOwner && !context.ownerInBotDimension()) {
+            throw new Refusal("the owner is in another dimension, so their position is not somewhere the bot can go");
+        }
         Pos pos = toOwner ? context.ownerPos() : position(arguments);
         Integer radius = whole(arguments, "radius");
         int checked = radius == null ? (toOwner ? DEFAULT_OWNER_RADIUS : DEFAULT_RADIUS)
                 : inRange("radius", radius, FixedGrammar.MIN_RADIUS, FixedGrammar.MAX_RADIUS);
         return new Goal.Reach(context.dimension(), pos, checked);
+    }
+
+    /**
+     * A delivery to the owner (issue #19): the goal carries the owner's id, and only the owner's — the model has no
+     * tool that names another player, so neither has this kind a field for one. Refused as the grammar's deliver
+     * forms are when the owner is online in another dimension (issue #27).
+     */
+    private static Goal deliver(JsonObject arguments, LanguageContext context) {
+        if (!context.ownerInBotDimension()) {
+            throw new Refusal("the owner is in another dimension, so there is nowhere to bring it to them");
+        }
+        ItemKey key = item(arguments, "item", context);
+        Integer given = whole(arguments, "count");
+        int count = given == null ? 1 : inRange("count", given, FixedGrammar.MIN_COUNT, FixedGrammar.MAX_COUNT);
+        if (context.speakerId() == null) {
+            throw new Refusal("nobody is behind this message for the bot to give anything to; use say for the console");
+        }
+        return new Goal.Deliver(key, count, context.speakerId());
     }
 
     // ── fields ────────────────────────────────────────────────────────────────────────────────────

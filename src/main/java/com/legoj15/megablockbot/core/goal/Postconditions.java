@@ -2,6 +2,7 @@ package com.legoj15.megablockbot.core.goal;
 
 import com.legoj15.megablockbot.core.ToolTier;
 import com.legoj15.megablockbot.core.snapshot.ContainerSight;
+import com.legoj15.megablockbot.core.snapshot.Delivery;
 import com.legoj15.megablockbot.core.snapshot.StackFacts;
 import com.legoj15.megablockbot.core.snapshot.StructureReport;
 import java.util.ArrayList;
@@ -39,6 +40,7 @@ public final class Postconditions {
             case Goal.HaveToolTier g -> toolTier(g);
             case Goal.Equip g -> equip(g);
             case Goal.Stockpile g -> stockpile(g);
+            case Goal.Deliver g -> deliver(g);
             case Goal.Build g -> build(g);
             case Goal.Reach g -> reach(g);
         };
@@ -109,6 +111,26 @@ public final class Postconditions {
             return held >= g.count()
                     ? Evaluation.satisfied(g.count())
                     : Evaluation.unsatisfied(Math.min(held, g.count()), g.count(), List.of(g.key().id()));
+        };
+    }
+
+    /**
+     * The deliveries the snapshot carries for the goal's recipient and item, counted from the game time the goal was
+     * given: a handing-over the body noted before that belongs to an earlier goal, however much of it is still lying
+     * there. Never UNKNOWN — the body's own memory is always there to read.
+     */
+    private Postcondition deliver(Goal.Deliver g) {
+        return snapshot -> {
+            int delivered = 0;
+            for (Delivery delivery : snapshot.deliveries()) {
+                if (delivery.recipient().equals(g.recipient()) && delivery.item().equals(g.key())
+                        && delivery.gameTime() >= g.since()) {
+                    delivered += delivery.count();
+                }
+            }
+            return delivered >= g.count()
+                    ? Evaluation.satisfied(g.count())
+                    : Evaluation.unsatisfied(Math.min(delivered, g.count()), g.count(), List.of(g.key().id()));
         };
     }
 

@@ -201,8 +201,16 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
     // What commands and chat do (BotTalk)
     // ---------------------------------------------------------------------------------------------------------
 
-    /** Starts the goal now, or queues it behind the one running (design 3.4, the FIFO queue). */
+    /**
+     * Starts the goal now, or queues it behind the one running (design 3.4, the FIFO queue). A deliver goal is
+     * stamped with the game time it was given (issue #19): the words carry no clock, and only what is handed over
+     * from that moment counts, so a goal asked again needs a new delivery.
+     */
     public void submit(Goal goal) {
+        if (goal instanceof Goal.Deliver deliver && deliver.since() == 0L && body != null) {
+            goal = new Goal.Deliver(deliver.key(), deliver.count(), deliver.recipient(),
+                    body.level().getGameTime());
+        }
         executor.submit(goal);
     }
 
@@ -302,6 +310,17 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         if (owner != null) owner.sendSystemMessage(Component.literal(line));
         if (feedback != null && !(owner != null && feedback.getEntity() == owner)) {
             feedback.sendSuccess(() -> Component.literal(line), false);
+        }
+    }
+
+    /** A player's name by their id, for the words a goal's result says (the id when nobody answers to it). */
+    private String playerName(String id) {
+        if (body == null || body.getServer() == null) return id;
+        try {
+            ServerPlayer player = body.getServer().getPlayerList().getPlayer(UUID.fromString(id));
+            return player == null ? id : player.getGameProfile().getName();
+        } catch (IllegalArgumentException notAnId) {
+            return id;
         }
     }
 
@@ -585,7 +604,7 @@ public final class BotRuntime implements BotBrain, ExecutorHost<BotPlayer> {
         MegaBlockBot.LOGGER.info("Goal result of {}: goal=[{}] status={} matched={}/{} failure=[{}]", name,
                 BotSpeech.goal(result.goal()), result.status(), result.matched(), result.required(),
                 result.failure() == null ? "none" : result.failure().kind() + ": " + result.failure().detail());
-        say(BotSpeech.result(result));
+        say(BotSpeech.result(result, this::playerName));
         explain(result);
     }
 

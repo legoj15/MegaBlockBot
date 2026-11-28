@@ -499,7 +499,8 @@ class ModelLanguageLayerTest {
         int total = ModelPrompts.MAX_LISTED_BLUEPRINTS + 150;
         List<String> many = IntStream.range(0, total).mapToObj(i -> "blueprint %03d".formatted(i)).toList();
         LanguageContext context = new LanguageContext(new ModelFixtures.Items(), ModelFixtures.DIMENSION,
-                ModelFixtures.OWNER_POS, ModelFixtures.BOT_POS, ModelFixtures.STATUS, many, ModelFixtures.ENCHANTMENTS);
+                ModelFixtures.OWNER_POS, ModelFixtures.BOT_POS, ModelFixtures.STATUS, many, ModelFixtures.ENCHANTMENTS,
+                ModelFixtures.SPEAKER, true);
         server = new FakeModelServer(Wire.OPENAI.text("hello"));
 
         new ModelLanguageLayer(Wire.OPENAI.settings(server.url())).interpret(LOOSE, context).get(20, TimeUnit.SECONDS);
