@@ -139,6 +139,13 @@ public final class ResolverGameTests {
             && !iron.contains("minecraft:nether_wastes"), "iron ore is said to be placed in " + iron);
         Set<String> stone = mine(helper, index, "minecraft:cobblestone", "minecraft:stone", false).biomes();
         helper.assertTrue(stone.isEmpty(), "stone is bound to biomes: " + stone);
+        // The ground of another dimension, and what the game's code places only there, is that dimension's.
+        Set<String> netherrack = mine(helper, index, "minecraft:netherrack", "minecraft:netherrack", false).biomes();
+        helper.assertTrue(netherrack.contains("minecraft:nether_wastes") && !netherrack.contains("minecraft:plains"),
+            "netherrack is said to be placed in " + netherrack);
+        Set<String> glowstone = mine(helper, index, "minecraft:glowstone_dust", "minecraft:glowstone", false).biomes();
+        helper.assertTrue(glowstone.contains("minecraft:nether_wastes") && !glowstone.contains("minecraft:plains"),
+            "glowstone is said to be placed in " + glowstone);
         Set<String> jungleLog = mine(helper, index, "minecraft:jungle_log", "minecraft:jungle_log", false).biomes();
         helper.assertTrue(jungleLog.contains("minecraft:jungle"), "the jungle does not place its own log: " + jungleLog);
         helper.assertTrue(!jungleLog.contains("minecraft:plains"), "the plains place jungle logs: " + jungleLog);

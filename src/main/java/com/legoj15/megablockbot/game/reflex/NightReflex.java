@@ -193,14 +193,6 @@ final class NightReflex implements Reflex {
                 return true;
             }
         }
-        // The ground was tried this night and had nothing more to give (bare stone, protected ground): the note, as
-        // before, and the night goes on as it did.
-        if (noDigNight == night) {
-            ctx.layer.note(Hands.countShelterBlocks(ctx.body) == 0
-                ? "night, and nothing to build a shelter with"
-                : "night, and nothing more to dig a shelter from here");
-            return false;
-        }
         int have = Hands.countShelterBlocks(ctx.body);
         boolean grounded = ctx.body.onGround() && !ctx.body.isInWater();
         BlockPos here = ctx.body.blockPosition();
@@ -210,6 +202,15 @@ final class NightReflex implements Reflex {
             startNight(ctx);
             beginShelter(ctx);
             return true;
+        }
+        // The ground was tried this night and had nothing more to give (bare stone, protected ground): the note, as
+        // before, and no second dig. It is asked after the question above, so a body that has come to carry the
+        // blocks since (a chest it took from, its own drops) still builds with them.
+        if (noDigNight == night) {
+            ctx.layer.note(have == 0
+                ? "night, and nothing to build a shelter with"
+                : "night, and nothing more to dig a shelter from here");
+            return false;
         }
         // Not here: somewhere near that will do, if there is such a place.
         BlockPos better = grounded ? findSpot(ctx) : null;
@@ -505,7 +506,10 @@ final class NightReflex implements Reflex {
             cause = "digging in: picking up what it broke";
             return;
         }
-        int deeper = ReflexConstants.NIGHT_DIG_DEPTH - (digStart.getY() - here.getY());
+        // Counted from where the digging began, and never more than the whole depth: a fight that threw the body
+        // up its own column does not earn it a deeper pit.
+        int deeper = Math.min(ReflexConstants.NIGHT_DIG_DEPTH,
+            ReflexConstants.NIGHT_DIG_DEPTH - (digStart.getY() - here.getY()));
         if (pitDepth(ctx, here, deeper) == 0) {
             nothingMoreToDig(ctx, deeper <= 0 ? "as deep as it digs" : "nothing more to be had here");
             return;
@@ -562,9 +566,24 @@ final class NightReflex implements Reflex {
             if (!diggable(ctx, cell)) return 0;
             if (dropsShelterBlock(ctx, cell, level.getBlockState(cell))) have++;
             opened.add(cell);
-            if (filled(level, cell.below()) && have >= shelterBlocksNeeded(level, cell, opened)) return depth;
+            if (filled(level, cell.below()) && wallsCanStand(level, cell)
+                    && have >= shelterBlocksNeeded(level, cell, opened)) return depth;
         }
         return 0;
+    }
+
+    /**
+     * Whether the foot-level walls a pit at {@code feet} lacks could be built: each of them stands on ground, which
+     * is the question {@link #shelterProblem} asks of a wall once the body is down there. A pit beside a cave whose
+     * floor is lower has a wall with nothing under it, and digging it would end with no shelter and the body in a hole.
+     */
+    private static boolean wallsCanStand(ServerLevel level, BlockPos feet) {
+        for (Direction d : Direction.Plane.HORIZONTAL) {
+            BlockPos wall = feet.relative(d);
+            if (filled(level, wall)) continue;
+            if (!level.getBlockState(wall.below()).isFaceSturdy(level, wall.below(), Direction.UP)) return false;
+        }
+        return true;
     }
 
     /**

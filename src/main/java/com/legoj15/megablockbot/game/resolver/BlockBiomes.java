@@ -70,9 +70,19 @@ final class BlockBiomes {
         RegistryOps<JsonElement> ops = RegistryOps.create(JsonOps.INSTANCE, access);
         Registry<Biome> biomes = access.registryOrThrow(Registries.BIOME);
 
-        // The blocks that stand anywhere the world is made are not bound to any biome.
-        Set<String> neverBound = NaturalBlocks.terrainPlaced(server, notes);
-        neverBound.addAll(NaturalBlocks.placedByCode());
+        // The blocks the overworld's ground is made of, and those the game's code places wherever it places them,
+        // are not bound to any biome. (Which biome's ground holds sand or terracotta is in the surface rules'
+        // conditions, which are not read: they count as the overworld's own.) The ground of the nether and of the
+        // end, and what the code places only there, is that dimension's: it is added to the biomes below.
+        Map<String, Set<String>> terrain = NaturalBlocks.terrainByDimension(server, notes);
+        Map<String, String> codeIn = NaturalBlocks.placedByCodeIn();
+        Set<String> neverBound = new TreeSet<>(terrain.getOrDefault(NaturalBlocks.OVERWORLD, Set.of()));
+        for (String byCode : NaturalBlocks.placedByCode()) {
+            if (!codeIn.containsKey(byCode)) neverBound.add(byCode);
+        }
+        Set<String> placedAtAll = new TreeSet<>(neverBound);
+        terrain.values().forEach(placedAtAll::addAll);
+        placedAtAll.addAll(NaturalBlocks.placedByCode());
 
         Map<Dimension, Map<String, Set<String>>> placedBy = new EnumMap<>(Dimension.class);
         Map<Dimension, Integer> groupSizes = new EnumMap<>(Dimension.class);
@@ -80,12 +90,33 @@ final class BlockBiomes {
         Map<ConfiguredFeature<?, ?>, Set<String>> blocksOfFeature = new HashMap<>();
 
         for (Holder.Reference<Biome> biome : sortedBiomes(biomes)) {
-            Dimension dimension = biome.is(BiomeTags.IS_NETHER) ? Dimension.NETHER
-                : biome.is(BiomeTags.IS_END) ? Dimension.END : Dimension.OVERWORLD;
-            groupSizes.merge(dimension, 1, Integer::sum);
             String biomeId = biome.key().location().toString();
+            Dimension dimension;
+            List<HolderSet<PlacedFeature>> steps;
+            try {
+                dimension = biome.is(BiomeTags.IS_NETHER) ? Dimension.NETHER
+                    : biome.is(BiomeTags.IS_END) ? Dimension.END : Dimension.OVERWORLD;
+                steps = biome.value().getGenerationSettings().features();
+            } catch (RuntimeException e) {
+                // A modded biome that throws costs that biome, as a feature that throws costs that feature.
+                notes.skipped("biomes whose features could not be read", biomeId);
+                continue;
+            }
+            groupSizes.merge(dimension, 1, Integer::sum);
             Map<String, Set<String>> inGroup = placedBy.computeIfAbsent(dimension, d -> new HashMap<>());
-            for (HolderSet<PlacedFeature> step : biome.value().getGenerationSettings().features()) {
+            // The ground of the nether and of the end, and what the code places only there, is every biome's of
+            // that dimension.
+            String named = dimension == Dimension.NETHER ? NaturalBlocks.NETHER
+                : dimension == Dimension.END ? NaturalBlocks.END : NaturalBlocks.OVERWORLD;
+            if (dimension != Dimension.OVERWORLD) {
+                for (String ground : terrain.getOrDefault(named, Set.of())) {
+                    if (!neverBound.contains(ground)) inGroup.computeIfAbsent(ground, k -> new TreeSet<>()).add(biomeId);
+                }
+                for (Map.Entry<String, String> byCode : codeIn.entrySet()) {
+                    if (byCode.getValue().equals(named)) inGroup.computeIfAbsent(byCode.getKey(), k -> new TreeSet<>()).add(biomeId);
+                }
+            }
+            for (HolderSet<PlacedFeature> step : steps) {
                 for (Holder<PlacedFeature> holder : step) {
                     String placedId = holder.unwrapKey().map(k -> k.location().toString()).orElse("(inline feature)");
                     try {
@@ -117,7 +148,7 @@ final class BlockBiomes {
             }
             return true;
         });
-        Set<String> placed = new TreeSet<>(neverBound);
+        Set<String> placed = new TreeSet<>(placedAtAll);
         for (Map<String, Set<String>> group : placedBy.values()) placed.addAll(group.keySet());
         return new Read(out, placed);
     }

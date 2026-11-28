@@ -79,18 +79,45 @@ final class NaturalBlocks {
         }
     }
 
-    /** The blocks the terrain settings name, the half of {@link #read} that says where the ground itself comes from. */
-    static Set<String> terrainPlaced(MinecraftServer server, BuildNotes notes) {
-        Set<String> found = new TreeSet<>();
-        RegistryOps<JsonElement> ops = RegistryOps.create(JsonOps.INSTANCE, server.registryAccess());
-        scan(server, Registries.NOISE_SETTINGS, NoiseGeneratorSettings.DIRECT_CODEC, ops, found, notes, "terrain settings");
-        found.remove(BuiltInRegistries.BLOCK.getKey(Blocks.AIR).toString());
-        return found;
-    }
-
     /** The blocks the world makes from code, with nothing in a feature's configuration to read (see {@link #PLACED_BY_CODE}). */
     static Set<String> placedByCode() {
         return PLACED_BY_CODE.keySet();
+    }
+
+    /**
+     * Of the blocks the code places, those it places in one dimension only, with that dimension's name as the
+     * terrain settings spell it ({@link #NETHER}, {@link #END}): the rest are the overworld's or anybody's.
+     */
+    static Map<String, String> placedByCodeIn() {
+        return Map.of("minecraft:glowstone", NETHER, "minecraft:basalt", NETHER, "minecraft:chorus_flower", END);
+    }
+
+    static final String OVERWORLD = "overworld";
+    static final String NETHER = "nether";
+    static final String END = "end";
+
+    /**
+     * The blocks the terrain settings name, by the dimension the settings are for: the nether's and the end's by
+     * their names, every other set of settings (the overworld's, its amplified and large-biome forms, a mod's) as
+     * the overworld's. Netherrack is the ground of the nether and of nowhere else.
+     */
+    static Map<String, Set<String>> terrainByDimension(MinecraftServer server, BuildNotes notes) {
+        Map<String, Set<String>> found = new java.util.TreeMap<>();
+        RegistryOps<JsonElement> ops = RegistryOps.create(JsonOps.INSTANCE, server.registryAccess());
+        Registry<NoiseGeneratorSettings> registry = server.registryAccess().registryOrThrow(Registries.NOISE_SETTINGS);
+        for (Map.Entry<ResourceKey<NoiseGeneratorSettings>, NoiseGeneratorSettings> entry : registry.entrySet()) {
+            String path = entry.getKey().location().getPath();
+            String dimension = path.contains(NETHER) ? NETHER : path.contains(END) ? END : OVERWORLD;
+            JsonElement written = NoiseGeneratorSettings.DIRECT_CODEC.encodeStart(ops, entry.getValue()).result().orElse(null);
+            if (written == null) {
+                notes.count("terrain settings that could not be written out to look for their blocks");
+                continue;
+            }
+            collect(written, found.computeIfAbsent(dimension, k -> new TreeSet<>()));
+        }
+        String air = BuiltInRegistries.BLOCK.getKey(Blocks.AIR).toString();
+        found.values().forEach(blocks -> blocks.remove(air));
+        return found;
     }
 
     /** Every string anywhere in the tree that is the id of a registered block. */

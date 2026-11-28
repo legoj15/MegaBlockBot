@@ -141,10 +141,12 @@ public final class TradeTask extends BodyTask {
     private static final int WINDOW_WAIT_TICKS = 100;
     /**
      * Ticks the task waits for an offer that ran out to be stocked again. A villager restocks when it next works at
-     * its job site, twice a day at the most and the second time no sooner than 2400 ticks after the first: 3600 is
-     * that gap and half as much again, and a small part of the task's budget.
+     * its job site, twice in a row at the most (the second no sooner than 2400 ticks after the first), and its count
+     * of restocks starts over 12000 ticks after it last did (Villager.shouldRestock): a little more than that sees
+     * a restock whatever the count was, while the villager can get to its site and it is not night. A sixth of the
+     * task's budget.
      */
-    private static final int RESTOCK_WAIT_TICKS = 3600;
+    private static final int RESTOCK_WAIT_TICKS = 12_600;
     /** Ticks the body may spend getting to a villager that has taken the job before the roll gives it up: 20 s. */
     private static final int REACH_WAIT_TICKS = 400;
     /**
@@ -894,6 +896,12 @@ public final class TradeTask extends BodyTask {
             return TickResult.RUNNING;
         }
         if (held(body) >= target) return tidy(body, TickResult.COMPLETED);
+        if (offerIndex >= who.getOffers().size()) {
+            // Its offers changed under the task (it lost the job while the body waited): looked at afresh.
+            villager = null;
+            phase = Phase.LOOKING;
+            return TickResult.RUNNING;
+        }
         MerchantOffer offer = who.getOffers().get(offerIndex);
         if (offer.isOutOfStock()) {
             // Used up (a sale of sticks is good for sixteen emeralds). The villager stocks it again the next time it
