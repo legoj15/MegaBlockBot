@@ -139,6 +139,12 @@ public final class TradeTask extends BodyTask {
      * five seconds, longer than it is busy walking to its new job site, shorter than a night's sleep.
      */
     private static final int WINDOW_WAIT_TICKS = 100;
+    /**
+     * Ticks the task waits for an offer that ran out to be stocked again. A villager restocks when it next works at
+     * its job site, twice a day at the most and the second time no sooner than 2400 ticks after the first: 3600 is
+     * that gap and half as much again, and a small part of the task's budget.
+     */
+    private static final int RESTOCK_WAIT_TICKS = 3600;
     /** Ticks the body may spend getting to a villager that has taken the job before the roll gives it up: 20 s. */
     private static final int REACH_WAIT_TICKS = 400;
     /**
@@ -255,6 +261,8 @@ public final class TradeTask extends BodyTask {
     private int phaseTicks;
     private int exploreRounds;
     private int takeTicks;
+    /** Ticks waited so far for an offer that ran out to be stocked again. */
+    private int restockTicks;
     /** The offer the task is buying, by index in the villager's own list. */
     private int offerIndex = -1;
     /** The answer the tidy step hands back once the job site it must take up is taken up. */
@@ -884,15 +892,29 @@ public final class TradeTask extends BodyTask {
             return TickResult.RUNNING;
         }
         if (held(body) >= target) return tidy(body, TickResult.COMPLETED);
+        MerchantOffer offer = who.getOffers().get(offerIndex);
+        if (offer.isOutOfStock()) {
+            // Used up (a sale of sticks is good for sixteen emeralds). The villager stocks it again the next time it
+            // works at its job site, so the window is closed -- a villager with a customer stands still -- and the
+            // body waits where it is. No restock in the named time (a night, a villager cut off from its site): the
+            // step is given up with what it got, as it always was.
+            close(body);
+            if (restockTicks == 0) {
+                MegaBlockBot.LOGGER.info("{}: the {}'s offer of {} is out of stock (used {} of {}); waiting for it to restock",
+                    body.getGameProfile().getName(), profession, itemKey.id(), offer.getUses(), offer.getMaxUses());
+            }
+            if (++restockTicks > RESTOCK_WAIT_TICKS) {
+                return tidy(body, TickResult.failed(new Failure.NoProgress(offer.getUses(),
+                    "the " + profession + "'s offer of " + itemKey.id() + " is out of stock (used " + offer.getUses()
+                        + " of " + offer.getMaxUses() + " times) and was not restocked in " + RESTOCK_WAIT_TICKS
+                        + " ticks")));
+            }
+            return TickResult.RUNNING;
+        }
+        restockTicks = 0;
         if (menu == null || body.containerMenu != menu) {
             menu = null;
             if (!openWindow(body, who)) return TickResult.RUNNING;
-        }
-        MerchantOffer offer = who.getOffers().get(offerIndex);
-        if (offer.isOutOfStock()) {
-            return tidy(body, TickResult.failed(new Failure.NoProgress(offer.getUses(),
-                "the " + profession + "'s offer of " + itemKey.id() + " is out of stock (used " + offer.getUses()
-                    + " of " + offer.getMaxUses() + " times)")));
         }
         if (MenuHand.roomFor(body, offer.getResult()) <= 0) {
             return tidy(body, TickResult.failed(new Failure.NoRoom(itemKey, "the inventory cannot take one more "
