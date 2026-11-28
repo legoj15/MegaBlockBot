@@ -1942,6 +1942,41 @@ final class SolverPlannerTest {
     }
 
     @Test
+    void whiteWoolWithNoShearsHeldMakesTheShearsOnceAndEndsInOneUseOnLeaf() {
+        // The kept tool is planned like any item and never spent: from an empty hand the plan makes one pair of
+        // shears (two iron, and the pickaxe the iron needs) and ends in the one use_on leaf, and the shears are
+        // still in the stock after it, there for a second ask of the wool.
+        RecipeBook book = bookWith(recipe("shears_from_iron", SHEARS, 1, CRAFTING_TABLE, of(IRON_INGOT, 2)));
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(WHITE_WOOL).addItem(SHEARS).addItem(IRON_INGOT);
+        builder.addSource(new Source.MineBlock("mine:minecraft:iron_ore", IRON_INGOT, "minecraft:iron_ore",
+                ToolClass.PICKAXE, ToolTier.STONE, true, false, false, 1.0, false, new Source.OreRange(0, 96, 16)));
+        builder.addSource(new Source.UseOn("use:minecraft:shears@entity:minecraft:sheep#white", WHITE_WOOL, SHEARS,
+                false, Source.UseOn.ENTITY, "minecraft:sheep", "white", 2.0, false));
+        SolverPlanner planner = planner(book, builder.build());
+
+        Plan plan = planned(planner, request(new Goal.HaveItem(WHITE_WOOL, 1), EMPTY, Exclusions.NONE));
+        List<NodeSpec> planLeaves = leaves(plan);
+        List<NodeSpec> uses = planLeaves.stream().filter(leaf -> leaf.taskKind().equals("use_on")).toList();
+        assertEquals(1, uses.size(), "one use_on leaf: " + planLeaves);
+        assertEquals("minecraft:shears", uses.get(0).params().get("tool"));
+        int shearsCraft = -1;
+        for (int i = 0; i < planLeaves.size(); i++) {
+            if (planLeaves.get(i).taskKind().equals("craft")
+                    && "shears_from_iron".equals(planLeaves.get(i).params().get("recipe"))) shearsCraft = i;
+        }
+        assertTrue(shearsCraft >= 0, "the shears are crafted: " + planLeaves);
+        assertEquals(1L, craftedRecipes(plan).stream().filter("shears_from_iron"::equals).count(),
+                "one craft of shears, not one per unit: " + planLeaves);
+        assertTrue(shearsCraft < planLeaves.indexOf(uses.get(0)), "the shears are made before the use: " + planLeaves);
+
+        Executed executed = run(plan, book, Map.of(), Map.of());
+        assertNull(executed.failure(), "the plan must run to the end: " + executed.failure() + " after " + executed.ran());
+        assertEquals(1, executed.stock().getOrDefault(WHITE_WOOL, 0));
+        assertEquals(1, executed.stock().getOrDefault(SHEARS, 0), "the shears are kept, still held after the leaf");
+    }
+
+    @Test
     void aUseOnSourceWhoseToolHasNoSourceIsUnusableNamingTheTool() {
         // A prize had only by using a tool nothing gives: the source is priced out, and the plan fails naming the
         // tool, as a mining source whose pickaxe cannot be had fails naming the pickaxe.

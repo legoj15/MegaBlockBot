@@ -121,10 +121,13 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
   `entity` — the water it also holds is not the way), the milk bucket is an empty bucket on a cow, a mooshroom or a
   goat (`Cow.mobInteract` and the goat's own class; one source each, only when the entity type is registered), and
   wool is `minecraft:shears` on a sheep (one source per dye colour, `variant` the colour, tool kept, yield 2: the game
-  drops one to three). The entity type and the block behind a bucket are private fields with no getters, so each is
-  named the way the ids are laid out (`<fish>_bucket` for the fish `<fish>`); a bucket whose content cannot be named
-  that way is counted in the notes. A fluid or block target stands in the world like a mined block does (a lava source
-  is the block `minecraft:lava`), so the sight looks for it the same way; an entity target does not.
+  drops one to three), also only when the sheep's entity type is registered. The entity type and the block behind a
+  bucket are private fields with no getters, so each is named the way the ids are laid out (`<fish>_bucket` for the
+  fish `<fish>`); a bucket whose content cannot be named that way is counted in the notes. A bucket whose fluid no
+  registered block holds as a source is left out and counted too: the use-on task looks for a source cell in the
+  loaded chunks, and there is no such cell to find. A fluid or block target stands in the world like a mined block
+  does (a lava source is the block `minecraft:lava`), so the sight looks for it the same way; an entity target does
+  not.
 - Recipes: every `RecipeManager` output is craftable; types other than crafting, smelting, blasting, smoking, campfire
   cooking, stonecutting and smithing are counted as unplannable.
 

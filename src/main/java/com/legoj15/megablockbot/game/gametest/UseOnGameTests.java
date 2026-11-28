@@ -5,6 +5,7 @@ import static com.legoj15.megablockbot.game.gametest.BotNavGameTests.room;
 
 import com.legoj15.megablockbot.MegaBlockBot;
 import com.legoj15.megablockbot.core.ItemKey;
+import com.legoj15.megablockbot.core.Pos;
 import com.legoj15.megablockbot.core.goal.Goal;
 import com.legoj15.megablockbot.core.plan.NodeSpec;
 import com.legoj15.megablockbot.core.task.Failure;
@@ -122,6 +123,38 @@ public final class UseOnGameTests {
     }
 
     /**
+     * Two cows and a bucket: the nearer one sealed in a pen with no gap and walls thick enough that the body cannot
+     * come within the game's reach of it, the other free in the arena. A follow command never fails for want of a
+     * path, so the sealed one has to be given up on -- the chase watched, as the kill task watches one -- before the
+     * free one is milked; the task ends holding a milk bucket and the sealed cow alive and unmilked.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 2400, batch = "useon_sealed")
+    public static void aSealedCowIsGivenUpForTheFreeOne(GameTestHelper helper) {
+        room(helper, 3, Blocks.BARRIER);
+        sealedPen(helper);
+        Cow sealedCow = cow(helper, new Vec3(7.5, FLOOR_Y + 1, 10.5));
+        Cow freeCow = cow(helper, new Vec3(12.5, FLOOR_Y + 1, 3.5));
+        Job job = Job.start(helper, "useal", new Vec3(4.5, FLOOR_Y + 1, 4.5), 2400,
+            useOnLeaf("milk_bucket", 1, "bucket", true, "entity", "cow", null));
+        job.body().getInventory().setItem(0, new ItemStack(Items.BUCKET));
+        // The body only walks: a neighbour's mob may reach it.
+        job.body().setInvulnerable(true);
+        job.run.atEnd(() -> {
+            sealedCow.discard();
+            freeCow.discard();
+        });
+        job.run.each(2000, () -> {
+            failIfFailed(helper, job);
+            if (job.task.state() != TaskState.COMPLETED) return;
+            helper.assertTrue(job.body().getInventory().countItem(Items.MILK_BUCKET) >= 1,
+                "completed holding no milk bucket");
+            helper.assertTrue(sealedCow.isAlive() && !sealedCow.isRemoved(), "the sealed cow is not alive at the end");
+            MegaBlockBot.LOGGER.info("Use-on GameTest: milk from the free cow after {} ticks", job.run.ticks);
+            job.run.pass();
+        });
+    }
+
+    /**
      * A walled pool, open to the air and two deep, holding one salmon, and a body with a water bucket: a
      * {@code use_on} leaf for one salmon bucket ends with the body holding one.
      */
@@ -233,6 +266,38 @@ public final class UseOnGameTests {
         });
     }
 
+    /**
+     * A lava source the break rules refuse, one cell above the arena the test registers (above every other test's
+     * too, wherever they stand) and walled in so it cannot run, and a bucket: the task fails {@code Protected}
+     * naming that cell and holds the empty bucket still.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 400, batch = "useon_refused")
+    public static void lavaTheBreakRulesRefuseFailsProtected(GameTestHelper helper) {
+        room(helper, 3, Blocks.BARRIER);
+        BlockPos cell = new BlockPos(8, FLOOR_Y + 15, 8);
+        helper.setBlock(cell.getX(), cell.getY() - 1, cell.getZ(), Blocks.STONE);
+        basin(helper, cell, Blocks.LAVA);
+        Job job = Job.start(helper, "urefus", new Vec3(4.5, FLOOR_Y + 1, 4.5), 400,
+            useOnLeaf("lava_bucket", 1, "bucket", true, "fluid", "lava", null));
+        job.body().getInventory().setItem(0, new ItemStack(Items.BUCKET));
+        job.body().setInvulnerable(true);
+        job.run.each(300, () -> {
+            helper.assertTrue(job.task.state() != TaskState.COMPLETED, "scooped lava the rules refuse");
+            if (job.task.state() != TaskState.FAILED) return;
+            if (!(job.task.failure() instanceof Failure.Protected refused)) {
+                helper.fail("failed as " + job.task.failure());
+                return;
+            }
+            helper.assertTrue(refused.pos().equals(absolute(helper, cell)),
+                "Protected names " + refused.pos() + ", not the lava at " + cell);
+            helper.assertTrue(helper.getBlockState(cell).getFluidState().is(FluidTags.LAVA), "the cell is still lava");
+            helper.assertTrue(job.body().getInventory().countItem(Items.BUCKET) == 1, "the bucket was spent");
+            helper.assertTrue(job.body().getInventory().countItem(Items.LAVA_BUCKET) == 0, "holds a lava bucket");
+            MegaBlockBot.LOGGER.info("Use-on GameTest: Protected after {} ticks: {}", job.run.ticks, refused.detail());
+            job.run.pass();
+        });
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Building leaves and terrain
     // ---------------------------------------------------------------------------------------------------------
@@ -302,6 +367,22 @@ public final class UseOnGameTests {
         }
     }
 
+    /**
+     * A pen with no gap: barrier four blocks thick around the one cell the animal stands in, two high as the penned
+     * animals' pen is. The thickness is the point: the game's reach to an entity is three blocks from the eyes, and
+     * four blocks of wall keep the body outside that, so the animal inside is one the body can neither walk to nor
+     * lean over the wall at -- only give up on.
+     */
+    private static void sealedPen(GameTestHelper helper) {
+        for (int x = 3; x <= 11; x++) {
+            for (int z = 6; z <= 14; z++) {
+                if (x == 7 && z == 10) continue; // the one cell the animal stands in
+                helper.setBlock(x, FLOOR_Y + 1, z, Blocks.BARRIER);
+                helper.setBlock(x, FLOOR_Y + 2, z, Blocks.BARRIER);
+            }
+        }
+    }
+
     /** A cow made without the spawn code's dice, set down in this arena, persistent so it does not despawn mid-test. */
     private static Cow cow(GameTestHelper helper, Vec3 relative) {
         Cow cow = EntityType.COW.create(helper.getLevel());
@@ -339,6 +420,12 @@ public final class UseOnGameTests {
 
     private static void failIfFailed(GameTestHelper helper, Job job) {
         if (job.task.state() == TaskState.FAILED) helper.fail("the task failed: " + job.task.failure());
+    }
+
+    /** A relative cell as a failure carries it: a plain position, in the world's own coordinates. */
+    private static Pos absolute(GameTestHelper helper, BlockPos relative) {
+        BlockPos at = helper.absolutePos(relative);
+        return new Pos(at.getX(), at.getY(), at.getZ());
     }
 
     // ---------------------------------------------------------------------------------------------------------

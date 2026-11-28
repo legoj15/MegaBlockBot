@@ -61,16 +61,17 @@ import net.minecraft.world.phys.Vec3;
  * <ol>
  *   <li>fails {@code MissingInput} naming the tool when the body holds none of it (for a spent tool, at least one: the
  *       plan provides one per unit as it goes). A full inventory the result would not fit is {@code NoRoom}: with
- *       several of a spent tool stacked in one slot the filled one cannot stack onto them and would be dropped, and a
- *       kept tool's result (wool) lies where it fell until it is picked up;</li>
+ *       several of a spent tool stacked in the slot the hand takes one from the filled one cannot stack onto the rest
+ *       and would be dropped, and a kept tool's result (wool) lies where it fell until it is picked up;</li>
  *   <li>finds a target within the search radius the kill and harvest tasks use: a source cell of the fluid (a cell of
  *       the block) with a standable cell beside it that the use reaches -- asked of the same ray-cast the use makes, so
  *       a source walled in behind a rim is only taken from a stand whose line gets over that rim -- or a living mob of
  *       the type that is ready (not a baby; a sheep ready for shearing and of the variant's colour; any adult for
- *       milking, which takes nothing). Cells this body has used the tool on for nothing are read too, and not chosen
- *       again. None: it explores with the kill task's bounds and looks again, and past them fails {@code NoSource} with
- *       the leaf's item and source id ({@link BodyTask#exploreFailure} decides what an exploring command's failure
- *       says);</li>
+ *       milking, which takes nothing). A mob, a cell or a stand inside a live danger zone is not a candidate (issue 29),
+ *       and how many were left for that reason is said in the {@code NoSource} detail. Cells this body has used the tool
+ *       on for nothing are read too, and not chosen again. None: it explores with the kill task's bounds and looks
+ *       again, and past them fails {@code NoSource} with the leaf's item and source id
+ *       ({@link BodyTask#exploreFailure} decides what an exploring command's failure says);</li>
  *   <li>scooping a fluid removes a block, so the body's break rules are asked for the cell and a refused one is set
  *       aside; when only refused cells are left the failure is {@code Protected}. When only cells that gave nothing are
  *       left the failure is {@code NoProgress}, since the target is there and the rules allow it and the body stood
@@ -78,7 +79,11 @@ import net.minecraft.world.phys.Vec3;
  *       leashed one is left alone (the kill task's eligibility test, shared: {@link KillTask#takeable});</li>
  *   <li>goes to the target through the navigator: to a standable cell beside the fluid, never one that is the fluid
  *       itself and never one whose floor would not hold the body, so the lava being scooped is neither stood in nor
- *       pathed through; or, for a mob, a follow that closes on it as the kill task does, re-aiming as it moves;</li>
+ *       pathed through -- and a cell the body is sent back to that many times without the use being made from it is set
+ *       aside, as one whose uses gave nothing is; or, for a mob, a follow that closes on it as the kill task does,
+ *       re-aiming as it moves, with the kill task's own watch on the chase: a mob that is neither come closer to nor
+ *       within reach for a named time is set aside and another taken, for a follow command never fails for want of a
+ *       path;</li>
  *   <li>uses the tool once: the tool in the main hand, the body turned at the target -- into the fluid cell a little
  *       below its surface, at the mob's eyes -- and left one tick to finish the turn before the use is given, because
  *       the game aims its own ray-cast by the rotation the turn ends in. That use is the item use for a fluid or a
@@ -142,6 +147,18 @@ public final class UseOnTask extends BodyTask {
     private static final int RESULT_WAIT_TICKS = 10;
     /** Uses one target is given before it is set aside and another taken. */
     private static final int USES_PER_TARGET = 4;
+    /**
+     * Times one target sends the body back to its stand without the use being made before the cell is set aside, as a
+     * cell whose uses gave nothing is: the navigator's own idea of "at the stand" is not always where the use needs it.
+     */
+    private static final int RETURNS_PER_TARGET = 3;
+    /**
+     * Ticks a mob is neither come closer to nor within reach of before it is set aside: the navigator's own stall
+     * bound for one block ({@code BotNavigator.TARGET_STALL_TICKS}), as the kill task's chase watch takes it.
+     */
+    private static final int CHASE_STALL_TICKS = BotNavigator.TARGET_STALL_TICKS;
+    /** Getting this much closer to a mob counts as a gain; less is the body swaying about (the kill task's number). */
+    private static final double CLOSER_BY = 0.5;
     /** How far from the target the drops of the leaf's item are walked to: the kill task's own radius. */
     private static final double LOOT_RADIUS = 8.0;
     /**
@@ -205,6 +222,8 @@ public final class UseOnTask extends BodyTask {
     private final Set<BlockPos> unusable = new HashSet<>();
     /** Mobs the task will not go after again (it could not get at them, or they would not pay out). */
     private final Set<UUID> asideMobs = new HashSet<>();
+    /** How many targets the last look left alone for standing inside a live danger zone (issue 29). */
+    private int zonedTargets;
     @Nullable
     private BlockPos at;
     @Nullable
@@ -214,8 +233,15 @@ public final class UseOnTask extends BodyTask {
     /** The serial of the command this task gave last, or -1: how it tells its own command's fate from anybody else's. */
     private long serial = -1;
     private int uses;
+    /** How many times this target has sent the body back to its stand without the use being made from it. */
+    private int returns;
     /** Ticks this attempt has spent turning the body to the target: the use is made once the turn is through. */
     private int turnTicks;
+    /** The chase's own watch: which mob the body is after, how close it has come, and for how long none of that. */
+    @Nullable
+    private UUID chasing;
+    private double bestDistance = Double.MAX_VALUE;
+    private int noProgress;
     private int waitTicks;
     /** How many of the item the body held when the last use was made: what the wait compares against. */
     private int heldAtUse;
@@ -329,8 +355,24 @@ public final class UseOnTask extends BodyTask {
     /** Whether the result of a use cannot be taken: no room at all for a kept tool's drop, none for a stacked spent one. */
     private boolean roomProblem(BotPlayer body) {
         if (MenuHand.roomFor(body, new ItemStack(item)) > 0) return false;
-        // A single spent tool is replaced in the hand by what it becomes: that always fits.
-        return !toolSpent || MenuHand.carriedCount(body, tool) > 1;
+        // A single spent tool is replaced in the hand by what it becomes: that always fits. What counts is the stack
+        // the use takes the tool from, not how many of it the body carries in all -- two in two slots are two uses
+        // that each replace their own.
+        return !toolSpent || toolStackSize(body) > 1;
+    }
+
+    /**
+     * How many of the tool are in the stack the use takes it from: the first stack of it on the hotbar, else the
+     * first in carried storage (the one a {@code MenuHand} swap brings into the hand whole). That stack is what the
+     * filled tool has to live beside; another stack of the tool elsewhere is another use's problem.
+     */
+    private int toolStackSize(BotPlayer body) {
+        var inventory = body.getInventory();
+        for (int slot = 0; slot < MenuHand.CARRIED_SLOTS; slot++) {
+            ItemStack stack = inventory.getItem(slot);
+            if (stack.is(tool)) return stack.getCount();
+        }
+        return 0;
     }
 
     @Override
@@ -343,7 +385,9 @@ public final class UseOnTask extends BodyTask {
         quarry = null;
         serial = -1;
         uses = 0;
+        returns = 0;
         turnTicks = 0;
+        chasing = null;
         phase = Phase.FIND;
     }
 
@@ -387,6 +431,7 @@ public final class UseOnTask extends BodyTask {
             serial = -1;
             uses = 0;
             turnTicks = 0;
+            chasing = null;
             if (quarry != null) {
                 MegaBlockBot.LOGGER.info("{}: going to the {} at {} to use the {} on it",
                     body.getGameProfile().getName(), describe(quarry), quarry.blockPosition().toShortString(),
@@ -400,8 +445,11 @@ public final class UseOnTask extends BodyTask {
             MegaBlockBot.LOGGER.info("{}: could not get at the {} at {}; set it aside", body.getGameProfile().getName(),
                 describe(quarry), quarry.blockPosition().toShortString());
             quarry = null;
+            chasing = null;
             return nextStep(body);
         }
+        TickResult stalled = watchTheChase(body);
+        if (stalled != null) return stalled;
         if (inReach(body, quarry)) {
             stopOurCommand(nav);
             phase = Phase.USE;
@@ -420,6 +468,36 @@ public final class UseOnTask extends BodyTask {
             serial = nav.serial();
         }
         return TickResult.RUNNING;
+    }
+
+    /**
+     * Whether the chase is going anywhere: it is while the body keeps getting closer to the mob, or while it is close
+     * enough to use on it. When neither has happened for {@link #CHASE_STALL_TICKS} ticks the mob is set aside and
+     * another is taken -- a follow command never fails for want of a path (it keeps trying), so this watch is what
+     * keeps a mob behind a wall from holding the body until the step's budget is spent while a mob it could reach is
+     * never tried. Null while the chase goes on.
+     */
+    @Nullable
+    private TickResult watchTheChase(BotPlayer body) {
+        if (!quarry.getUUID().equals(chasing)) {
+            chasing = quarry.getUUID();
+            bestDistance = quarry.distanceTo(body);
+            noProgress = 0;
+            return null;
+        }
+        boolean gain = inReach(body, quarry) || quarry.distanceTo(body) < bestDistance - CLOSER_BY;
+        bestDistance = Math.min(bestDistance, quarry.distanceTo(body));
+        if (gain) {
+            noProgress = 0;
+            return null;
+        }
+        if (++noProgress <= CHASE_STALL_TICKS) return null;
+        asideMobs.add(quarry.getUUID());
+        MegaBlockBot.LOGGER.info("{}: no closer to the {} at {} in {} ticks; set it aside", body.getGameProfile().getName(),
+            describe(quarry), quarry.blockPosition().toShortString(), CHASE_STALL_TICKS);
+        quarry = null;
+        chasing = null;
+        return nextStep(body);
     }
 
     /** A fluid or block target: the nearest cell the rules allow, with a stand beside it, walked to. */
@@ -448,9 +526,17 @@ public final class UseOnTask extends BodyTask {
         return findNext(body);
     }
 
-    /** Scans the loaded chunks around the body for the nearest cell of the target the rules allow, and goes to it. */
+    /**
+     * Scans the loaded chunks around the body for the nearest cell of the target that the rules allow and that has a
+     * stand beside it, and goes to it. The cells are collected and sorted first, and the break rules and the stands
+     * are asked only of the ones the scan actually considers, nearest first: a basin thirty blocks off is not asked
+     * about while one five blocks off serves. A cell or a stand inside a live danger zone is not a candidate
+     * (issue 29), as the kill, harvest and fish tasks skip theirs, and how many were left for that reason is said in
+     * the {@code NoSource} detail. Nothing zoned is set aside: it comes back when the zone lapses.
+     */
     private TickResult findNext(BotPlayer body) {
         quarry = null;
+        chasing = null;
         at = null;
         stand = null;
         ServerLevel level = body.serverLevel();
@@ -461,12 +547,10 @@ public final class UseOnTask extends BodyTask {
         int highY = Math.min(level.getMaxBuildHeight() - 1, center.getY() + r);
         List<BlockPos> cells = new ArrayList<>();
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
-        // The nearest cell the body has stood at and used the tool on to no end, and the nearest one the rules refuse:
-        // what either leaves as the answer when nothing else can be taken.
+        // The nearest cell the body has stood at and used the tool on to no end: what that leaves as the answer when
+        // nothing else can be taken.
         BlockPos spent = null;
         double spentDistance = Double.MAX_VALUE;
-        BlockPos refused = null;
-        double refusedDistance = Double.MAX_VALUE;
         for (int chunkX = (center.getX() - r) >> 4; chunkX <= (center.getX() + r) >> 4; chunkX++) {
             for (int chunkZ = (center.getZ() - r) >> 4; chunkZ <= (center.getZ() + r) >> 4; chunkZ++) {
                 LevelChunk chunk = level.getChunkSource().getChunkNow(chunkX, chunkZ);
@@ -492,14 +576,6 @@ public final class UseOnTask extends BodyTask {
                                 }
                                 continue;
                             }
-                            if (!mayTake(rules, level, here)) {
-                                double distance = here.distSqr(center);
-                                if (distance < refusedDistance) {
-                                    refusedDistance = distance;
-                                    refused = here;
-                                }
-                                continue;
-                            }
                             cells.add(here);
                         }
                     }
@@ -507,11 +583,28 @@ public final class UseOnTask extends BodyTask {
             }
         }
         cells.sort(Comparator.comparingDouble(cell -> cell.distSqr(center)));
+        int zoned = 0;
+        BlockPos refused = null;
         for (BlockPos here : cells) {
+            if (inDangerZone(body, here)) {
+                zoned++;
+                continue;
+            }
+            // Asked here and not in the scan, so that only the cells nearest the body are asked at all.
+            if (!mayTake(rules, level, here)) {
+                if (refused == null) refused = here; // the nearest one the rules refuse
+                continue;
+            }
             BlockPos aStand = standFor(level, center, here);
             if (aStand == null) continue; // nowhere to stand beside it: not a target for this body
+            if (inDangerZone(body, aStand)) {
+                zoned++;
+                continue;
+            }
+            zonedTargets = zoned;
             return goToCell(body, here, aStand);
         }
+        zonedTargets = zoned;
         if (refused != null) {
             release(body);
             return TickResult.failed(new Failure.Protected(corePos(refused), "break rules",
@@ -535,6 +628,7 @@ public final class UseOnTask extends BodyTask {
         at = cell;
         stand = aStand;
         uses = 0;
+        returns = 0;
         turnTicks = 0;
         MegaBlockBot.LOGGER.info("{}: going to {} at {} to use the {} on it from {}", body.getGameProfile().getName(),
             what(), cell.toShortString(), toolKey.id(), aStand.toShortString());
@@ -580,6 +674,9 @@ public final class UseOnTask extends BodyTask {
         release(body);
         String detail = String.format(Locale.ROOT, "found no %s to get %s from within %d blocks in %d attempts",
             what(), itemKey.id(), type != null ? (int) MOB_SEARCH_RADIUS : SCAN_RADIUS, attempts);
+        if (zonedTargets > 0) {
+            detail += "; " + zonedTargets + " of them stood inside a danger zone this body keeps out of";
+        }
         MegaBlockBot.LOGGER.info("{}: gave up using a {} on {}: {}", body.getGameProfile().getName(),
             toolKey.id(), what(), detail);
         return TickResult.failed(new Failure.NoSource(itemKey, sourceId, detail));
@@ -612,10 +709,21 @@ public final class UseOnTask extends BodyTask {
             }
             aim = quarry.getEyePosition();
         } else {
-            if (at == null || !isTarget(level, at) || !body.canInteractWithBlock(at, 0.0)) {
-                // Gone since it was chosen, or the body was pushed or carried off on the way.
-                if (at != null && isTarget(level, at)) nav(body).goTo(stand, 0);
-                else at = null;
+            if (at == null || !isTarget(level, at)) {
+                // Gone since it was chosen.
+                at = null;
+                phase = Phase.FIND;
+                return TickResult.RUNNING;
+            }
+            if (!body.canInteractWithBlock(at, 0.0)) {
+                // The target is still there and the body cannot use anything on it from where the navigator left it:
+                // back to the stand, and after a named number of such returns for one target the cell is set aside,
+                // as a cell whose uses gave nothing is -- otherwise the body walks to the same stand for ever.
+                if (++returns > RETURNS_PER_TARGET) {
+                    setThisAside(body);
+                    return TickResult.RUNNING;
+                }
+                nav(body).goTo(stand, 0);
                 phase = Phase.FIND;
                 return TickResult.RUNNING;
             }
@@ -715,6 +823,7 @@ public final class UseOnTask extends BodyTask {
                     USES_PER_TARGET, toolKey.id());
             }
             quarry = null;
+            chasing = null;
         } else {
             if (at != null) {
                 unusable.add(at.immutable());
@@ -760,7 +869,8 @@ public final class UseOnTask extends BodyTask {
      * itself will make ({@link #reaches}) -- the nearest stand is no use if the line from it answers a block other than
      * the target, which is how a source walled in by rim blocks reads from level with its surface. A target with no
      * stand the use reaches is taken by the nearest stand with nothing in the way of the look, so a target the body can
-     * only partly see still gets its turn.
+     * only partly see still gets its turn. Either way the stand is within {@link #USE_REACH} of the aim, measured as the
+     * other is: a stand further off sees the target and cannot use anything on it.
      */
     @Nullable
     private BlockPos standFor(ServerLevel level, BlockPos center, BlockPos target) {
@@ -783,7 +893,7 @@ public final class UseOnTask extends BodyTask {
                         if (toAim >= reachedDistance) continue;
                         reachedDistance = toAim;
                         reached = candidate.immutable();
-                    } else if (fluid == null && distance < seenDistance && eyesSee(level, eyes, aim)) {
+                    } else if (fluid == null && toAim <= USE_REACH && distance < seenDistance && eyesSee(level, eyes, aim)) {
                         seenDistance = distance;
                         seen = candidate.immutable();
                     }
@@ -838,7 +948,8 @@ public final class UseOnTask extends BodyTask {
      * The nearest mob of the leaf's type that is ready to be used on, or null: one the kill task's rule lets a player
      * take from ({@link KillTask#takeable}), not one this task set aside, and ready -- a sheep that has its wool and is
      * of the variant's colour. Anything else (any adult, for milking) is ready by being an adult, which the shared
-     * rule has already asked for.
+     * rule has already asked for. A mob that stands inside a live danger zone is not a candidate either (issue 29),
+     * and it is not set aside: the zone lapses, and the mob with it becomes one again.
      */
     @Nullable
     private Mob findQuarry(BotPlayer body) {
@@ -847,14 +958,20 @@ public final class UseOnTask extends BodyTask {
         AABB box = new AABB(at, at).inflate(MOB_SEARCH_RADIUS);
         Mob nearest = null;
         double nearestDistance = Double.MAX_VALUE;
+        int zoned = 0;
         for (Mob mob : level.getEntitiesOfClass(Mob.class, box, candidate -> candidate.getType() == type)) {
             if (!ready(mob)) continue;
+            if (inDangerZone(body, mob.blockPosition())) {
+                zoned++;
+                continue;
+            }
             double distance = mob.distanceToSqr(body);
             if (distance < nearestDistance) {
                 nearestDistance = distance;
                 nearest = mob;
             }
         }
+        zonedTargets = zoned;
         return nearest;
     }
 

@@ -77,11 +77,10 @@ returns its own `Failed`** (the executor does not abort a task that failed itsel
 `waiting()` is true while it waits on the game (a break, a pickup) so the stuck watchdog leaves it alone; `checkpoint()`
 returns hints for where to look after a restart, never facts.
 
-Registered here: `craft`, `smelt`, `stonecut`, `smith` and `equip`. `navigate`, `reach`, `mine`, `fish`, `kill`,
-`harvest`, `recover_drops`, `deposit`, `withdraw`, `look_inside` and `build` are registered by the navigation work
-Registered here: `craft`, `smelt` and `equip`. `navigate`, `reach`, `mine`, `fish`, `kill`, `harvest`, `use_on`,
-`recover_drops`, `deposit`, `deliver`, `withdraw`, `look_inside` and `build` are registered by the navigation work
-(`TaskFeature`), not here.
+Registered here (`BotFeature.init`): `craft`, `smelt`, `stonecut`, `smith` and `equip` — the tasks that need no
+movement. `navigate`, `reach`, `mine`, `fish`, `kill`, `harvest`, `use_on`, `recover_drops`, `deposit`, `deliver`,
+`withdraw`, `look_inside`, `build` and `trade` are registered by the navigation work (`TaskFeature.init`, called from
+`NavFeature.init`), not here.
 
 What the navigation tasks need from this runtime:
 
@@ -391,8 +390,9 @@ overlapping ones are kept as they are. While one lives:
   fallback: when only zoned blocks are known the command ends with nothing to mine and the task explores. Nothing is set
   aside for it, so the blocks come back the moment the zone lapses. A step that ends for want of a source because of a
   zone says so in its failure's detail (how many blocks stood inside one).
-- The `kill`, `harvest` and `fish` tasks skip candidates inside one the same way (a quarry, a grown block, a place to
-  stand and cast), and their `NoSource` detail says how many were left for it.
+- The `kill`, `harvest`, `fish` and `use_on` tasks skip candidates inside one the same way (a quarry, a grown block, a
+  place to stand and cast, a cell or stand to use a tool from), and their `NoSource` detail says how many were left
+  for it.
 - The recover node skips a death position inside one, with a log line, and completes as it does for a position it cannot
   reach.
 - `status()` (where the reflex line is) lists the live ones: centre, radius, seconds left, reason.
@@ -751,33 +751,44 @@ becomes the result, as a bucket does), `targetKind` (`fluid`, `block` or `entity
   with no other way names the tool.
 - **MissingInput** names the tool when the body holds none of it (for a spent tool, at least one: the plan provides
   one per unit as it goes). A full inventory the result would not fit is **`NoRoom`**: with several of a spent tool
-  stacked in one slot the filled one cannot stack onto them and would be dropped, and a kept tool's result (wool)
-  lies where it fell until it is picked up — a single spent tool is replaced in the hand by what it becomes, which
-  always fits.
+  stacked in the slot the hand takes one from, the filled one cannot stack onto the rest and would be dropped, and a
+  kept tool's result (wool) lies where it fell until it is picked up — a single spent tool, or several in separate
+  slots, is replaced in the hand by what it becomes, which always fits.
 - **Finding a target**, within the search radius the kill and harvest tasks use (24 blocks for a mob, a 32-block scan
   of the loaded chunks for a fluid or block cell): a source cell of the fluid (a cell of the block, powder snow),
   with a standable cell beside it that the use reaches (below); or a living mob of the type that is ready — not a
   baby, and a sheep ready for shearing (`Sheep.readyForShearing`) and of the variant's colour; any adult serves for
   milking, which takes nothing. A mob that is named or leashed is left alone by the rule the kill task also uses
-  (`KillTask.takeable`, shared). Cells the body has already used the tool on for nothing are read too and not gone to
-  again. None: it explores with the kill task's bounds (`UseOnTask.Search`), one look per stretch of exploring, and
-  past them fails `NoSource` with the leaf's item and source id (`BodyTask.exploreFailure` decides what an exploring
-  command's failure says, as for `mine`, `fish`, `kill` and `harvest`).
+  (`KillTask.takeable`, shared). A mob, a cell or a stand inside a live danger zone is not a candidate either
+  (issue 29), and the `NoSource` detail says how many were left for that reason. Cells the body has already used the
+  tool on for nothing are read too and not gone to again. None: it explores with the kill task's bounds
+  (`UseOnTask.Search`), one look per stretch of exploring, and past them fails `NoSource` with the leaf's item and
+  source id (`BodyTask.exploreFailure` decides what an exploring command's failure says, as for `mine`, `fish`,
+  `kill` and `harvest`).
 - **The break rules are asked before a scoop**: scooping a fluid removes a block, so the cell is put to
   `BreakRules.filterFor(body)` and a refused one is set aside; when only refused cells are left the failure is
-  `Protected` naming the nearest. A cell the body stood at and used the tool on until it gave up on is a different
-  thing — the target is there and the rules allow it — so when only those are left the failure is `NoProgress`, which
-  keeps `NoSource` meaning a source with nothing to give and sends the plan looking again rather than excluding the
-  source. Catching a fish and shearing a sheep take from a mob, which the shared eligibility rule covers; milking
-  takes nothing.
+  `Protected` naming the nearest. The cells are collected and sorted first and the rules asked only of the ones the
+  scan actually considers, nearest first — a basin thirty blocks off is not asked about while one five blocks off
+  serves. A cell the body stood at and used the tool on until it gave up on is a different thing — the target is
+  there and the rules allow it — so when only those are left the failure is `NoProgress`, which keeps `NoSource`
+  meaning a source with nothing to give and sends the plan looking again rather than excluding the source. Catching
+  a fish and shearing a sheep take from a mob, which the shared eligibility rule covers; milking takes nothing.
 - **Going to it.** A fluid or block target is walked to through `BotNavigator.goTo` to a standable cell beside it
   (`TableSites.standable`): never a cell of the fluid itself, never one whose floor would not hold the body at full
   height — so the lava being scooped is neither stood in nor pathed through. Stands are preferred by the same
   `Level.clip` the use itself will end in — the blocks' outlines, and the sources when the target is a fluid — asked
   from the stand's eyes to the aim point and answered with the target cell or with something else; the nearest stand
   whose line strikes the rim a walled source hides behind is a stand from which the use does nothing, so it is not
-  chosen while one that reaches is left. A mob is followed (`BotNavigator.follow`) and closed on by the body's own
-  steps within 4 blocks, as the kill task closes on its quarry, re-aiming as the mob moves.
+  chosen while one that reaches is left. Every stand is within `UseOnTask.USE_REACH` of the aim, the fall-back with
+  only a clear line as much as the one the ray-cast answers for: a stand further off sees the target and cannot use
+  anything on it. A target still there that the body cannot use anything on from where the navigator left it sends
+  the body back to the stand, and after `UseOnTask.RETURNS_PER_TARGET` such returns for one target the cell is set
+  aside, as a cell whose uses gave nothing is — otherwise the body walks to the same stand for ever. A mob is
+  followed (`BotNavigator.follow`) and closed on by the body's own steps within 4 blocks, as the kill task closes on
+  its quarry, re-aiming as the mob moves — and the chase is watched as the kill task watches one: a mob that is
+  neither come closer to nor within reach for `UseOnTask.CHASE_STALL_TICKS` ticks (the navigator's own stall bound)
+  is set aside and another taken, for a follow command never fails for want of a path and would otherwise hold the
+  body until the step's budget is spent while a mob it could reach is never tried.
 - **The use itself**: the tool taken into the main hand (a hotbar select or a `MenuHand` swap, as the fish task takes
   its rod); the body turned at the target — into the fluid cell a little below its top face and toward the side away
   from the body, at the mob's eyes — by a look written to the input *and* to the body's rotation, and left
@@ -805,12 +816,14 @@ becomes the result, as a bucket does), `targetKind` (`fluid`, `block` or `entity
   many of the item it holds.
 - `UseOnGameTests` (registered with the navigation work's, in `NavFeature`): a bucket beside a walled lava basin ends
   holding a lava bucket with the cell no longer lava and the body's health what it was; a bucket and a penned cow end
-  with a milk bucket and the cow alive; a water bucket and a walled pool holding one salmon end with a salmon bucket;
-  shears and a penned white sheep end holding white wool with the sheep alive and sheared; no target anywhere fails
-  `NoSource` inside its bound; no bucket carried fails `MissingInput` naming it. Every test is in a batch of its own,
-  as the kill tests' flocks are: the scan does not stop at walls, so a basin or an animal in a neighbouring arena is a
-  target for this body too. The penned animals are set down at the arena's absolute position and in the pen the kill
-  tests build; the salmon in the water of a pool like the fish tests' own.
+  with a milk bucket and the cow alive; two cows, the nearer sealed into a pen whose walls keep the body out of the
+  game's reach of it, end with a milk bucket from the free one; a water bucket and a walled pool holding one salmon
+  end with a salmon bucket; shears and a penned white sheep end holding white wool with the sheep alive and sheared;
+  a lava source the break rules refuse fails `Protected` naming the cell with the empty bucket still held; no target
+  anywhere fails `NoSource` inside its bound; no bucket carried fails `MissingInput` naming it. Every test is in a
+  batch of its own, as the kill tests' flocks are: the scan does not stop at walls, so a basin or an animal in a
+  neighbouring arena is a target for this body too. The penned animals are set down at the arena's absolute position
+  and in the pen the kill tests build; the salmon in the water of a pool like the fish tests' own.
 
 ## Supply containers, `look_inside` and `withdraw`
 

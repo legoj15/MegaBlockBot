@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -72,6 +73,7 @@ import net.minecraft.world.level.block.SweetBerryBushBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.material.Fluid;
+import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.storage.loot.LootTable;
 
@@ -371,11 +373,12 @@ public final class AcquisitionIndexBuilder {
      */
     private void usedOn() {
         var features = server.getWorldData().enabledFeatures();
+        Set<Fluid> scoopable = scoopableFluids();
         for (Item item : BuiltInRegistries.ITEM) {
             if (!item.isEnabled(features)) continue;
             String itemId = BuiltInRegistries.ITEM.getKey(item).toString();
             try {
-                usedOn(item, itemId);
+                usedOn(item, itemId, scoopable);
             } catch (RuntimeException e) {
                 // One modded bucket that throws costs that bucket, not every source this section records.
                 notes.skipped("items used on something whose target could not be read", itemId + " (" + e.getClass().getSimpleName() + ")");
@@ -385,8 +388,22 @@ public final class AcquisitionIndexBuilder {
         woolByShears();
     }
 
+    /**
+     * The fluids some registered block holds as a source: what a bucket can find standing in a cell of the world, which
+     * is the only place the use-on task looks for one. A fluid no block holds cannot be scooped, however many buckets
+     * are registered holding it.
+     */
+    private static Set<Fluid> scoopableFluids() {
+        Set<Fluid> sources = new HashSet<>();
+        for (Block block : BuiltInRegistries.BLOCK) {
+            FluidState fluid = block.defaultBlockState().getFluidState();
+            if (fluid.isSource()) sources.add(fluid.getType());
+        }
+        return sources;
+    }
+
     /** One bucket item: the source its content gives it, if it holds any. */
-    private void usedOn(Item item, String itemId) {
+    private void usedOn(Item item, String itemId, Set<Fluid> scoopable) {
         if (item instanceof MobBucketItem) {
             // The entity type is a private field with no getter; the ids name it instead (every mob bucket is
             // "<fish>_bucket" for the fish "<fish>"), so a bucket that does not follow the naming is counted.
@@ -401,6 +418,12 @@ public final class AcquisitionIndexBuilder {
         } else if (item instanceof BucketItem bucket) {
             Fluid content = bucket.content;
             if (content == Fluids.EMPTY) return; // the empty bucket scoops nothing
+            if (!scoopable.contains(content)) {
+                // No block holds this fluid as a source, so there is no cell for a body to scoop it from: a source
+                // would be a promise the task cannot keep.
+                notes.skipped("buckets whose fluid no block holds as a source", itemId);
+                return;
+            }
             String fluidId = BuiltInRegistries.FLUID.getKey(content).toString();
             index.addSource(new Source.UseOn(useId(Items.BUCKET, Source.UseOn.FLUID, fluidId, null),
                 ItemKey.of(itemId), itemKey(Items.BUCKET), true, Source.UseOn.FLUID, fluidId, null, 1.0, false));
@@ -430,6 +453,9 @@ public final class AcquisitionIndexBuilder {
 
     /** Wool by shears: one source per dye colour, the sheep's own colour, which the shearing drops beside it. */
     private void woolByShears() {
+        ResourceLocation sheepId = BuiltInRegistries.ENTITY_TYPE.getKey(EntityType.SHEEP);
+        if (sheepId == null) return; // the type is not registered in this server
+        String sheep = sheepId.toString();
         var features = server.getWorldData().enabledFeatures();
         for (DyeColor colour : DyeColor.values()) {
             String name = colour.getName();
@@ -440,7 +466,6 @@ public final class AcquisitionIndexBuilder {
                 continue;
             }
             if (!wool.get().isEnabled(features)) continue;
-            String sheep = "minecraft:sheep";
             index.addSource(new Source.UseOn(useId(Items.SHEARS, Source.UseOn.ENTITY, sheep, name),
                 ItemKey.of(id.toString()), itemKey(Items.SHEARS), false, Source.UseOn.ENTITY, sheep, name,
                 SHEEP_WOOL_YIELD, false));
