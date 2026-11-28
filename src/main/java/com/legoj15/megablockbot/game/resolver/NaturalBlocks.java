@@ -101,7 +101,7 @@ final class NaturalBlocks {
      * their names, every other set of settings (the overworld's, its amplified and large-biome forms, a mod's) as
      * the overworld's. Netherrack is the ground of the nether and of nowhere else.
      */
-    static Map<String, Set<String>> terrainByDimension(MinecraftServer server, BuildNotes notes) {
+    static Map<String, Set<String>> terrainByDimension(MinecraftServer server, BuildNotes notes, int[] skipped) {
         Map<String, Set<String>> found = new java.util.TreeMap<>();
         RegistryOps<JsonElement> ops = RegistryOps.create(JsonOps.INSTANCE, server.registryAccess());
         Registry<NoiseGeneratorSettings> registry = server.registryAccess().registryOrThrow(Registries.NOISE_SETTINGS);
@@ -111,6 +111,7 @@ final class NaturalBlocks {
             JsonElement written = NoiseGeneratorSettings.DIRECT_CODEC.encodeStart(ops, entry.getValue()).result().orElse(null);
             if (written == null) {
                 notes.count("terrain settings that could not be written out to look for their blocks");
+                skipped[0]++; // the caller's read is incomplete: a dimension's ground may be missing from it
                 continue;
             }
             collect(written, found.computeIfAbsent(dimension, k -> new TreeSet<>()));

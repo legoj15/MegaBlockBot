@@ -34,7 +34,8 @@ import net.minecraft.world.level.levelgen.placement.PlacedFeature;
  * <p>Read the way {@link NaturalBlocks} reads what the generator places: every biome's placed features are flattened
  * through the game's own walk of their random selectors and patches, and each configured feature among them is
  * written out through its codec and every block id in the result collected. That over-counts the same way (a feature
- * also names the blocks it may replace), which the terrain's own blocks make harmless: they are never bound. It
+ * also names the blocks it may replace), which errs toward not charging: a block counted in a biome too many is
+ * taken to be nearer than it is, never farther. The ground of a dimension is every biome's of that dimension. It
  * misses what a structure places and what a feature's code places with nothing in its configuration — the gaps
  * {@code NaturalBlocks} fills by hand only for whether a block generates at all.
  */
@@ -56,7 +57,8 @@ final class BlockBiomes {
      * What the read found.
      *
      * @param bound  block id to the sorted ids of the biomes whose features place it, holding only the bound blocks.
-     *               A block the terrain settings or the game's own code places is never bound.
+     *               A dimension's ground is bound to that dimension's biomes; only what the game's code places
+     *               with no dimension named is bound to nothing.
      * @param placed every block the generator puts into the world by itself: what some biome's features place,
      *               what the terrain is made of, and what the game's code places. A block that only a
      *               structure's own feature holds (the hay of a village's hay pile) is not among them: the
@@ -76,13 +78,13 @@ final class BlockBiomes {
         // only there: both are added to the biomes below. (Which overworld biome's ground holds sand or terracotta
         // is in the surface rules' conditions, which are not read: they count as every overworld biome's.) What
         // the code places with no dimension named is bound to nothing.
-        Map<String, Set<String>> terrain = NaturalBlocks.terrainByDimension(server, notes);
+        int[] skipped = {0};
+        Map<String, Set<String>> terrain = NaturalBlocks.terrainByDimension(server, notes, skipped);
         Map<String, String> codeIn = NaturalBlocks.placedByCodeIn();
         Set<String> neverBound = new TreeSet<>();
         for (String byCode : NaturalBlocks.placedByCode()) {
             if (!codeIn.containsKey(byCode)) neverBound.add(byCode);
         }
-        int[] skipped = {0};
         Set<String> placedAtAll = new TreeSet<>(neverBound);
         terrain.values().forEach(placedAtAll::addAll);
         placedAtAll.addAll(NaturalBlocks.placedByCode());

@@ -628,7 +628,8 @@ final class NightReflex implements Reflex {
         if (state.requiresCorrectToolForDrops() && !tool.isCorrectToolForDrops(state)) return false;
         // Asked once a kind of block and tool: the answer is the loot table's, and rolling it every tick of a dig
         // would draw on the world's own random for a question.
-        return shelterDrops.computeIfAbsent(state + "|" + tool.getItem(), key -> {
+        // (and its enchantments: silk touch turns a grass block's dirt into a grass block, which closes no shelter)
+        return shelterDrops.computeIfAbsent(state + "|" + tool.getItem() + "|" + tool.getEnchantments(), key -> {
             for (ItemStack drop : Block.getDrops(state, ctx.level, cell, null, ctx.body, tool)) {
                 if (Hands.isShelterBlock(drop)) return true;
             }

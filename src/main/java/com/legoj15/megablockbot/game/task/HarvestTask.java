@@ -280,12 +280,15 @@ public final class HarvestTask extends BodyTask {
         // follows). A block the task was only going to is let go and looked for again. The pause already let the
         // preserve go (letGo); when the block still standing is one a player uses, it is preserved again for the
         // walk back to its drops.
-        boolean owed = at != null && phase != Phase.GOING && phase != Phase.EXPLORING;
+        // (A walk back to where the plant was last seen owes no block anything either.)
+        boolean owed = at != null && phase != Phase.GOING && phase != Phase.EXPLORING && phase != Phase.RETURNING;
         preserving = null;
         preserveFilter = null;
-        if (phase == Phase.RETURNING && seenAt != null) {
+        if (phase == Phase.RETURNING && seenAt != null && dimensionOf(body).equals(dimension)
+                && !inDangerZone(body, new BlockPos(seenAt[0], body.blockPosition().getY(), seenAt[1]))) {
             // A pause in the middle of the walk back (a fight, nightfall): the walk is taken up again, for it is
-            // made once a task and a pause must not be what spends it.
+            // made once a task and a pause must not be what spends it. Under the rules it began under: not in
+            // another dimension, not into a danger zone that has come up over the column since.
             at = null;
             pendingReplant = false;
             nav(body).goToXZ(seenAt[0], seenAt[1]);

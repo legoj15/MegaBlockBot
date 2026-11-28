@@ -125,8 +125,8 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
   every biome's of that dimension, so stone is the overworld's and netherrack the nether's; which overworld
   biome's ground holds sand or terracotta is in the surface rules' conditions, which are not read, so those count
   as every overworld biome's. When the read left a biome or a feature out, "generated" is widened by the feature
-  registry's answer, so an incomplete read costs a wasted search and never a source. A block the terrain settings or `PLACED_BY_CODE` names is never bound, and one no biome's
-  features name is not in the map at all. What it misses is what `NaturalBlocks` misses: structures, and blocks a
+  registry's answer, so an incomplete read costs a wasted search and never a source. Only what `PLACED_BY_CODE` lists with
+  no dimension is bound to nothing, and a block no biome's features, terrain or code name is not in the map at all. What it misses is what `NaturalBlocks` misses: structures, and blocks a
   feature's code places with nothing in its configuration to read. A configured feature that fails to write out or
   throws costs that feature (counted in the notes), never the section; a failed read is an empty map and a note, and
   every block then prices as one no biome is bound to. The cost model's use of it is
