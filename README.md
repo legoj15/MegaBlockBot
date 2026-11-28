@@ -11,13 +11,21 @@ This is an early version, for Minecraft 1.21.1 with NeoForge.
 - Make things from nothing. Told to make a stone pickaxe, it finds trees, makes planks, sticks, a crafting table and a
   wooden pickaxe, digs for stone, and makes the pickaxe. From a fresh start that takes about a minute.
 - Go somewhere, or come to you.
-- Look after itself: it fights or runs from monsters, eats when hungry, gets out of water before it drowns, and can
-  build a small shelter for the night.
+- Cook and smelt, fish, fill buckets, milk cows and shear sheep when a recipe calls for it.
+- Trade with villagers: it can sell what it gathered for emeralds and buy with them, and it knows the trick of
+  giving a villager a job and trying again until the villager offers what it wants (an enchanted book, say).
+- Make something and hand it to you: `Bot1, craft a quarry and give it to me`.
+- Build from a plan you saved.
+- Use machines from the BuildCraft mod (its assembly table) when the server has that mod.
+- Look after itself: it fights or runs from monsters, eats when hungry, gets out of water before it drowns, and
+  shelters for the night, digging itself in if it has nothing to build with.
 - Carry on after trouble. If it dies it goes back for what it dropped. If the server restarts it picks up where it was.
 - Leave your things alone. It does not break blocks that players placed, and it only opens a chest you have told it to
   use.
 
-Not yet: cooking and smelting, trading with villagers, fishing, building from plans, and machines added by other mods.
+Not yet: farming (it picks what grows wild, but does not plant and wait), the Nether and the End, and finding
+villages' and other buildings' chests. It also needs daylight and room: a long trip underground with empty hands
+still goes badly.
 
 ## Trying it
 
