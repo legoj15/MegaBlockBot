@@ -690,7 +690,12 @@ that undercuts the trade still winning as it always did. The leaf's source id ri
   window asks now (`MerchantOffer.getCostA`: the base price with the villager's demand and any discount), which is
   what is noted and what the body is checked against. A villager whose charge the body cannot pay is passed by while
   another is still to be looked at; when none is left the leaf ends `MissingInput` with the cheapest charge seen
-  (the first missing item and its count), and no roll is begun for an item somebody already offers. An offer that
+  (the first missing item and its count), and no roll is begun for an item somebody already offers. "Offers" means
+  the trade the plan brought its payment for: an offer of the item that charges something else (emeralds for coal,
+  where the plan brought sticks) is another trade, taken only when the body can pay it as it stands and otherwise
+  passed by, so the roll for the planned trade still begins. The planner and the cost model match a noted offer to
+  a trade the same way (`GatherCosts.isThisTrade`). An offer that ran out is waited for: the window is closed and
+  the body waits up to `RESTOCK_WAIT_TICKS` for the villager to restock at its job site. An offer that
   is out of stock ends it `NoProgress` saying so; no room for the result is the no-room failure.
 - **A noted villager**: a leaf whose price the plan took from a noted offer carries `villager` and `at` (see
   docs/plan-inputs.md). The task walks back to that place first (`goToXZ`, over once within 24 blocks) and looks at

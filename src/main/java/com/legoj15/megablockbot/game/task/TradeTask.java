@@ -99,7 +99,9 @@ import net.minecraft.world.phys.BlockHitResult;
  * stood ({@code villager}, {@code at}): the task goes there first and looks at that one first, so the price the plan
  * gathered is the price it is asked. A villager whose charge the body cannot pay does not end the task while another
  * is still to be looked at; when none is left the cheapest charge seen is the answer ({@code MissingInput}), and no
- * roll is begun for an item somebody already offers.
+ * roll is begun for an item somebody already offers. An offer of the item for something the plan did not bring
+ * (emeralds for coal, where the plan brought sticks) is another trade: taken when the body can pay it as it stands,
+ * passed by otherwise, and the roll for the planned trade still begins.
  */
 public final class TradeTask extends BodyTask {
     public static final String KIND = "trade";
