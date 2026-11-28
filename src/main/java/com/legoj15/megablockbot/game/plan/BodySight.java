@@ -156,6 +156,11 @@ final class BodySight {
             Scan scan = scan(level, at, RADIUS_CHUNKS, BELOW, ABOVE, wanted);
             taken = new Taken(dimension, at.immutable(), now, wanted, scan.nearest());
             memory.keepSight(taken);
+            // What this sight holds is remembered past it, a column a kind: the next sight forgets what it no longer
+            // sees, and a task that needs the block later goes back to where it was.
+            for (Map.Entry<String, Spot> seen : scan.nearest().entrySet()) {
+                memory.noteSeen(dimension, seen.getKey(), seen.getValue().x(), seen.getValue().z());
+            }
         }
         for (Map.Entry<String, Spot> found : taken.nearest().entrySet()) {
             builder.nearby(found.getKey(), found.getValue().distanceFrom(at));

@@ -130,6 +130,8 @@ public final class BotMemory {
     private final Map<UUID, VillagerOffers> villagerOffers = new LinkedHashMap<>();
     // The last scan of the blocks around the body (BodySight). A cache of the world, so it is never saved.
     private BodySight.Taken sight;
+    /** Where each kind of wanted block was last seen, by dimension and block id: see {@link #lastSeen}. */
+    private final Map<String, Map<String, int[]>> seenBlocks = new HashMap<>();
     private int sightScans;
     /** Where the body was driven off or killed, in the order noted. */
     private final List<DangerZone> dangerZones = new ArrayList<>();
@@ -440,6 +442,30 @@ public final class BotMemory {
     // ---- the sight ---------------------------------------------------------------------------------------------
 
     /** The scan {@link BodySight} kept for this body, or null when it has taken none. */
+    /**
+     * Where the body last saw a block of that kind in the dimension, as a column ({@code {x, z}}), or null when it
+     * never has (or was told to forget it). A sight holds only what is around the body now; this is what is left of
+     * the sights before it, so a task can go back to the sugar cane the body walked away from an hour ago instead
+     * of searching where it happens to stand. One column a kind, the nearest of the latest sight that held it.
+     * Not saved: after a restart the body looks again.
+     */
+    @Nullable
+    public int[] lastSeen(String dimension, String block) {
+        Map<String, int[]> inDimension = seenBlocks.get(dimension);
+        int[] column = inDimension == null ? null : inDimension.get(block);
+        return column == null ? null : column.clone();
+    }
+
+    void noteSeen(String dimension, String block, int x, int z) {
+        seenBlocks.computeIfAbsent(dimension, k -> new HashMap<>()).put(block, new int[] {x, z});
+    }
+
+    /** The place turned out to hold nothing of use any more: it is not gone back to again. */
+    public void forgetSeen(String dimension, String block) {
+        Map<String, int[]> inDimension = seenBlocks.get(dimension);
+        if (inDimension != null) inDimension.remove(block);
+    }
+
     BodySight.Taken sight() {
         return sight;
     }

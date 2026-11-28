@@ -9,6 +9,7 @@ import com.legoj15.megablockbot.core.task.Failure;
 import com.legoj15.megablockbot.core.task.TickResult;
 import com.legoj15.megablockbot.game.body.BotPlayer;
 import com.legoj15.megablockbot.game.nav.BotNavigator;
+import com.legoj15.megablockbot.game.plan.BotMemory;
 import com.legoj15.megablockbot.game.nav.BreakFilter;
 import com.legoj15.megablockbot.game.nav.BodyInteractionManager;
 import java.util.Comparator;
@@ -95,6 +96,11 @@ public final class HarvestTask extends BodyTask {
      * overlap and nothing between them goes unseen. The step's ticks are the bound for a body that gets nowhere.
      */
     private static final double STEP_BLOCKS = 24.0;
+    /**
+     * Ticks the walk back to where the plant was last seen may take: two minutes, which is five hundred blocks at a
+     * walk and more than a body strays from a place while it gathers the rest of a plan.
+     */
+    private static final int RETURN_WALK_TICKS = 2400;
     /** The navigator's goal for a walk to the harvest: within this many blocks of it, well inside the use-block reach. */
     private static final int REACH_RADIUS = 2;
     /** How far from the harvested block the drops of the leaf's item are walked to. */
@@ -125,7 +131,7 @@ public final class HarvestTask extends BodyTask {
         public static final Search DEFAULT = new Search(600, 12);
     }
 
-    private enum Phase { GOING, BREAKING, USING, REPLANT, LOOTING, EXPLORING }
+    private enum Phase { GOING, BREAKING, USING, REPLANT, LOOTING, EXPLORING, RETURNING }
 
     private final Search search;
     private final String sourceId;
@@ -147,6 +153,11 @@ public final class HarvestTask extends BodyTask {
     private boolean alreadyDone;
     private Phase phase = Phase.GOING;
     private BlockPos origin;
+    /** Whether this task has already gone back to where the plant was last seen: once is all it does. */
+    private boolean wentBack;
+    /** The column the walk back is to, while it goes on. */
+    @Nullable
+    private int[] seenAt;
     /** Where the body stood when the exploring step it is on began; null before the first. */
     @Nullable
     private Vec3 stepFrom;
@@ -313,6 +324,7 @@ public final class HarvestTask extends BodyTask {
             case REPLANT -> replant(body);
             case LOOTING -> loot(body);
             case EXPLORING -> explore(body);
+            case RETURNING -> goBack(body);
         };
     }
 
@@ -513,12 +525,45 @@ public final class HarvestTask extends BodyTask {
 
     /** No grown block is known: look further, or say there is none to be found. */
     private TickResult nextStep(BotPlayer body) {
+        // Before anywhere new: where the body last saw the plant, when that is not where it stands. A plan gathers
+        // in its own order, and a body that hunted its cows first had walked three hundred blocks from the river
+        // bank where the sugar cane stood, and searched the forest it ended up in.
+        if (!wentBack) {
+            wentBack = true;
+            int[] seen = BotMemory.of(body.getUUID()).lastSeen(dimension, blockLabel);
+            if (seen != null && Math.hypot(seen[0] + 0.5 - body.getX(), seen[1] + 0.5 - body.getZ()) > SCAN_RADIUS) {
+                seenAt = seen;
+                phase = Phase.RETURNING;
+                phaseTicks = 0;
+                nav(body).goToXZ(seen[0], seen[1]);
+                MegaBlockBot.LOGGER.info("{}: no ripe {} here; going back to where one was last seen, {} {}",
+                    body.getGameProfile().getName(), blockLabel, seen[0], seen[1]);
+                return TickResult.RUNNING;
+            }
+        }
         if (++attempts > search.maxAttempts()) return giveUp(body);
         phase = Phase.EXPLORING;
         phaseTicks = 0;
         stepFrom = body.position();
         nav(body).explore(origin);
         return TickResult.RUNNING;
+    }
+
+    /**
+     * The walk back to where the plant was last seen. Arrived (within the scan's reach of the column), or the walk
+     * failed or ran out of its time: the body looks from where it stands, and the search goes on around there.
+     */
+    private TickResult goBack(BotPlayer body) {
+        phaseTicks++;
+        BotNavigator nav = nav(body);
+        boolean there = seenAt != null
+            && Math.hypot(seenAt[0] + 0.5 - body.getX(), seenAt[1] + 0.5 - body.getZ()) <= SCAN_RADIUS / 2.0;
+        if (!there && phaseTicks < RETURN_WALK_TICKS && nav.state() == BotNavigator.State.WORKING) return TickResult.RUNNING;
+        if (nav.state() == BotNavigator.State.WORKING && !nav.runsCommandOfAnother(this)) nav.stop();
+        // Whatever stands there now, the memory has done its work: a second trip to the same column finds the same.
+        BotMemory.of(body.getUUID()).forgetSeen(dimension, blockLabel);
+        origin = body.blockPosition();
+        return findNext(body);
     }
 
     private TickResult explore(BotPlayer body) {
@@ -820,6 +865,7 @@ public final class HarvestTask extends BodyTask {
             case REPLANT -> "replanting what it took at " + at;
             case LOOTING -> "picking up the " + itemKey.id().replace("minecraft:", "") + " that dropped";
             case EXPLORING -> "exploring for a ripe " + blockLabel.replace("minecraft:", "");
+            case RETURNING -> "going back to where a " + blockLabel.replace("minecraft:", "") + " was last seen";
         };
         return what + "; holds " + lastHeld + " of " + target + " " + itemKey.id().replace("minecraft:", "");
     }
