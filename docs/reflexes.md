@@ -36,7 +36,8 @@ What the layer does with the body:
   navigators). While the hold says `held` the layer drives the body (input, navigator, game mode). While it returns `NONE`
   it touches nothing.
 - **Taking the body** stops a running navigator command, clears the input, the item in use and any block break in progress,
-  and sets the navigator's break filter to "break nothing" (a reflex never digs: breaking terrain is the executor's business).
+  and sets the navigator's break filter to "break nothing" (a reflex never breaks terrain through the navigator: what it
+  breaks, at night and in a wall, goes through its own clicks and asks `BlockSafety`, and a path search must not cost a break).
 - **Letting go**, for whatever reason, leaves no input, item in use or navigator command behind and sets the filter to
   `game.task.BreakRules.filterFor(body)`, the rule every task arms the navigator with, for the body as it is *then*. The layer
   remembers no filter of anyone else's, so there is nothing to restore wrongly: a hold that is finished, one that is dropped
@@ -60,7 +61,9 @@ What the layer does with the body:
 - `status()` is one line: what it is doing and why (or `calm`), health, food, a note when something is worth saying
   without a hold (`low health, nothing to eat`, `night, and nothing to build a shelter with`), the night policy.
   `holderName()` is the name of the reflex that holds the body (`hazard`, `mobs`, `vitals`, `night`), or empty: what a test
-  keys on, never the text of a cause. `lastNightResult()` is how the latest night hold ended, as a type.
+  keys on, never the text of a cause. `lastNightResult()` is how the latest night ended, as a type: `SHELTERED`,
+  `NO_SHELTER`, `SLEPT`, `DID_NOT_SLEEP`, or `NOTHING_TO_BUILD_WITH` (short of shelter blocks and nothing more to dig:
+  no hold, the note only).
 
 ## Priority order (`ReflexRegistry`, the one list)
 
@@ -157,6 +160,22 @@ What the layer does with the body:
      **A block is placed the way a player places one against a block that can be used: with the sneak key down** (a click on a
      crafting table or a furnace opens it otherwise; with the key not yet down the body presses it and clicks the next tick), and
      a placement counts only when the cell holds the block afterwards. A menu a click opened is closed.
+   - **Short of blocks, it digs in** (issue 21: a live run with an empty pack at dusk spent the night in the open). When
+     the body carries fewer shelter blocks than the shelter it would build needs and no spot near needs fewer, it digs
+     straight down under its own feet. A pit's walls are the ground, so every cell dug takes four walls off what the
+     shelter needs and, in earth, puts a block in the pack: two cells down in dirt, the two blocks that came out are the
+     cap and the block the cap is placed against; three cells down the cap sits level with the ground and needs nothing
+     beside it (`NIGHT_DIG_DEPTH`, 3, is as deep as it goes). The depth is worked out before the first break and again
+     every tick from where the body stands (`pitDepth`): every cell on the way a full block with nothing kept in it, no
+     water or lava at any face of it, allowed by `BlockSafety`, and broken by the best tool at hand within
+     `NIGHT_DIG_MAX_BREAK_TICKS` (40: dirt by hand, stone only with a pickaxe); the pit's floor a full block; and what the
+     cells drop (the game's own loot answer) with what is carried enough for what the pit then needs. Only when such a
+     depth exists is the body taken at all. A drop falls into the cell the body falls into, so nothing is walked to. The
+     digging is bounded (`NIGHT_DIG_TICKS`, 300, counting its own ticks and not a fight's) and ends the moment the pit
+     can be closed, and the shelter then goes up as any dusk's does. A fight interrupts it -- the mob reflex outranks
+     the night one -- and the digging goes on afterwards from where the body then stands. Nothing to be had (bare stone
+     and no pickaxe, sand, protected ground, a cave under it): the note it always gave, once that night, and no hold. The
+     pit stays in the morning: the ground is not filled back in, and the navigator gets the body out of it.
    - **Taking it down** at morning breaks what the body placed (cap first), then walks over its dropped blocks and picks them up.
      **The blocks it placed are recorded in the layer** (`ShelterBlocks`), not in the hold, and leave the record only when the
      world no longer holds them. A takedown that cannot finish (the 600 ticks ran out, a fight carried the body off, the break
@@ -175,7 +194,7 @@ What the layer does with the body:
    - A shelter whose wall is broken is repaired. A shelter that never closed does not use up the night: it is tried again after
      200 ticks, from wherever the body stands.
    - **BED**: walks to a bed it placed or set its respawn at within 12 blocks and uses it; with none, or when it cannot sleep
-     within 300 ticks, it builds a shelter. Nothing to build with: no hold, a note in `status()`. **The sleep branch looks at
+     within 300 ticks, it builds a shelter. Nothing to build with and nothing to dig: no hold, a note in `status()`. **The sleep branch looks at
      the morning and at the policy before it answers "sleeping"**: a body whose night is over (day time 23000, a little before the
      game wakes it) or whose policy was changed under it gets up at once (the hold ends and its release wakes the body), and
      the night counts as spent because it slept.
@@ -220,8 +239,9 @@ mob without the attribute (32, `DEFAULT_FOLLOW_RANGE`), the margin a retreat or 
 - Design 3.4's resume gate lists "health above the retreat threshold". The mob hold ends on quiet; the vitals reflex then
   holds the body to heal when it has food. With no food the gate opens at low health instead of staying shut, as 3.2
   item 3 says ("otherwise only report"); a goal that cannot survive that is the executor's to give up on.
-- The shelter is built, not dug: a dug one needs the cap placed too, and digging needs the break rules answered for blocks
-  that are not the body's own.
+- A shelter is built where the body has the blocks for one and dug where it has not (issue 21): the pit is dug through
+  the body's own clicks with the break rules answered for every block, and its cap is placed and taken down by the same
+  code that builds and takes down a shelter above ground.
 - The executor declares a goal satisfied as soon as its postcondition holds, which after a hold can be before the craft
   that made the item has taken its table up (the runtime's leftover-table step does it on the next tick). A test of a goal
   through the runtime waits for the table instead of expecting it gone at the tick of the result.
@@ -248,7 +268,10 @@ gone at morning, the dirt back), a body whose own spot will not do walking to on
 tables (no menu opened, the dirt that left is the dirt that stands), a takedown that a fight broke off finished afterwards (the
 body is carried off by the test, walks back, takes down, picks up), the BED policy (it sleeps in a bed it owns; the night a bed
 skips does not switch off the next one; a policy changed on the way to bed builds a shelter and does not claim it slept), no
-hold at dusk with nothing to build with, a body that dies in a hold able to break blocks after its respawn, a handover from
+hold at dusk with nothing to build with and nothing to dig (a stone floor: nothing broken, the night's result says nothing
+was to be had), a body with an empty pack on dirt digging itself in and standing walled in and capped within the digging's
+bound and the build's with blocks that came out of that ground, the same body on dirt the break rules protect (recorded as
+placed by a player) breaking nothing, a body that dies in a hold able to break blocks after its respawn, a handover from
 the hazard reflex stopping the navigator, a shooter that cannot be reached being hidden from, and a despawned body's layer
 dropped by the sweep. Round four's additions (issue 29): a hold that ends in the very tick its body's death is reported, and shelter
 blocks that survive a save and a load into a fresh layer for the same body (the one that still stands is taken down, the
@@ -329,3 +352,8 @@ run, and the body died in both: each night ends at a death with the pack dropped
 nothing in its pack is held for most of the rest of the night by what it cannot fight. What killed it was a skeleton's arrows and a
 spider's bites during a retreat at low health, the layer's known weak point (round one's only death was a skeleton too); it is
 not something this round's items touch, and the report lists it as an issue to take up.
+
+Before issue 21's change, one such night was watched on a live server (1.21.1, normal difficulty, open taiga, a
+wood-gathering goal running, an empty pack at dusk): the SHELTER policy had nothing to build with, took no hold, and the
+body spent the night in the open -- fourteen mob holds, three kills with bare hands, and two deaths to skeletons before
+morning. A player with empty hands at dusk digs down and puts a block over the hole; that is what the digging at dusk is.

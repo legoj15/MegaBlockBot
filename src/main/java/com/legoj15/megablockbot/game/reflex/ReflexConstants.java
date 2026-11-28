@@ -5,6 +5,7 @@ import java.util.List;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.Blocks;
 
 /**
  * Every threshold of the reflex layer (design 3.2), in one place so a later config pass can find them. Nothing here is
@@ -295,4 +296,24 @@ public final class ReflexConstants {
     public static final List<Item> SHELTER_BLOCKS = List.of(
         Items.DIRT, Items.COARSE_DIRT, Items.COBBLESTONE, Items.COBBLED_DEEPSLATE, Items.NETHERRACK,
         Items.ANDESITE, Items.DIORITE, Items.GRANITE, Items.TUFF, Items.BLACKSTONE, Items.BASALT);
+
+    /**
+     * How deep a body with nothing to build a shelter from digs itself in (issue 21). Two cells down in earth the
+     * pit needs a cap and one block to place the cap against, and the two cells gave those; three cells down the cap
+     * sits level with the ground and needs nothing beside it, which is what one block of earth over stone comes to.
+     * Deeper than that is a mine, not a shelter.
+     */
+    public static final int NIGHT_DIG_DEPTH = 3;
+    /**
+     * A block that would take longer than this to break, with the best tool at hand, is not dug at night. A bare
+     * hand on dirt takes fifteen ticks and on a grass block eighteen, a wooden pickaxe on stone twenty-three; a bare
+     * hand on stone, a hundred and fifty: that is the line between ground to dig into and ground to leave alone.
+     */
+    public static final int NIGHT_DIG_MAX_BREAK_TICKS = 40;
+    /**
+     * What the whole digging in is given (issue 21): three cells of at most forty ticks each, with a fall and the
+     * wait for the drop after each (about thirty), come to some two hundred ticks, and a digging that has not got
+     * there in half as much again is not going to. It ends the moment the pit can be closed.
+     */
+    public static final int NIGHT_DIG_TICKS = 300;
 }

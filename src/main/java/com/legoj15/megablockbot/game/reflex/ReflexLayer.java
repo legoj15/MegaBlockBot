@@ -69,7 +69,7 @@ public final class ReflexLayer {
 
     /** How a night hold ended, for the log and for a test; the text of the outcome says why. */
     public enum NightResult {
-        /** No night hold has ended yet. */
+        /** No night has come to anything yet. */
         NONE,
         /** The body slept in a bed. */
         SLEPT,
@@ -78,7 +78,9 @@ public final class ReflexLayer {
         /** A shelter was closed and the night was spent in it. */
         SHELTERED,
         /** A shelter was begun and never closed. */
-        NO_SHELTER
+        NO_SHELTER,
+        /** The body was short of shelter blocks and could dig no more of them (bare stone, protected ground): no shelter, a note only. */
+        NOTHING_TO_BUILD_WITH
     }
 
     private BotPlayer body;
@@ -238,7 +240,7 @@ public final class ReflexLayer {
         return holder == null ? "" : holder.name();
     }
 
-    /** How the latest night hold ended; {@link NightResult#NONE} until one has. */
+    /** How the latest night ended; {@link NightResult#NONE} until one has. */
     public NightResult lastNightResult() {
         return nightResult;
     }

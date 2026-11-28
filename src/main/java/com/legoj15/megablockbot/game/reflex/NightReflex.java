@@ -20,12 +20,15 @@ import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.block.BedBlock;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BedPart;
 import net.minecraft.world.level.dimension.DimensionType;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 
@@ -45,8 +48,10 @@ import net.minecraft.world.phys.Vec3;
  * protected spot would trap the body in it.
  *
  * <p>Only a body under the open sky is exposed: monsters spawn in the dark at any hour underground, so a night shelter
- * there changes nothing. A body that holds nothing to build with does not take the body at all; it keeps working and the
- * mob reflex fights what comes.
+ * there changes nothing. A body that carries fewer shelter blocks than its shelter needs gets them from the ground it
+ * stands on (issue 21: a player with empty hands at dusk digs a few blocks of dirt and walls up). Where the ground has
+ * nothing to give -- bare stone, a roof of leaves, ground the break rules protect -- the body is not taken at all; it
+ * keeps working and the mob reflex fights what comes.
  *
  * <p><b>Nights.</b> The night a hold is for is recorded when the hold starts ({@link #holdNight}), and that is the night
  * marked done when it ends: a hold ends after midnight of the clock too (a bed skips to morning, a takedown runs on), when
@@ -60,7 +65,7 @@ import net.minecraft.world.phys.Vec3;
  * so a block that cannot be taken down does not take the body every few seconds for the rest of the day.
  */
 final class NightReflex implements Reflex {
-    private enum Phase { IDLE, GO_TO_SPOT, GO_TO_BED, SLEEP, BUILD, WAIT, TAKEDOWN, RETURN, COLLECT }
+    private enum Phase { IDLE, GATHER, GO_TO_SPOT, GO_TO_BED, SLEEP, BUILD, WAIT, TAKEDOWN, RETURN, COLLECT }
 
     private static final int DAY = 24000;
 
@@ -101,6 +106,15 @@ final class NightReflex implements Reflex {
     private BlockPos spot;
     private final List<BlockPos> badSpots = new ArrayList<>();
     private String waiting = "";
+
+    // Digging in for the night with nothing to build with (issue 21): where the pit was begun (the depth it may
+    // reach is counted from there), what the body carried then, and the ticks the digging has had.
+    @Nullable
+    private BlockPos digStart;
+    private int digStartedWith;
+    private int digTicks;
+    /** The night a digging found nothing more to be had: it is not tried again that night. */
+    private long noDigNight = Long.MIN_VALUE;
 
     // The bed.
     @Nullable
@@ -179,12 +193,19 @@ final class NightReflex implements Reflex {
                 return true;
             }
         }
-        if (Hands.countShelterBlocks(ctx.body) == 0) {
-            ctx.layer.note("night, and nothing to build a shelter with");
+        // The ground was tried this night and had nothing more to give (bare stone, protected ground): the note, as
+        // before, and the night goes on as it did.
+        if (noDigNight == night) {
+            ctx.layer.note(Hands.countShelterBlocks(ctx.body) == 0
+                ? "night, and nothing to build a shelter with"
+                : "night, and nothing more to dig a shelter from here");
             return false;
         }
+        int have = Hands.countShelterBlocks(ctx.body);
         boolean grounded = ctx.body.onGround() && !ctx.body.isInWater();
-        String problem = grounded ? shelterProblem(ctx, ctx.body.blockPosition()) : "the body is not standing on the ground";
+        BlockPos here = ctx.body.blockPosition();
+        int needed = grounded ? shelterBlocksNeeded(level, here) : Integer.MAX_VALUE;
+        String problem = grounded ? shelterProblem(ctx, here) : "the body is not standing on the ground";
         if (problem == null) {
             startNight(ctx);
             beginShelter(ctx);
@@ -198,6 +219,25 @@ final class NightReflex implements Reflex {
             enter(Phase.GO_TO_SPOT, ctx);
             cause = "walking to a better spot for a shelter at " + better.toShortString() + " (" + problem + " here)";
             return true;
+        }
+        // Short of blocks, and no spot near needs fewer of them: dig in where it stands (issue 21).
+        if (grounded && have < needed) {
+            int depth = pitDepth(ctx, here, ReflexConstants.NIGHT_DIG_DEPTH);
+            if (depth == 0) {
+                // Nothing to build with and nothing to be had from the ground here (bare stone, a roof of leaves,
+                // ground the break rules protect): the note it always gave, once that night, and no hold.
+                noDigNight = night;
+                ctx.layer.setNightResult(NightResult.NOTHING_TO_BUILD_WITH);
+                ctx.layer.note("night, and nothing to build a shelter with");
+                return false;
+            }
+            startNight(ctx);
+            beginGather(ctx, depth);
+            return true;
+        }
+        if (have == 0) {
+            ctx.layer.note("night, and nothing to build a shelter with");
+            return false;
         }
         waiting = "night, but " + problem + ", and no better spot near";
         ctx.layer.note(waiting);
@@ -231,6 +271,7 @@ final class NightReflex implements Reflex {
         NightPolicy policy = ctx.layer.nightPolicy();
         ctx.body.input().sneak = false;
         switch (phase) {
+            case GATHER -> gather(ctx);
             case BUILD -> build(ctx, night, policy);
             case WAIT -> waitInside(ctx, night, policy);
             case GO_TO_SPOT -> goToSpot(ctx, night, policy);
@@ -258,7 +299,6 @@ final class NightReflex implements Reflex {
         BotPlayer body = ctx.body;
         ServerLevel level = ctx.level;
         if (!Cells.standable(level, at)) return "there is no clear solid floor to build on";
-        int needed = 0;
         for (BlockPos cell : shelterCells(at)) {
             if (filled(level, cell)) continue;
             BlockState state = level.getBlockState(cell);
@@ -273,7 +313,6 @@ final class NightReflex implements Reflex {
             // position does not depend on what is in it (the protected radius and the claims).
             Verdict verdict = BlockSafety.of(level.getServer()).mayBreak(body, level, cell, Blocks.DIRT.defaultBlockState());
             if (!verdict.allowed()) return "the spot is protected (" + verdict.rule() + ")";
-            needed++;
         }
         BlockPos cap = at.above(2);
         if (!filled(level, cap) && !capHasAnchor(level, cap, at)) {
@@ -281,11 +320,32 @@ final class NightReflex implements Reflex {
             if (scaffold == null) return "the cap has nothing to be placed against";
             Verdict verdict = BlockSafety.of(level.getServer()).mayBreak(body, level, scaffold, Blocks.DIRT.defaultBlockState());
             if (!verdict.allowed()) return "the spot is protected (" + verdict.rule() + ")";
-            needed++;
         }
         int have = Hands.countShelterBlocks(body);
+        int needed = shelterBlocksNeeded(level, at);
         if (needed > have) return "only " + have + " blocks to build with, " + needed + " needed here";
         return null;
+    }
+
+    /**
+     * How many blocks a shelter with its inside at {@code at} still needs: the cells of it that are not solid yet, and
+     * the one scaffold block the cap needs when no neighbour of it can be placed against. This is the count the body is
+     * short of, and what a gathering of blocks from the ground is for.
+     */
+    private static int shelterBlocksNeeded(ServerLevel level, BlockPos at) {
+        return shelterBlocksNeeded(level, at, Set.of());
+    }
+
+    /** The same count with the cells of {@code opened} taken as dug out: what a pit not yet dug would need. */
+    private static int shelterBlocksNeeded(ServerLevel level, BlockPos at, Set<BlockPos> opened) {
+        int needed = 0;
+        for (BlockPos cell : shelterCells(at)) {
+            if (opened.contains(cell) || !filled(level, cell)) needed++;
+        }
+        BlockPos cap = at.above(2);
+        boolean capOpen = opened.contains(cap) || !filled(level, cap);
+        if (capOpen && !capHasAnchor(level, cap, at) && scaffoldCell(level, cap) != null) needed++;
+        return needed;
     }
 
     /**
@@ -392,6 +452,175 @@ final class NightReflex implements Reflex {
             if (level.getBlockState(candidate).canBeReplaced() && level.getFluidState(candidate).isEmpty()) return candidate;
         }
         return null;
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Shelter: digging in when there is nothing to build one with (issue 21)
+    // ---------------------------------------------------------------------------------------------------------
+
+    /** The digging begins: where, what the body carries, how deep the pit is planned, and the line that says so. */
+    private void beginGather(ReflexContext ctx, int depth) {
+        digStart = ctx.body.blockPosition().immutable();
+        digStartedWith = Hands.countShelterBlocks(ctx.body);
+        digTicks = 0;
+        enter(Phase.GATHER, ctx);
+        cause = "digging in for the night, " + depth + " deep";
+        MegaBlockBot.LOGGER.info("reflex {}: night digging in at {}: {} shelter blocks carried, a pit {} deep planned",
+            ctx.body.getGameProfile().getName(), digStart, digStartedWith, depth);
+    }
+
+    /**
+     * Digs straight down under its own feet until the pit it stands in can be closed with what it carries, and then
+     * builds the shelter as any dusk does. A pit's walls are the ground, so every cell dug takes four walls off what the
+     * shelter needs and (where the ground is earth) puts a block in the pack: two cells down in dirt, the two blocks
+     * that came out are the cap and the block the cap is placed against. What a break drops falls into the cell the body
+     * falls into, so nothing is walked to. Each tick asks again from where the body stands, so a fight that carried it
+     * off (the mob reflex outranks this one) leaves nothing stale: the digging goes on from there with what it then
+     * carries. Nothing more to be had, or out of time: the note, once that night, and no hold.
+     */
+    private void gather(ReflexContext ctx) {
+        BotPlayer body = ctx.body;
+        Steer.stand(body);
+        if (!isNight(ctx.level) || ctx.layer.nightPolicy() == NightPolicy.IGNORE) {
+            endDigging(ctx, !isNight(ctx.level) ? "the night was over" : "the policy changed");
+            return;
+        }
+        if (++digTicks > ReflexConstants.NIGHT_DIG_TICKS) {
+            nothingMoreToDig(ctx, "out of time");
+            return;
+        }
+        // Falling into the cell it just opened: nothing is asked until it stands again.
+        if (!body.onGround()) return;
+        BlockPos here = body.blockPosition();
+        if (digStart == null || here.getX() != digStart.getX() || here.getZ() != digStart.getZ()) digStart = here.immutable();
+        if (shelterProblem(ctx, here) == null) {
+            MegaBlockBot.LOGGER.info("reflex {}: night digging ended after {} ticks, {} deep, with {} shelter blocks",
+                body.getGameProfile().getName(), digTicks, digStart.getY() - here.getY(), Hands.countShelterBlocks(body));
+            digStart = null;
+            beginShelter(ctx);
+            return;
+        }
+        // What the last break dropped lies in the cell the body fell into, and is taken up when its pickup delay is over.
+        if (!body.getInteractionManager().isMining() && dropLiesHere(ctx, here)) {
+            cause = "digging in: picking up what it broke";
+            return;
+        }
+        int deeper = ReflexConstants.NIGHT_DIG_DEPTH - (digStart.getY() - here.getY());
+        if (pitDepth(ctx, here, deeper) == 0) {
+            nothingMoreToDig(ctx, deeper <= 0 ? "as deep as it digs" : "nothing more to be had here");
+            return;
+        }
+        BlockPos cell = here.below();
+        BlockWork.Outcome result = ctx.layer.work().breakBlock(ctx, cell);
+        if (result == BlockWork.Outcome.REFUSED || result == BlockWork.Outcome.UNREACHABLE) {
+            nothingMoreToDig(ctx, "the ground under it could not be broken (" + result.name().toLowerCase(Locale.ROOT) + ")");
+            return;
+        }
+        cause = "digging in at " + cell.toShortString();
+    }
+
+    /** The digging is over before it got anywhere (the night was over, the policy changed): nothing is dug any more tonight. */
+    private void endDigging(ReflexContext ctx, String why) {
+        ctx.layer.work().abort(ctx.body);
+        outcome = "digging in ended: " + why;
+        ctx.layer.setNightResult(NightResult.NO_SHELTER);
+        phase = Phase.IDLE;
+        retryAt = ctx.time;
+        digStart = null;
+        cause = "done";
+    }
+
+    /** Nothing more can be dug here, or the time is up: the note, once that night, and no hold. */
+    private void nothingMoreToDig(ReflexContext ctx, String why) {
+        ctx.layer.work().abort(ctx.body);
+        int have = Hands.countShelterBlocks(ctx.body);
+        int deep = digStart == null ? 0 : digStart.getY() - ctx.body.blockPosition().getY();
+        MegaBlockBot.LOGGER.info("reflex {}: night digging ended after {} ticks, {} deep, with {} shelter blocks ({})",
+            ctx.body.getGameProfile().getName(), digTicks, deep, have, why);
+        noDigNight = nightIndex(ctx.level);
+        waiting = ""; // the note of a night with nothing to dig is the noDigNight branch's, not an old spot problem's
+        outcome = "dug " + deep + " deep and got " + (have - digStartedWith) + " shelter blocks, not enough to close in: " + why;
+        ctx.layer.setNightResult(NightResult.NOTHING_TO_BUILD_WITH);
+        phase = Phase.IDLE;
+        digStart = null;
+        cause = "done";
+    }
+
+    /**
+     * How many cells straight down the body has to dig before the pit it then stands in can be closed with what it
+     * carries and what those cells drop; 0 when no depth up to {@code most} will do. Every cell on the way has to be
+     * ground it may dig ({@link #diggable}), and the pit's floor a full block, so that the last break does not open a
+     * cave under it. The count a pit needs is the shelter's own ({@link #shelterBlocksNeeded}), asked with the cells of
+     * the column taken as dug.
+     */
+    private int pitDepth(ReflexContext ctx, BlockPos here, int most) {
+        ServerLevel level = ctx.level;
+        int have = Hands.countShelterBlocks(ctx.body);
+        Set<BlockPos> opened = new HashSet<>();
+        for (int depth = 1; depth <= most; depth++) {
+            BlockPos cell = here.below(depth);
+            if (!diggable(ctx, cell)) return 0;
+            if (dropsShelterBlock(ctx, cell, level.getBlockState(cell))) have++;
+            opened.add(cell);
+            if (filled(level, cell.below()) && have >= shelterBlocksNeeded(level, cell, opened)) return depth;
+        }
+        return 0;
+    }
+
+    /**
+     * Whether the cell may be dug for a pit: a full block of ground with nothing kept in it, no water or lava at any
+     * face of it, the break rules allow it, and the best tool at hand breaks it in the time a night gives one block.
+     */
+    private boolean diggable(ReflexContext ctx, BlockPos cell) {
+        ServerLevel level = ctx.level;
+        if (!level.isLoaded(cell)) return false;
+        BlockState state = level.getBlockState(cell);
+        if (!filled(level, cell) || state.hasBlockEntity()) return false;
+        for (Direction d : Direction.values()) {
+            if (!level.getFluidState(cell.relative(d)).isEmpty()) return false;
+        }
+        if (!BlockSafety.of(level.getServer()).mayBreak(ctx.body, level, cell, state).allowed()) return false;
+        return breakTicks(ctx, cell, state) <= ReflexConstants.NIGHT_DIG_MAX_BREAK_TICKS;
+    }
+
+    /** The tool the body would break this state with: the best it carries, or the bare hand. */
+    private static ItemStack toolFor(ReflexContext ctx, BlockState state) {
+        int slot = Hands.bestTool(ctx.body, state);
+        return slot < 0 ? ItemStack.EMPTY : ctx.body.getInventory().items.get(slot);
+    }
+
+    /**
+     * Whether breaking this cell with the best tool at hand puts a shelter block in the pack: the game's own answer,
+     * from the block's loot (a grass block drops dirt, stone drops cobblestone to a pickaxe and nothing to a hand).
+     */
+    private static boolean dropsShelterBlock(ReflexContext ctx, BlockPos cell, BlockState state) {
+        ItemStack tool = toolFor(ctx, state);
+        if (state.requiresCorrectToolForDrops() && !tool.isCorrectToolForDrops(state)) return false;
+        for (ItemStack drop : Block.getDrops(state, ctx.level, cell, null, ctx.body, tool)) {
+            if (Hands.isShelterBlock(drop)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * How many ticks the best tool at hand would take to break this state, the way the game works it out: the block's
+     * hardness, times thirty when that tool harvests it and times a hundred when it does not, over the tool's speed on
+     * it. A bare hand on dirt takes fifteen ticks; on stone, a hundred and fifty, and drops nothing.
+     */
+    private static int breakTicks(ReflexContext ctx, BlockPos pos, BlockState state) {
+        ItemStack tool = toolFor(ctx, state);
+        float hardness = state.getDestroySpeed(ctx.level, pos);
+        if (hardness < 0.0F) return Integer.MAX_VALUE; // unbreakable, the game's own -1
+        if (hardness == 0.0F) return 0;
+        float speed = Math.max(tool.getDestroySpeed(state), 1.0E-4F);
+        boolean harvests = !state.requiresCorrectToolForDrops() || tool.isCorrectToolForDrops(state);
+        return (int) Math.ceil(hardness * (harvests ? 30.0F : 100.0F) / speed);
+    }
+
+    /** Whether a shelter block the digging dropped still lies in the body's own cell, waiting to be picked up. */
+    private static boolean dropLiesHere(ReflexContext ctx, BlockPos here) {
+        return !ctx.level.getEntitiesOfClass(ItemEntity.class, new AABB(here),
+            item -> item.isAlive() && Hands.isShelterBlock(item.getItem())).isEmpty();
     }
 
     // ---------------------------------------------------------------------------------------------------------

@@ -17,6 +17,7 @@ import com.legoj15.megablockbot.game.plan.BotMemory;
 import com.legoj15.megablockbot.game.reflex.ReflexConstants;
 import com.legoj15.megablockbot.game.reflex.ReflexLayer;
 import com.legoj15.megablockbot.game.safety.BlockSafety;
+import com.legoj15.megablockbot.game.safety.PlacedBlocks;
 import com.legoj15.megablockbot.game.task.RecoverDropsTask;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -437,15 +438,93 @@ public final class ReflexGameTests {
         });
     }
 
-    /** The same dusk with nothing to build with: the layer takes no hold for it and the body is left to keep working. */
+    /**
+     * The same dusk with nothing to build with and nothing to be had from the ground (a stone floor is not ground a
+     * body digs by hand): the layer takes no hold for it, the body is left to keep working, nothing is broken, and the
+     * night comes to nothing to build with, as a type rather than as the words of a note.
+     */
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 260, batch = "reflex_dusk_no_blocks")
     public static void keepsWorkingAtDuskWithNothingToBuildWith(GameTestHelper helper) {
         room(helper, false);
         Run run = Run.start(helper, "nob", new Vec3(7.5, FLOOR_Y + 1, 7.5), 260);
         run.setDayTime(13000L);
+        int[] floorAtStart = {groundBlocks(helper, Blocks.STONE)};
         run.each(200, () -> {
-            helper.assertTrue(!run.layer().isHolding() && run.watch.holdsStarted == 0, "the layer took the body at night with nothing to build with: " + run.watch.summary());
+            helper.assertTrue(!run.layer().isHolding() && run.watch.holdsStarted == 0, "the layer took the body at night with nothing to build with and nothing to dig: " + run.watch.summary());
+            // A stone floor is not ground a body digs by hand: nothing is broken for it.
+            helper.assertTrue(groundBlocks(helper, Blocks.STONE) == floorAtStart[0], "the body broke the stone floor it stands on");
             if (run.ticks < 150) return;
+            helper.assertTrue(run.layer().lastNightResult() == ReflexLayer.NightResult.NOTHING_TO_BUILD_WITH,
+                "the night came to " + run.layer().lastNightResult() + ", not nothing to build with");
+            run.pass();
+        });
+    }
+
+    /**
+     * Dusk with an empty pack, standing on dirt (issue 21: a live run spent such a night in the open, and died twice):
+     * the body digs itself in, and within the digging's bound and the build's it stands in a cell whose eight walls
+     * and cap are all solid, closed with blocks that came out of that ground -- the arena holds no dirt above the
+     * floor that it did not dig, and what stands there is no more than the ground lost.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 900, batch = "reflex_dusk_dig")
+    public static void digsInAtDuskWithAnEmptyPack(GameTestHelper helper) {
+        room(helper, false);
+        for (int x = 1; x <= 14; x++) {
+            for (int z = 1; z <= 14; z++) {
+                helper.setBlock(x, FLOOR_Y, z, Blocks.DIRT);
+                helper.setBlock(x, FLOOR_Y - 1, z, Blocks.DIRT);
+            }
+        }
+        Run run = Run.start(helper, "dig", new Vec3(7.5, FLOOR_Y + 1, 7.5), 900);
+        run.setDayTime(13000L);
+        int[] floorAtStart = {groundBlocks(helper, Blocks.DIRT)};
+        run.each(850, () -> {
+            BotPlayer now = run.body();
+            BlockPos cell = BlockPos.containing(helper.relativeVec(now.position()));
+            if (!walledIn(helper, cell)) return;
+            int standing = countBlock(helper, Blocks.DIRT);
+            int dug = floorAtStart[0] - groundBlocks(helper, Blocks.DIRT);
+            helper.assertTrue(run.ticks <= ReflexConstants.NIGHT_DIG_TICKS + ReflexConstants.BUILD_TIMEOUT_TICKS,
+                "the shelter closed only after " + run.ticks + " ticks, past the digging bound and the build's; " + run.watch.summary());
+            helper.assertTrue(dug >= standing, standing + " dirt blocks stand above the floor but only " + dug + " came out of the ground");
+            MegaBlockBot.LOGGER.info("Reflex GameTest dig: closed in at {} after {} ticks, {} dug out of the ground, {} standing above it, {} carried, {}",
+                cell, run.ticks, dug, standing, now.getInventory().countItem(Items.DIRT), run.watch.summary());
+            run.pass();
+        });
+    }
+
+    /**
+     * The same dusk on the same dirt, every block of which the break rules protect (recorded as placed by a player, the
+     * rule that keeps a body off what a player built): nothing is broken, no shelter is built, and the night comes to
+     * nothing to build with.
+     */
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 300, batch = "reflex_dusk_dig_safe")
+    public static void digsNothingWhereTheBreakRulesProtectTheGround(GameTestHelper helper) {
+        room(helper, false);
+        ServerLevel level = helper.getLevel();
+        PlacedBlocks placed = BlockSafety.of(level.getServer()).placedBlocks(level);
+        for (int x = 1; x <= 14; x++) {
+            for (int z = 1; z <= 14; z++) {
+                for (int y = FLOOR_Y - 1; y <= FLOOR_Y; y++) {
+                    helper.setBlock(x, y, z, Blocks.DIRT);
+                    placed.recordPlayer(helper.absolutePos(new BlockPos(x, y, z)).asLong(), Blocks.DIRT);
+                }
+            }
+        }
+        Run run = Run.start(helper, "safe", new Vec3(7.5, FLOOR_Y + 1, 7.5), 300);
+        run.setDayTime(13000L);
+        int[] floorAtStart = {groundBlocks(helper, Blocks.DIRT)};
+        run.each(240, () -> {
+            helper.assertTrue(groundBlocks(helper, Blocks.DIRT) == floorAtStart[0], "the body broke ground the break rules protect");
+            helper.assertTrue(!run.layer().isHolding() && run.watch.holdsStarted == 0, "the layer took the body for ground it may not break: " + run.watch.summary());
+            if (run.ticks < 150) return;
+            helper.assertTrue(run.layer().lastNightResult() == ReflexLayer.NightResult.NOTHING_TO_BUILD_WITH,
+                "the night came to " + run.layer().lastNightResult() + ", not nothing to build with");
+            for (int x = 1; x <= 14; x++) {
+                for (int z = 1; z <= 14; z++) {
+                    for (int y = FLOOR_Y - 1; y <= FLOOR_Y; y++) placed.forget(helper.absolutePos(new BlockPos(x, y, z)).asLong());
+                }
+            }
             run.pass();
         });
     }
@@ -1457,6 +1536,40 @@ public final class ReflexGameTests {
             }
         }
         return n;
+    }
+
+    /**
+     * How many blocks of this kind the ground the body stands on is made of: the floor level and the one below it, the
+     * two layers a body that digs for shelter blocks can take away. What this loses, the ground gave up.
+     */
+    private static int groundBlocks(GameTestHelper helper, Block block) {
+        int n = 0;
+        for (int x = 1; x <= 14; x++) {
+            for (int z = 1; z <= 14; z++) {
+                for (int y = FLOOR_Y - 1; y <= FLOOR_Y; y++) if (helper.getBlockState(new BlockPos(x, y, z)).is(block)) n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * True when the four cells beside the body's feet, the four beside its head and the one above its head all hold a
+     * full block: closed in, whether the walls were built or are the ground of a pit. The flood fill of
+     * {@link #enclosed} does not look below the floor, so it cannot tell a pit with a cap from one without.
+     */
+    private static boolean walledIn(GameTestHelper helper, BlockPos bodyCell) {
+        ServerLevel level = helper.getLevel();
+        List<BlockPos> cells = new ArrayList<>();
+        for (Direction d : Direction.Plane.HORIZONTAL) {
+            cells.add(bodyCell.relative(d));
+            cells.add(bodyCell.above().relative(d));
+        }
+        cells.add(bodyCell.above(2));
+        for (BlockPos cell : cells) {
+            BlockPos abs = helper.absolutePos(cell);
+            if (!level.getBlockState(abs).isCollisionShapeFullBlock(level, abs)) return false;
+        }
+        return true;
     }
 
     /**
