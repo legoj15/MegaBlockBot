@@ -912,6 +912,14 @@ and registered with a precondition, an expected yield, and a cost:
   `/aiplayer blueprint save`, and a blueprint may hold only plain blocks — a block whose item places it, no block
   entity, and no second half of a two-block thing.
 
+A plan that goes down is provisioned by the planner itself, not by a strategy (#19): when one of
+its own mining steps digs an ore whose best level is below `PlannerConfig.provisionBelowY` (0, the top of the deepslate), it
+first makes a weapon — the best of `provisionWeapons` it can craft, never worse than stone — and food
+up to `provisionFoodCount`, the cheapest of `provisionFoods` by the cost model, for the count its pack
+is short. Both are ordinary steps before the goal's first step, relied on afterwards and never spent by
+a later one; one that cannot be planned is left out with a note saying which and why, and is never a
+reason the goal is unplannable. A plan that stays on the surface is untouched by the rule.
+
 When several strategies apply, the cost model ranks them; the LLM is asked only when costs
 are close or the user stated a preference ("fish for it").
 

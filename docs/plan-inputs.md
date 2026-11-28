@@ -203,6 +203,22 @@ trade leaf carries it as its `jobSite` param, and the trade task puts it down be
 it up again until the offer is there. A checked item goal planned through the trade (`SolverPlanner.checkedPlan`,
 see the snapshot's `offers`) holds the job site the same way, and its leaf's goal carries the check.
 
+## Provisions for a plan that digs (issue #19)
+
+A plan that goes underground packs a weapon and food before its first step, and everything that decides it is already in
+a snapshot: the mining step's `bestY` param (from the source's ore range) against `PlannerConfig.provisionBelowY`, and
+what the body carries in its pack of the sword and axe items and of `provisionFoods`. For a goal whose sources reach an
+ore that deep those counts are part of the plan's input fingerprint — the fingerprint asks the index rather than the
+plan, so it is ready for the provisions whether or not the plan that came out digs — and a replan after a death, with an
+empty pack, plans them again while a pack that still holds a sword and its food brings nothing; one lying in a container
+the body may take from is fetched by the usual `withdraw` step instead of made again. The weapon rule is the one
+`game.task.Weapons` answers with (a sword or an axe with durability left), and no new collection is read for any of it.
+
+The level is 0, the top of the deepslate: gold, redstone, lapis and diamond trips are provisioned, iron, copper and
+coal are not, so the short plans of the iron age are as they were. Every provision step is best effort: one that
+cannot be carried out (no cow within the search) is skipped where it fails, with no retry and no replan, and the goal's
+own steps go on.
+
 ## Checks
 
 `PlanInputGameTests` (`scripts/gametest.ps1 -Node 1.21.1`): recipe shapes against vanilla data, the furnace recipes

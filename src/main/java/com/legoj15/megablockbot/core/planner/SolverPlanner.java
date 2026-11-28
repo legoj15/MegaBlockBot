@@ -70,6 +70,20 @@ import java.util.TreeSet;
  * yields, say) is set aside, for this plan only, and the shortfall is taken again: the solver then crafts an item
  * that has a recipe. Every loop is bounded and ends in an {@code Unplannable(Internal)} that says which bound it hit.
  *
+ * <h2>Provisions for a plan that goes underground</h2>
+ * A plan is asked to bring a weapon and food when one of its own mining steps digs an ore whose best level is below
+ * {@link PlannerConfig#provisionBelowY} (brief K19): a {@code mine} leaf's params say where it digs, so the question is
+ * about what the plan does and not about what could have been dug. The provisions are the first steps of the plan,
+ * planned against the stock it starts from, and the goal is then planned again over them, so that what a provision spent
+ * from the pack is gathered for the goal too and the goal never draws on what was brought to be kept. A weapon is
+ * planned only when the pack holds none — the items that count as one are {@link #weaponItems()}, the swords and axes a
+ * fight swings — and is the first of {@link PlannerConfig#provisionWeapons} the plan can make; food is planned only when
+ * the pack holds less than {@link PlannerConfig#provisionFoodCount} of {@link PlannerConfig#provisionFoods} together,
+ * and is the cheapest of them by the cost model, for the count it is short. A provision that cannot be planned is left
+ * out with a note saying which and why, and a goal whose plan does not survive being provisioned is planned as if it had
+ * never been asked: provisioning is never a reason a goal is unplannable. A plan with no deep mining step in it is
+ * returned untouched, steps and notes alike.
+ *
  * <h2>Leaf params</h2>
  * Every value is a string; {@code taskKind} says which task reads them.
  * <ul>
@@ -173,6 +187,8 @@ public final class SolverPlanner implements Planner {
     private static final ItemKey DEMAND_RESULT = new ItemKey("megablockbot:demand");
     /** The one rod every fishing source casts with: planned before the first {@code fish} leaf and never spent. */
     static final ItemKey FISHING_ROD = ItemKey.of("minecraft:fishing_rod");
+    /** The task kind of a mining leaf: the only one whose params say what level it digs at. */
+    private static final String MINING = "mine";
 
     private final RecipeBook recipes;
     private final AcquisitionIndex index;
@@ -202,6 +218,9 @@ public final class SolverPlanner implements Planner {
     public PlanOutcome plan(PlanRequest request) {
         Run run = new Run(request);
         Step step = run.expand(request.goal());
+        if (step.failure() != null) return new PlanOutcome.Unplannable(step.failure());
+        // A plan that goes underground packs a weapon and food before it starts (brief K19); a surface plan is as it is.
+        step = run.withProvisions(request.goal(), step);
         if (step.failure() != null) return new PlanOutcome.Unplannable(step.failure());
         Step takes = run.withdrawals();
         if (takes.failure() != null) return new PlanOutcome.Unplannable(takes.failure());
@@ -317,6 +336,11 @@ public final class SolverPlanner implements Planner {
          * identity, so a producers function that built new objects on every call would defeat it.
          */
         private final Map<String, SolverRecipe> wrapped = new HashMap<>();
+        /**
+         * The working stock, notes and accounts before any step was planned: what a plan that goes underground packs
+         * its provisions against, so that they are the first steps and not an addition to a plan already made.
+         */
+        private final State startState;
         private int toolDepth;
         private int expandDepth;
 
@@ -336,6 +360,7 @@ public final class SolverPlanner implements Planner {
                     stock.merge(held.getKey(), (long) held.getValue(), Long::sum);
                 }
             }
+            this.startState = mark();
         }
 
         /**
@@ -1497,7 +1522,7 @@ public final class SolverPlanner implements Planner {
 
         private static String taskKind(Source source) {
             return switch (source) {
-                case Source.MineBlock mine -> "mine";
+                case Source.MineBlock mine -> MINING;
                 case Source.Harvest harvest -> "harvest";
                 case Source.KillMob kill -> "kill";
                 case Source.Fishing fishing -> "fish";
@@ -1532,6 +1557,163 @@ public final class SolverPlanner implements Planner {
                 String reason = costs.reasonUnusable(source);
                 if (reason != null) note(item.id() + ": " + reason);
             }
+        }
+
+        // ─── Provisions for a plan that goes underground ─────────────────────────────────────────
+
+        /**
+         * The plan for a goal that goes underground (brief K19), with its provisions as the first steps: a weapon, when
+         * the pack holds none, and the food it is short of, each planned like any other item against the stock the plan
+         * starts from, then the goal planned again over them. The second expansion is what makes a provision that spends
+         * the pack gather what the goal loses by it; while it runs the provisioned units are reserved, so no step of the
+         * goal draws them and a food the goal also eats is planned twice over rather than shared.
+         *
+         * <p>Provisioning is never a reason a goal is unplannable: a provision that cannot be planned is left out with a
+         * note saying which and why, and a goal whose plan does not survive its own provisions is planned as it was,
+         * without them. A plan that stays on the surface comes back as it came.
+         */
+        Step withProvisions(Goal goal, Step goalStep) {
+            if (!goesUnderground(goalStep.nodes())) return goalStep;
+            State asItWas = mark();
+            restore(startState);
+            TreeMap<ItemKey, Long> brought = new TreeMap<>();
+            List<NodeSpec> provisions = new ArrayList<>();
+            provisions.addAll(weaponProvision(brought));
+            provisions.addAll(foodProvision(brought));
+            List<String> said = List.copyOf(notes);
+            if (provisions.isEmpty()) {
+                restore(asItWas);
+                said.forEach(this::note);
+                return goalStep;
+            }
+            brought.forEach((item, count) -> reserved.merge(item, count, Long::sum));
+            Step replanned;
+            try {
+                replanned = expand(goal);
+            } finally {
+                brought.keySet().forEach(reserved::remove);
+            }
+            if (replanned.failure() != null) {
+                // The reason is said after the undo, since the undo takes the notes back with everything else.
+                String why = "the provisions a plan that goes underground would bring made the goal unplanned ("
+                        + replanned.failure().detail() + "), so it brings none";
+                restore(asItWas);
+                said.forEach(this::note);
+                note(why);
+                return goalStep;
+            }
+            // Best effort, every step of them: a provision that cannot be carried out (no cow within the search) is
+            // skipped where it fails, with no retry and no replan, and the goal's own steps go on. Without that a
+            // hunt that finds nothing would spend the goal's replans on a meal.
+            List<NodeSpec> nodes = new ArrayList<>();
+            for (NodeSpec provision : provisions) nodes.add(bestEffort(provision));
+            nodes.addAll(replanned.nodes());
+            return Step.ok(nodes);
+        }
+
+        /** The node with it and everything under it marked best effort. */
+        private static NodeSpec bestEffort(NodeSpec node) {
+            if (node.isLeaf()) return node.asBestEffort();
+            List<NodeSpec> children = new ArrayList<>();
+            for (NodeSpec child : node.children()) children.add(bestEffort(child));
+            return NodeSpec.group(node.goal(), children).asBestEffort();
+        }
+
+        /**
+         * Whether a plan goes underground, which is what asks for provisions: one of its mining steps names an ore whose
+         * best level is below {@link PlannerConfig#provisionBelowY}. The question is asked of the steps the plan has, not
+         * of what the goal could have been gathered from, so a goal a plan reaches without digging deep stays a surface
+         * plan even where deep ore would have served.
+         */
+        private boolean goesUnderground(List<NodeSpec> nodes) {
+            for (NodeSpec node : nodes) {
+                if (node.isLeaf() ? digsUnderground(node) : goesUnderground(node.children())) return true;
+            }
+            return false;
+        }
+
+        /** Whether one leaf digs where a body needs a weapon and food: a mining step whose ore sits that deep. */
+        private boolean digsUnderground(NodeSpec leaf) {
+            if (!MINING.equals(leaf.taskKind())) return false;
+            Integer bestY = level(leaf.params().get("bestY"));
+            return bestY != null && bestY < config.provisionBelowY();
+        }
+
+        /** The level a {@code bestY} param names, or null when the step names none: a step that digs nowhere is not deep. */
+        private static Integer level(String text) {
+            if (text == null) return null;
+            try {
+                return Integer.valueOf(text);
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+
+        /**
+         * The weapon for a plan that goes underground: nothing when the pack holds one (the items that count as one are
+         * {@link #weaponItems()}), else the first of {@link PlannerConfig#provisionWeapons} the plan can make, grouped
+         * under the goal it serves. A sword in a container the body may take from counts as none held, and the plan then
+         * fetches it there rather than making another. When none of the list can be had the plan says which, and why,
+         * and goes down without a weapon.
+         */
+        private List<NodeSpec> weaponProvision(TreeMap<ItemKey, Long> brought) {
+            for (ItemKey weapon : weaponItems()) {
+                if (carried(weapon) >= 1) return List.of();
+            }
+            StringBuilder why = new StringBuilder();
+            for (ItemKey weapon : config.provisionWeapons()) {
+                State before = mark();
+                Step step = itemPlan(weapon, 1);
+                if (step.failure() == null) {
+                    brought.merge(weapon, 1L, Long::sum);
+                    return step.nodes().isEmpty() ? List.of()
+                            : List.of(NodeSpec.group(new Goal.HaveItem(weapon, (int) held(weapon)), step.nodes()));
+                }
+                if (why.length() > 0) why.append("; ");
+                why.append(weapon.id()).append(": ").append(step.failure().detail());
+                restore(before);
+            }
+            note("the plan goes underground with no weapon" + (why.length() == 0 ? "" : ": " + why));
+            return List.of();
+        }
+
+        /**
+         * The food for a plan that goes underground: the units its pack is short of
+         * {@link PlannerConfig#provisionFoodCount}, met by the cheapest of {@link PlannerConfig#provisionFoods} the plan
+         * can get. Cheapest is what the cost model says of one unit of it, recipe included (the same measure a trade's
+         * charge is priced by), and the list's own order breaks a tie; a food that cannot be had is not the end of the
+         * plan, the next cheapest is tried. Food already in the pack counts toward the count, so a replan with the food
+         * in hand brings none, and what a container holds of the food chosen is taken rather than grown. When none of
+         * them can be had the plan says so and goes down hungry.
+         */
+        private List<NodeSpec> foodProvision(TreeMap<ItemKey, Long> brought) {
+            TreeSet<ItemKey> foods = new TreeSet<>(config.provisionFoods());
+            long inPack = 0;
+            for (ItemKey food : foods) inPack += carried(food);
+            long shortBy = config.provisionFoodCount() - Math.min(inPack, config.provisionFoodCount());
+            if (shortBy <= 0) return List.of();
+            // The list in its own order, so that a stable sort by cost leaves the preference order inside a tie.
+            List<ItemKey> byCost = new ArrayList<>(config.provisionFoods());
+            byCost.sort(Comparator.comparingLong((ItemKey food) -> solver.unitCost(food)));
+            StringBuilder why = new StringBuilder();
+            for (ItemKey food : byCost) {
+                // The count is what the pack holds of this food plus what the trip is short of, so the units already
+                // lying in a container are drawn on for it instead of being gathered again beside them.
+                long target = carried(food) + shortBy;
+                State before = mark();
+                Step step = itemPlan(food, (int) target);
+                if (step.failure() == null) {
+                    brought.merge(food, target, Long::sum);
+                    // The group's goal is the stock the provisions leave the item at, as any gather leaf's goal is.
+                    return step.nodes().isEmpty() ? List.of()
+                            : List.of(NodeSpec.group(new Goal.HaveItem(food, (int) held(food)), step.nodes()));
+                }
+                if (why.length() > 0) why.append("; ");
+                why.append(food.id()).append(": ").append(step.failure().detail());
+                restore(before);
+            }
+            note("the plan goes underground with no food" + (why.length() == 0 ? "" : ": " + why));
+            return List.of();
         }
 
         // ─── Taking from containers ──────────────────────────────────────────────────────────────
@@ -1582,6 +1764,14 @@ public final class SolverPlanner implements Planner {
 
         private long held(ItemKey item) {
             return stock.getOrDefault(item, 0L);
+        }
+
+        /**
+         * How many of the item the pack itself holds, which is what a provision is asked about: what lies in a container
+         * is not carried until the plan sends a step to fetch it.
+         */
+        private long carried(ItemKey item) {
+            return snapshot.count(item);
         }
 
         private void addStock(ItemKey item, long count) {
@@ -1712,7 +1902,8 @@ public final class SolverPlanner implements Planner {
     /**
      * A stable 64-bit hash of what the plan depends on (design 3.4): the goal, the dimension, the best tools, the
      * counts of the items in the goal's recipe closure (every item reachable through recipe ingredients and
-     * stations, the tools the sources it can be gathered from require, and what a trade charges) and, for a goal
+     * stations, the tools the sources it can be gathered from require, what a trade charges, and the weapon and food a
+     * plan that digs below {@link PlannerConfig#provisionBelowY} packs) and, for a goal
      * the planner cannot see into (a build or a custom goal), of the whole inventory; and what {@code Stockpile}
      * reads (the container's known contents), {@code Equip} reads (what is worn) and a goal with a component check reads
      * (the facts of the stacks of its item that the body holds), and what each container the body may take from holds
@@ -1890,7 +2081,8 @@ public final class SolverPlanner implements Planner {
 
     /**
      * The items a plan for the goal reads the stock of: the goal's items and everything their recipes, stations,
-     * gather sources' tools and trade payments lead to. Walked over the recipe book and the index whole (the
+     * gather sources' tools and trade payments lead to, and the provisions a plan that digs past
+     * {@link PlannerConfig#provisionBelowY} would pack (brief K19). Walked over the recipe book and the index whole (the
      * exclusions are hashed as a set of their own, not subtracted from this walk), up to
      * {@link #MAX_CLOSURE_ITEMS} items.
      *
@@ -1923,6 +2115,13 @@ public final class SolverPlanner implements Planner {
                 if (recipe.station() != null) queue.add(recipe.station());
             }
             for (Source source : index.sources(item)) {
+                if (source instanceof Source.MineBlock deep && deep.ore() != null
+                        && deep.ore().bestY() < config.provisionBelowY()) {
+                    // A plan that digs here packs a weapon and food (brief K19), so whether the pack holds them is part
+                    // of what the plan reads: an empty pack after a death plans them again, one that holds them not.
+                    queue.addAll(weaponItems());
+                    queue.addAll(config.provisionFoods());
+                }
                 if (source instanceof Source.MineBlock mine && mine.toolRequired() && mine.toolClass() != null) {
                     ItemKey tool = config.toolItem(mine.toolClass(), mine.minTier());
                     if (tool != null) queue.add(tool);
@@ -1948,6 +2147,19 @@ public final class SolverPlanner implements Planner {
         for (Map.Entry<ItemKey, ToolClass> entry : toolClasses.entrySet()) {
             if (entry.getValue() == toolClass && toolTiers.get(entry.getKey()).atLeast(required)) tools.add(entry.getKey());
         }
+    }
+
+    /**
+     * The items that are a weapon to a plan (brief K19): every sword and axe item the tool table names, which is what
+     * the fight layer swings, and the ones {@link PlannerConfig#provisionWeapons} would bring. Holding any of them means
+     * a plan that goes underground brings no weapon.
+     */
+    private TreeSet<ItemKey> weaponItems() {
+        TreeSet<ItemKey> items = new TreeSet<>(config.provisionWeapons());
+        for (Map.Entry<ItemKey, ToolClass> entry : toolClasses.entrySet()) {
+            if (entry.getValue() == ToolClass.SWORD || entry.getValue() == ToolClass.AXE) items.add(entry.getKey());
+        }
+        return items;
     }
 
     /** The goal as one canonical string; every field the planner would read differently is in it. */

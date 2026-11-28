@@ -4,6 +4,7 @@ import com.legoj15.megablockbot.core.ItemKey;
 import com.legoj15.megablockbot.core.ToolClass;
 import com.legoj15.megablockbot.core.ToolTier;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -30,20 +31,44 @@ import java.util.TreeMap;
  *                        holds anything. Larger than any seen block's charge, which {@link #sightCharge} caps at
  *                        {@code unseenPenalty - 1}, so a block in sight is always cheaper than the same one out of it
  * @param maxTotalReplans the replan total a plan carries when no strategy declares a higher one (design 3.4)
+ * @param provisionBelowY the level a plan is said to go underground below it (brief K19): a plan with a mining step
+ *                        whose ore's best level is below it is a plan that digs in the dark, where a body needs
+ *                        something to fight with and nothing on the surface to eat. 0 is the top of the deepslate:
+ *                        gold, redstone, lapis and diamond are found most often below it, in the widest and darkest
+ *                        caves, while iron, copper and coal (best levels 16 and up) are not, so the short plans of
+ *                        the iron age stay as they were and do not go hunting for eight meals before three ingots.
+ *                        (The brief said 40; the first live plans it changed were those.)
+ *                        {@link Integer#MIN_VALUE} switches provisioning off.
+ * @param provisionWeapons
+ *                        what a plan that goes underground brings as a weapon, best first: the first of them the plan can
+ *                        make, or find where it may take from, is the one it brings. None worse than stone, since a
+ *                        wooden sword does not outlast the fight it is meant for.
+ * @param provisionFoodCount
+ *                        how much food a plan that goes underground sees the pack holding; the units it is short of
+ *                        that are the count it plans to bring.
+ * @param provisionFoods  what it may bring as food, in the order it prefers them: the cheapest by the cost model is
+ *                        the one it brings, so the order only decides a tie and says what counts as food to a plan.
  * @param toolItems       tool item per class and tier, keyed by {@link #toolKey}; see {@link #toolItem}
  */
 public record PlannerConfig(long mineBase, long deepOre, long toolStep, long harvest, long kill, long useOn, long fish,
-                            long trade, long sightStep, long unseenPenalty, int maxTotalReplans,
+                            long trade, long sightStep, long unseenPenalty, int maxTotalReplans, int provisionBelowY,
+                            List<ItemKey> provisionWeapons, int provisionFoodCount, List<ItemKey> provisionFoods,
                             Map<String, ItemKey> toolItems) {
     /**
      * Sorted, defensively copied, read-only: table iteration must not depend on how it was built. ({@code Map.copyOf}
-     * would drop the order, and its own iteration order differs from one JVM to the next.)
+     * would drop the order, and its own iteration order differs from one JVM to the next.) The provision lists keep
+     * the order they were given, which is their preference order.
      */
     public PlannerConfig {
         if (sightStep < 0 || unseenPenalty < 1) {
             throw new IllegalArgumentException("sightStep must be at least 0 and unseenPenalty at least 1, got "
                     + sightStep + " and " + unseenPenalty);
         }
+        if (provisionFoodCount < 0) {
+            throw new IllegalArgumentException("provisionFoodCount must be at least 0, got " + provisionFoodCount);
+        }
+        provisionWeapons = List.copyOf(provisionWeapons);
+        provisionFoods = List.copyOf(provisionFoods);
         toolItems = Collections.unmodifiableMap(new TreeMap<>(toolItems));
     }
 
@@ -54,7 +79,8 @@ public record PlannerConfig(long mineBase, long deepOre, long toolStep, long har
      * reorders choices between alternatives without outweighing a missing tool.
      */
     public static PlannerConfig defaults() {
-        return new PlannerConfig(40, 600, 400, 200, 600, 600, 1200, 3000, 1, 250, 12, vanillaToolItems());
+        return new PlannerConfig(40, 600, 400, 200, 600, 600, 1200, 3000, 1, 250, 12, 0, vanillaProvisionWeapons(), 8,
+                vanillaProvisionFoods(), vanillaToolItems());
     }
 
     /**
@@ -97,9 +123,22 @@ public record PlannerConfig(long mineBase, long deepOre, long toolStep, long har
         return toolItems.get(toolKey(toolClass, tier));
     }
 
+    /** The vanilla swords a plan that goes underground may bring, best first (brief K19). */
+    public static List<ItemKey> vanillaProvisionWeapons() {
+        return List.of(ItemKey.of("iron_sword"), ItemKey.of("stone_sword"));
+    }
+
+    /** The vanilla foods a plan that goes underground may bring, in the order the design prefers them. */
+    public static List<ItemKey> vanillaProvisionFoods() {
+        return List.of(ItemKey.of("cooked_beef"), ItemKey.of("cooked_porkchop"), ItemKey.of("cooked_mutton"),
+                ItemKey.of("cooked_chicken"), ItemKey.of("bread"), ItemKey.of("baked_potato"),
+                ItemKey.of("cooked_cod"), ItemKey.of("cooked_salmon"));
+    }
+
     /** A copy of this config whose tool table is replaced, for a modded or test table. */
     public PlannerConfig withToolItems(Map<String, ItemKey> replacement) {
         return new PlannerConfig(mineBase, deepOre, toolStep, harvest, kill, useOn, fish, trade, sightStep,
-                unseenPenalty, maxTotalReplans, replacement);
+                unseenPenalty, maxTotalReplans, provisionBelowY, provisionWeapons, provisionFoodCount, provisionFoods,
+                replacement);
     }
 }

@@ -89,6 +89,12 @@ final class SolverPlannerTest {
     private static final ItemKey FISHING_ROD = ItemKey.of("fishing_rod");
     private static final ItemKey SALMON = ItemKey.of("salmon");
     private static final ItemKey LECTERN = ItemKey.of("lectern");
+    private static final ItemKey STONE_SWORD = ItemKey.of("stone_sword");
+    private static final ItemKey IRON_SWORD = ItemKey.of("iron_sword");
+    private static final ItemKey WHEAT = ItemKey.of("wheat");
+    private static final ItemKey BREAD = ItemKey.of("bread");
+    private static final ItemKey RAW_BEEF = ItemKey.of("raw_beef");
+    private static final ItemKey COOKED_BEEF = ItemKey.of("cooked_beef");
     private static final Pos CONTAINER = new Pos(16, 64, -4);
 
     // ─── The fixture: a dozen vanilla-like recipes and a small acquisition index ─────────────────
@@ -210,7 +216,8 @@ final class SolverPlannerTest {
         PlannerConfig defaults = PlannerConfig.defaults();
         return new PlannerConfig(1000, defaults.deepOre(), toolStep, defaults.harvest(), defaults.kill(),
                 defaults.useOn(), defaults.fish(), defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(),
-                defaults.maxTotalReplans(), defaults.toolItems());
+                defaults.maxTotalReplans(), defaults.provisionBelowY(), defaults.provisionWeapons(),
+                defaults.provisionFoodCount(), defaults.provisionFoods(), defaults.toolItems());
     }
 
     private static Exclusions without(String... sources) {
@@ -1728,7 +1735,8 @@ final class SolverPlannerTest {
         PlannerConfig defaults = PlannerConfig.defaults();
         return new PlannerConfig(1, defaults.deepOre(), 0, defaults.harvest(), defaults.kill(), defaults.useOn(),
                 defaults.fish(), defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(),
-                defaults.maxTotalReplans(), defaults.toolItems());
+                defaults.maxTotalReplans(), defaults.provisionBelowY(), defaults.provisionWeapons(),
+                defaults.provisionFoodCount(), defaults.provisionFoods(), defaults.toolItems());
     }
 
     @Test
@@ -2138,7 +2146,8 @@ final class SolverPlannerTest {
         PlannerConfig defaults = PlannerConfig.defaults();
         return new PlannerConfig(1000, 0, 0, defaults.harvest(), defaults.kill(), defaults.useOn(), defaults.fish(),
                 defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(), defaults.maxTotalReplans(),
-                defaults.toolItems());
+                defaults.provisionBelowY(), defaults.provisionWeapons(), defaults.provisionFoodCount(),
+                defaults.provisionFoods(), defaults.toolItems());
     }
 
     private static SolverPlanner ironPlanner() {
@@ -3110,5 +3119,159 @@ final class SolverPlannerTest {
         // An exclusion of a source the goal never reads changes nothing but the hash: it is still a different input.
         assertNotEquals(plain.inputFingerprint(),
                 instance.inputFingerprint(goal, held, without("mine:minecraft:diamond_ore")));
+    }
+
+    // ─── Provisions for a plan that goes underground (brief K19) ─────────────────────────────────
+
+    /**
+     * A world with a sword's recipes and food in it: a stone sword of two cobblestone and a stick, an iron sword of two
+     * iron ingots this world has no iron in at all, bread of three wheat, and a cooked beef of a raw one and a piece of
+     * coal in a furnace. Diamonds are mined with a stone pickaxe, which is the deep dig these plans are about.
+     */
+    private static RecipeBook provisionBook() {
+        return bookWith(
+                recipe("stone_sword_from_cobblestone", STONE_SWORD, 1, CRAFTING_TABLE, of(COBBLESTONE, 2), one(STICK)),
+                recipe("iron_sword_from_ingots", IRON_SWORD, 1, CRAFTING_TABLE, of(IRON_INGOT, 2), one(STICK)),
+                recipe("diamond_pickaxe_from_diamonds", DIAMOND_PICKAXE, 1, CRAFTING_TABLE, of(DIAMOND, 3),
+                        of(STICK, 2)),
+                recipe("bread_from_wheat", BREAD, 1, null, of(WHEAT, 3)),
+                smelt("cooked_beef_from_raw_beef#coal", COOKED_BEEF, 1, FURNACE, one(RAW_BEEF), one(COAL)));
+    }
+
+    /**
+     * The index of that world; with {@code food} false neither wheat nor cattle stands, so nothing is edible in it. A
+     * stone pickaxe is enough to dig the diamonds, since a world with no iron in it could not be dug for them at all.
+     */
+    private static AcquisitionIndex provisionIndex(boolean food) {
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.STONE);
+        builder.addItem(STONE_SWORD).addItem(IRON_SWORD).addItem(BREAD).addItem(COOKED_BEEF);
+        if (food) {
+            builder.addItem(WHEAT).addItem(RAW_BEEF);
+            // Wheat stands on the surface: three of it is a bread, so bread is the cheapest food on the list by far.
+            builder.addSource(new Source.Harvest("harvest:minecraft:wheat", WHEAT, "minecraft:wheat", null,
+                    true, 1.0, false));
+            // A cow gives the dearer one: the kill, the coal and the furnace come to over twice three wheat.
+            builder.addSource(new Source.KillMob("kill:minecraft:cow", RAW_BEEF, "minecraft:cow", false, 1.0, false));
+        }
+        return builder.build();
+    }
+
+    private static SolverPlanner provisioningPlanner(boolean food) {
+        return new SolverPlanner(provisionBook(), provisionIndex(food), PlannerConfig.defaults(), List.of());
+    }
+
+    /** The same planner with provisioning switched off: the plan a goal gets on its own, to compare a packed one to. */
+    private static SolverPlanner unprovisionedPlanner(boolean food) {
+        PlannerConfig defaults = PlannerConfig.defaults();
+        PlannerConfig off = new PlannerConfig(defaults.mineBase(), defaults.deepOre(), defaults.toolStep(),
+                defaults.harvest(), defaults.kill(), defaults.useOn(), defaults.fish(), defaults.trade(),
+                defaults.sightStep(), defaults.unseenPenalty(), defaults.maxTotalReplans(), Integer.MIN_VALUE,
+                defaults.provisionWeapons(),
+                defaults.provisionFoodCount(), defaults.provisionFoods(), defaults.toolItems());
+        return new SolverPlanner(provisionBook(), provisionIndex(food), off, List.of());
+    }
+
+    /** How many steps of the plan bring that item in, counted by the goal each leaf ends with. */
+    private static long packedWith(Plan plan, ItemKey item) {
+        return leaves(plan).stream()
+                .filter(leaf -> leaf.goal() instanceof Goal.HaveItem have && have.key().equals(item)).count();
+    }
+
+    /**
+     * The plan's note about a provision it could not bring, or null when it says nothing about provisions. The item's
+     * own name is in such a note, because the note is there to say which provision is missing.
+     */
+    private static String provisionNote(Plan plan) {
+        List<String> names = new ArrayList<>();
+        PlannerConfig.vanillaProvisionWeapons().forEach(weapon -> names.add(weapon.id()));
+        PlannerConfig.vanillaProvisionFoods().forEach(food -> names.add(food.id()));
+        return plan.notes().stream().filter(note -> names.stream().anyMatch(note::contains)).findFirst().orElse(null);
+    }
+
+    /** The position in plan order of the first leaf the test names, or -1 when the plan has none. */
+    private static int firstLeaf(Plan plan, Predicate<NodeSpec> test) {
+        List<NodeSpec> steps = leaves(plan);
+        for (int i = 0; i < steps.size(); i++) {
+            if (test.test(steps.get(i))) return i;
+        }
+        return -1;
+    }
+
+    @Test
+    void aPlanThatDigsForDiamondsMakesASwordAndBreadBeforeItDigs() {
+        // The pickaxe is three diamonds, and a diamond is mined at y -54: below the level a plan packs provisions at.
+        // The pack is empty, so it packs both. Iron sword is first on the weapon list and this world has no iron in it,
+        // so the stone sword after it is the one planned; bread is three wheat harvested (600 a unit) against a cooked
+        // beef that costs a kill and a piece of coal (over 1200), so the food is bread.
+        SolverPlanner planner = provisioningPlanner(true);
+        Goal goal = new Goal.HaveItem(DIAMOND_PICKAXE, 1);
+        Plan plan = planned(planner, request(goal, EMPTY, Exclusions.NONE));
+
+        int sword = firstLeaf(plan, leaf -> "stone_sword_from_cobblestone".equals(leaf.params().get("recipe")));
+        int food = firstLeaf(plan, leaf -> "bread_from_wheat".equals(leaf.params().get("recipe")));
+        int dig = firstLeaf(plan, leaf -> "mine:minecraft:diamond_ore".equals(leaf.source()));
+        assertTrue(sword >= 0, "the plan makes a sword: " + leaves(plan));
+        assertTrue(food >= 0, "the plan makes bread: " + leaves(plan));
+        assertTrue(dig >= 0, "the plan digs for the diamonds: " + leaves(plan));
+        assertTrue(sword < dig && food < dig, "the provisions are the plan's first steps: " + leaves(plan));
+        assertEquals(0, packedWith(plan, COOKED_BEEF), "the dearer food on the list is not the one it brings");
+        assertEquals(24, gathered(plan, WHEAT), "eight bread, three wheat in each");
+        assertEquals(3, gathered(plan, DIAMOND), "the goal's own dig is not smaller for the provisions");
+
+        Executed executed = assertRunsToTheGoal(plan, provisionBook(), Map.of(), Map.of(), DIAMOND_PICKAXE, 1);
+        assertTrue(executed.stock().getOrDefault(STONE_SWORD, 0) >= 1,
+                "the sword is still in the pack at the end: " + executed.stock());
+        assertTrue(executed.stock().getOrDefault(BREAD, 0) >= 8,
+                "the food is still in the pack at the end: " + executed.stock());
+    }
+
+    @Test
+    void aPlanThatGoesUndergroundPacksNothingThePackAlreadyHolds() {
+        Goal goal = new Goal.HaveItem(DIAMOND_PICKAXE, 1);
+        Map<ItemKey, Integer> armed = Map.of(STONE_SWORD, 1, BREAD, 8);
+        Plan withSupplies = planned(provisioningPlanner(true), request(goal, snapshot(armed, Map.of()),
+                Exclusions.NONE));
+
+        assertEquals(0, packedWith(withSupplies, STONE_SWORD) + packedWith(withSupplies, BREAD),
+                "a pack that holds a sword and its food brings none: " + leaves(withSupplies));
+        // Neither is an ingredient of the pickaxe, so the plan is the plan of the same goal from an empty pack with
+        // provisioning switched off, step for step.
+        Plan own = planned(unprovisionedPlanner(true), request(goal, EMPTY, Exclusions.NONE));
+        assertEquals(own.roots(), withSupplies.roots(), "the plan of a supplied pack is the goal's own plan");
+        Plan fromEmpty = planned(provisioningPlanner(true), request(goal, EMPTY, Exclusions.NONE));
+        assertNotEquals(withSupplies.roots(), fromEmpty.roots(),
+                "setup: from an empty pack this planner does pack the plan with provisions");
+    }
+
+    @Test
+    void aPlanThatStaysOnTheSurfacePacksNothing() {
+        SolverPlanner planner = provisioningPlanner(true);
+        Goal goal = new Goal.HaveItem(OAK_PLANKS, 4);
+        Plan plan = planned(planner, request(goal, EMPTY, Exclusions.NONE));
+
+        assertEquals(0, packedWith(plan, STONE_SWORD) + packedWith(plan, IRON_SWORD) + packedWith(plan, BREAD)
+                + packedWith(plan, COOKED_BEEF), "a surface plan packs nothing: " + leaves(plan));
+        assertEquals(planned(unprovisionedPlanner(true), request(goal, EMPTY, Exclusions.NONE)).roots(), plan.roots(),
+                "the surface plan is the plan it was, step for step");
+        assertNull(provisionNote(plan), "a surface plan is not asked to bring anything: " + plan.notes());
+        // The guard is worth only what the contrast is worth: this planner does provision a plan that digs.
+        Plan digging = planned(planner, request(new Goal.HaveItem(DIAMOND_PICKAXE, 1), EMPTY, Exclusions.NONE));
+        assertNotEquals(0, packedWith(digging, STONE_SWORD), "the same planner provisions a plan that goes underground");
+    }
+
+    @Test
+    void aPlanThatFindsNoFoodToBringSaysSoAndStillMakesItsGoal() {
+        // The same world with no wheat and no cattle on it: the weapon is still to be made and the food is not.
+        SolverPlanner planner = provisioningPlanner(false);
+        Goal goal = new Goal.HaveItem(DIAMOND_PICKAXE, 1);
+        Plan plan = planned(planner, request(goal, EMPTY, Exclusions.NONE));
+
+        assertEquals(1, packedWith(plan, STONE_SWORD), "one provision standing alone is still planned: " + leaves(plan));
+        assertEquals(0, packedWith(plan, BREAD) + packedWith(plan, COOKED_BEEF), "no food step: " + leaves(plan));
+        List<String> foods = PlannerConfig.vanillaProvisionFoods().stream().map(ItemKey::id).toList();
+        assertTrue(plan.notes().stream().anyMatch(n -> foods.stream().anyMatch(n::contains)),
+                "the plan names the food it could not provide, in a note: " + plan.notes());
+        assertEquals(3, gathered(plan, DIAMOND), "the goal's own dig is there all the same");
+        assertRunsToTheGoal(plan, provisionBook(), Map.of(), Map.of(), DIAMOND_PICKAXE, 1);
     }
 }
