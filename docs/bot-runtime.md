@@ -755,10 +755,10 @@ the lever). Goal: `HaveItem(result, count)`, absolute as ever, so a task started
 `game.task.AssembleTask`, registered in `TaskFeature` (issue 18): BuildCraft's assembly table makes nothing without
 laser power and a laser makes none without an engine, so the task is the whole rig.
 
-- **The site.** Three cells in a straight level line on solid ground with air above — table, laser, engine, in that
-  order away from the body — and a fourth on the floor beside the engine for the lever, all free, dry, unoccupied and
-  cells block safety lets this body build on, none of them the body's own, none inside a live danger zone (the body
-  stands there for eight minutes). Found by searching the stances within `AssembleTask.SITE_RADIUS` (8) blocks of the
+- **The site.** Four cells on solid ground with air above — the table and the laser in a straight level line away
+  from the body, the engine beside the laser, the lever on the floor beside the engine — all free, dry, unoccupied
+  and cells block safety lets this body build on, none of them the body's own; the stance is not inside a live
+  danger zone (the body stands there for eight minutes). Found by searching the stances within `AssembleTask.SITE_RADIUS` (8) blocks of the
   body, nearest first; the floor under each cell must offer a top face the stance's eyes can see and reach
   (`Level.clip`, as `TableSites` aims a table's click). None found is `NoPlace` ("put an assembly rig down"), the kind
   the executor gives the goal up at once with. The body walks to the stance, two cells before the table end of the

@@ -68,9 +68,9 @@ import net.minecraft.world.phys.shapes.Shapes;
  * that cannot run. As in the craft and smelt tasks, the leaf's goal is the absolute count after the step, so a task
  * started again makes only what is still missing.
  *
- * <p><b>The rig.</b> Three cells in a straight level line — table, laser, engine — with the lever in a fourth cell on
- * the floor beside the engine, on solid ground with air above, near the body, none of them a cell the rules refuse a
- * block of this body's in. The body stands two cells before the table end of the line, which is far enough that the
+ * <p><b>The rig.</b> Four cells on solid ground with air above, near the body: the table and the laser in a straight
+ * level line away from the body, the engine beside the laser, and the lever on the floor beside the engine, none of
+ * them a cell the rules refuse a block of this body's in. The body stands two cells before the table end of the line, which is far enough that the
  * look at the floor under the laser's cell is more level than steep: a laser faces away from where its placer looks and
  * nothing rotates it later, so it is placed first, from that look, and its facing is read back — it must point back
  * along the line at the table's cell, or the laser comes up again and the task fails {@code Internal} saying what it
@@ -541,7 +541,13 @@ public final class AssembleTask extends BodyTask {
      */
     private boolean placed(BotPlayer body, BlockPos cell, Item item, Block block, String name) {
         ServerLevel level = body.serverLevel();
-        if (level.getBlockState(cell).is(block)) return true;
+        if (level.getBlockState(cell).is(block)) {
+            // Standing already: the task was started again beside its own rig (a restart in the middle of the
+            // step). A block the body's memory says it put down is this task's to take down like one it placed
+            // itself; without this the rig of a resumed step stayed in the world, and the next plan had none.
+            if (BotMemory.of(body.getUUID()).isPlaced(dimensionOf(body), cell)) placedAny = true;
+            return true;
+        }
         if (MenuHand.carriedCount(body, item) < 1) {
             stop(body, new Failure.MissingInput(ItemKeys.of(item), 1, "the " + name + " was carried and is gone"));
             return false;
@@ -814,9 +820,11 @@ public final class AssembleTask extends BodyTask {
         }
         if (product(body) == null) {
             // Another run is owed and nothing lies by the table: the recipe is queued again, for the craft that
-            // finished may have left the queue, and the table lists it afresh while its inputs last.
+            // finished may have left the queue, and the table lists it afresh while its inputs last. The engine
+            // is topped up first with what fuel is still carried: its slot holds one stack, and a leaf of many
+            // runs brings more than that.
             queueTicks = 0;
-            phase = Phase.QUEUE;
+            phase = StationTask.firstCarried(body, fuels) != null ? Phase.FUEL : Phase.QUEUE;
         } else {
             // A drop the pick-up gave up on: the wait goes on beside it, and the stall watch ends the step if the
             // table never makes anything of what is left.
@@ -1393,7 +1401,10 @@ public final class AssembleTask extends BodyTask {
         openRefusals = 0;
         leverClicks = 0;
         queueTicks = 0;
-        phase = Phase.SITE;
+        // A product that came out while the task was paused lies by the table: it is picked up first, and the
+        // pick-up decides whether another run is owed. Queueing again for a leaf whose inputs are used up found
+        // no recipe listed and failed the step with its product on the ground.
+        phase = rig != null && product(body) != null ? Phase.FETCH : Phase.SITE;
     }
 
     /**
