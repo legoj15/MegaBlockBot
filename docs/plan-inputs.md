@@ -134,6 +134,14 @@ container, moves an item or loads a chunk.
   place of the index's sample, and a component-checked item goal is planned through a trade whose result satisfies
   its check — the source's own enchantments, or a noted offer's facts — paying that offer's charge
   (`SolverPlanner.checkedPlan`). Saved with the brain, like the containers.
+- `biome`: the id of the biome at the body's block position (`level.getBiome(at).unwrapKey()`, the key's location),
+  `""` when not known. The cost model charges a mining source whose block only some biomes place (`MineBlock.biomes`,
+  read by `BlockBiomes`, see `docs/resolver.md`) with `PlannerConfig.otherBiome` (6000, twice a trade's base) when the
+  body stands in none of those biomes and the block is not in its sight: the price of the journey to a biome that
+  does place it, so where a trade gives the item the trade is the cheaper way (the mending book near a taiga village
+  is traded for, not mined from the mountain ore). A block the body can see is here whatever the map says, and cost
+  only reorders: where the mine is the only source it is still the plan. A snapshot with no biome prices everything
+  as it always did.
 - `nearbyBlocks` (the sight, `BodySight`): block id to the horizontal distance of the nearest such block, for the blocks
   `AcquisitionIndex.sourceBlocks()` names (every mining or harvesting source's block). A scan reads the chunks that
   are loaded now (`ServerChunkCache.getChunkNow`; a chunk that is not loaded is skipped, never loaded) within

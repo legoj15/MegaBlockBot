@@ -30,6 +30,9 @@ import java.util.TreeMap;
  * @param unseenPenalty   cost added to a mining or harvesting source whose block is not in the sight, once the sight
  *                        holds anything. Larger than any seen block's charge, which {@link #sightCharge} caps at
  *                        {@code unseenPenalty - 1}, so a block in sight is always cheaper than the same one out of it
+ * @param otherBiome      cost added to a mining source whose block only some biomes place, when the body stands in
+ *                        none of them and the block is not in its sight: the price of the journey to a biome that
+ *                        does place it
  * @param maxTotalReplans the replan total a plan carries when no strategy declares a higher one (design 3.4)
  * @param provisionBelowY the level a plan is said to go underground below it (brief K19): a plan with a mining step
  *                        whose ore's best level is below it is a plan that digs in the dark, where a body needs
@@ -51,18 +54,18 @@ import java.util.TreeMap;
  * @param toolItems       tool item per class and tier, keyed by {@link #toolKey}; see {@link #toolItem}
  */
 public record PlannerConfig(long mineBase, long deepOre, long toolStep, long harvest, long kill, long useOn, long fish,
-                            long trade, long sightStep, long unseenPenalty, int maxTotalReplans, int provisionBelowY,
-                            List<ItemKey> provisionWeapons, int provisionFoodCount, List<ItemKey> provisionFoods,
-                            Map<String, ItemKey> toolItems) {
+                            long trade, long sightStep, long unseenPenalty, long otherBiome, int maxTotalReplans,
+                            int provisionBelowY, List<ItemKey> provisionWeapons, int provisionFoodCount,
+                            List<ItemKey> provisionFoods, Map<String, ItemKey> toolItems) {
     /**
      * Sorted, defensively copied, read-only: table iteration must not depend on how it was built. ({@code Map.copyOf}
      * would drop the order, and its own iteration order differs from one JVM to the next.) The provision lists keep
      * the order they were given, which is their preference order.
      */
     public PlannerConfig {
-        if (sightStep < 0 || unseenPenalty < 1) {
-            throw new IllegalArgumentException("sightStep must be at least 0 and unseenPenalty at least 1, got "
-                    + sightStep + " and " + unseenPenalty);
+        if (sightStep < 0 || unseenPenalty < 1 || otherBiome < 0) {
+            throw new IllegalArgumentException("sightStep must be at least 0, unseenPenalty at least 1 and otherBiome "
+                    + "at least 0, got " + sightStep + ", " + unseenPenalty + " and " + otherBiome);
         }
         if (provisionFoodCount < 0) {
             throw new IllegalArgumentException("provisionFoodCount must be at least 0, got " + provisionFoodCount);
@@ -76,11 +79,14 @@ public record PlannerConfig(long mineBase, long deepOre, long toolStep, long har
      * The documented defaults of the table above: vanilla costs, the executor's replan budget. A block in sight
      * costs one per block of distance, at most 112 away with the collector's radius of 4 chunks; a block out of
      * sight costs 250 more, over twice that, and still below a tool step (400) so that what the body can see
-     * reorders choices between alternatives without outweighing a missing tool.
+     * reorders choices between alternatives without outweighing a missing tool. A block only some biomes place
+     * costs 6000 more to mine from a biome that does not, twice a trade's base (3000), so that where a trade gives
+     * the item the trade is the cheaper way and the journey to another biome is what is left when nothing else
+     * gives it; cost only reorders, it never forbids the mine.
      */
     public static PlannerConfig defaults() {
-        return new PlannerConfig(40, 600, 400, 200, 600, 600, 1200, 3000, 1, 250, 12, 0, vanillaProvisionWeapons(), 8,
-                vanillaProvisionFoods(), vanillaToolItems());
+        return new PlannerConfig(40, 600, 400, 200, 600, 600, 1200, 3000, 1, 250, 6000, 12, 0,
+                vanillaProvisionWeapons(), 8, vanillaProvisionFoods(), vanillaToolItems());
     }
 
     /**
@@ -138,7 +144,7 @@ public record PlannerConfig(long mineBase, long deepOre, long toolStep, long har
     /** A copy of this config whose tool table is replaced, for a modded or test table. */
     public PlannerConfig withToolItems(Map<String, ItemKey> replacement) {
         return new PlannerConfig(mineBase, deepOre, toolStep, harvest, kill, useOn, fish, trade, sightStep,
-                unseenPenalty, maxTotalReplans, provisionBelowY, provisionWeapons, provisionFoodCount, provisionFoods,
-                replacement);
+                unseenPenalty, otherBiome, maxTotalReplans, provisionBelowY, provisionWeapons, provisionFoodCount,
+                provisionFoods, replacement);
     }
 }

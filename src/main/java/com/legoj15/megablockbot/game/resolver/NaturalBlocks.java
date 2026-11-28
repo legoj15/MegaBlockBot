@@ -79,8 +79,22 @@ final class NaturalBlocks {
         }
     }
 
+    /** The blocks the terrain settings name, the half of {@link #read} that says where the ground itself comes from. */
+    static Set<String> terrainPlaced(MinecraftServer server, BuildNotes notes) {
+        Set<String> found = new TreeSet<>();
+        RegistryOps<JsonElement> ops = RegistryOps.create(JsonOps.INSTANCE, server.registryAccess());
+        scan(server, Registries.NOISE_SETTINGS, NoiseGeneratorSettings.DIRECT_CODEC, ops, found, notes, "terrain settings");
+        found.remove(BuiltInRegistries.BLOCK.getKey(Blocks.AIR).toString());
+        return found;
+    }
+
+    /** The blocks the world makes from code, with nothing in a feature's configuration to read (see {@link #PLACED_BY_CODE}). */
+    static Set<String> placedByCode() {
+        return PLACED_BY_CODE.keySet();
+    }
+
     /** Every string anywhere in the tree that is the id of a registered block. */
-    private static void collect(JsonElement element, Set<String> found) {
+    static void collect(JsonElement element, Set<String> found) {
         if (element.isJsonPrimitive()) {
             if (!element.getAsJsonPrimitive().isString()) return;
             // A written id carries its namespace; a bare word is the value of a block property ("bell", an instrument).

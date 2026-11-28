@@ -216,8 +216,9 @@ final class SolverPlannerTest {
         PlannerConfig defaults = PlannerConfig.defaults();
         return new PlannerConfig(1000, defaults.deepOre(), toolStep, defaults.harvest(), defaults.kill(),
                 defaults.useOn(), defaults.fish(), defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(),
-                defaults.maxTotalReplans(), defaults.provisionBelowY(), defaults.provisionWeapons(),
-                defaults.provisionFoodCount(), defaults.provisionFoods(), defaults.toolItems());
+                defaults.otherBiome(), defaults.maxTotalReplans(), defaults.provisionBelowY(),
+                defaults.provisionWeapons(), defaults.provisionFoodCount(), defaults.provisionFoods(),
+                defaults.toolItems());
     }
 
     private static Exclusions without(String... sources) {
@@ -1745,8 +1746,9 @@ final class SolverPlannerTest {
         PlannerConfig defaults = PlannerConfig.defaults();
         return new PlannerConfig(1, defaults.deepOre(), 0, defaults.harvest(), defaults.kill(), defaults.useOn(),
                 defaults.fish(), defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(),
-                defaults.maxTotalReplans(), defaults.provisionBelowY(), defaults.provisionWeapons(),
-                defaults.provisionFoodCount(), defaults.provisionFoods(), defaults.toolItems());
+                defaults.otherBiome(), defaults.maxTotalReplans(), defaults.provisionBelowY(),
+                defaults.provisionWeapons(), defaults.provisionFoodCount(), defaults.provisionFoods(),
+                defaults.toolItems());
     }
 
     @Test
@@ -2190,9 +2192,9 @@ final class SolverPlannerTest {
     private static PlannerConfig flatMining() {
         PlannerConfig defaults = PlannerConfig.defaults();
         return new PlannerConfig(1000, 0, 0, defaults.harvest(), defaults.kill(), defaults.useOn(), defaults.fish(),
-                defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(), defaults.maxTotalReplans(),
-                defaults.provisionBelowY(), defaults.provisionWeapons(), defaults.provisionFoodCount(),
-                defaults.provisionFoods(), defaults.toolItems());
+                defaults.trade(), defaults.sightStep(), defaults.unseenPenalty(), defaults.otherBiome(),
+                defaults.maxTotalReplans(), defaults.provisionBelowY(), defaults.provisionWeapons(),
+                defaults.provisionFoodCount(), defaults.provisionFoods(), defaults.toolItems());
     }
 
     private static SolverPlanner ironPlanner() {
@@ -3086,6 +3088,77 @@ final class SolverPlannerTest {
         assertNotEquals(planner.inputFingerprint(sticks, EMPTY), planner.inputFingerprint(sticks, elsewhere));
     }
 
+    // ─── Where the body stands: a block only some biomes place (issue #31) ────────────────────────
+
+    private static final String MEADOW = "minecraft:meadow";
+    private static final String TAIGA = "minecraft:taiga";
+    private static final String EMERALD_ORE_BLOCK = "minecraft:emerald_ore";
+
+    /** A snapshot whose news is only where the body stands: its biome ("" for not known) and what it can see. */
+    private static Snapshot standingIn(String biome, Map<String, Integer> nearby) {
+        Snapshot.Builder builder = Snapshot.builder().gameTime(0)
+                .dimension("minecraft:overworld").pos(new Pos(0, 64, 0));
+        if (!biome.isEmpty()) builder.biome(biome);
+        nearby.forEach(builder::nearby);
+        return builder.build();
+    }
+
+    /**
+     * The index of these tests: emeralds are mined from an ore only the meadow places (a stone pickaxe opens it) and,
+     * unless the caller says not, traded for sticks — the shape of the goal that found this, an enchanted book of
+     * mending near a taiga village.
+     */
+    private static SolverPlanner emeraldPlanner(boolean withTrade) {
+        AcquisitionIndex.Builder builder = indexBuilder(ToolTier.IRON);
+        builder.addItem(EMERALD);
+        builder.addSource(new Source.MineBlock("mine:minecraft:emerald_ore", EMERALD, EMERALD_ORE_BLOCK,
+                ToolClass.PICKAXE, ToolTier.STONE, true, false, false, 1.0, false,
+                new Source.OreRange(4, 480, 224), true, Set.of(MEADOW)));
+        if (withTrade) {
+            builder.addSource(new Source.Trade("trade:minecraft:fletcher#emerald", EMERALD, "minecraft:fletcher", 1,
+                    Map.of(STICK, 16), Map.of(), 1.0));
+        }
+        return planner(book(), builder.build());
+    }
+
+    @Test
+    void anOreOnlyAnotherBiomePlacesIsTradedForAndOneTheBodysBiomePlacesIsMined() {
+        // The ore is bound to the meadow alone. In a taiga the trade for sticks is the cheaper way there, the mine
+        // carrying the journey to a biome that places the block; in the meadow the mine is, and with no biome in the
+        // snapshot the plan is the plan it always was; and the ore the body can see is mined whatever the biome.
+        SolverPlanner planner = emeraldPlanner(true);
+        Goal.HaveItem emerald = new Goal.HaveItem(EMERALD, 1);
+
+        Plan traded = planned(planner, request(emerald, standingIn(TAIGA, Map.of()), Exclusions.NONE));
+        assertTrue(sources(traded).contains("trade:minecraft:fletcher#emerald"),
+                "in a taiga the trade is the cheaper way: " + sources(traded));
+        assertFalse(sources(traded).contains("mine:minecraft:emerald_ore"), sources(traded).toString());
+        assertRunsToTheGoal(traded, book(), Map.of(), Map.of(), EMERALD, 1);
+
+        // The meadow places the ore; the fixture's own snapshot (biome "") says nothing of where the body stands.
+        for (Snapshot atHome : List.of(standingIn(MEADOW, Map.of()), EMPTY)) {
+            Plan mined = planned(planner, request(emerald, atHome, Exclusions.NONE));
+            assertTrue(sources(mined).contains("mine:minecraft:emerald_ore"),
+                    "the mine is the cheaper way for " + atHome.biome() + ": " + sources(mined));
+            assertFalse(sources(mined).contains("trade:minecraft:fletcher#emerald"), sources(mined).toString());
+        }
+
+        Plan sighted = planned(planner, request(emerald, standingIn(TAIGA, Map.of(EMERALD_ORE_BLOCK, 7)), Exclusions.NONE));
+        assertTrue(sources(sighted).contains("mine:minecraft:emerald_ore"),
+                "a block in sight is here whatever the map says: " + sources(sighted));
+        assertFalse(sources(sighted).contains("trade:minecraft:fletcher#emerald"), sources(sighted).toString());
+    }
+
+    @Test
+    void anOreNoTradeSellsIsStillMinedFromABiomeTheBodyIsNotIn() {
+        // The charge reorders choices, it never forbids: with the mine the only source, a plan is still made and
+        // runs through the ore of a biome the body does not stand in.
+        SolverPlanner planner = emeraldPlanner(false);
+        Plan plan = planned(planner, request(new Goal.HaveItem(EMERALD, 1), standingIn(TAIGA, Map.of()), Exclusions.NONE));
+        assertTrue(sources(plan).contains("mine:minecraft:emerald_ore"), sources(plan).toString());
+        assertRunsToTheGoal(plan, book(), Map.of(), Map.of(), EMERALD, 1);
+    }
+
     // ─── The fingerprint and determinism (item 8) ────────────────────────────────────────────────
 
     @Test
@@ -3309,8 +3382,8 @@ final class SolverPlannerTest {
         PlannerConfig defaults = PlannerConfig.defaults();
         PlannerConfig off = new PlannerConfig(defaults.mineBase(), defaults.deepOre(), defaults.toolStep(),
                 defaults.harvest(), defaults.kill(), defaults.useOn(), defaults.fish(), defaults.trade(),
-                defaults.sightStep(), defaults.unseenPenalty(), defaults.maxTotalReplans(), Integer.MIN_VALUE,
-                defaults.provisionWeapons(),
+                defaults.sightStep(), defaults.unseenPenalty(), defaults.otherBiome(), defaults.maxTotalReplans(),
+                Integer.MIN_VALUE, defaults.provisionWeapons(),
                 defaults.provisionFoodCount(), defaults.provisionFoods(), defaults.toolItems());
         return new SolverPlanner(provisionBook(), provisionIndex(food), off, List.of());
     }

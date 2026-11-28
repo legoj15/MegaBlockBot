@@ -104,6 +104,19 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
   from being mined. The cost of the rule is a block missing from both the read and the list: its item then has no
   mining source and the goal says so at once, which is the cue to add the line. A failed read counts every block as
   generated: a wasted search at worst, never a lost source.
+- Which biomes place a bound block (`MineBlock.biomes`, read by `BlockBiomes`): every biome's placed features are
+  walked — the same overworld/nether/end split by tag as the ore ranges — and each configured feature among them is
+  taken through the game's own flattening (`PlacedFeature.getFeatures`, the random selectors and patches), written
+  out through `ConfiguredFeature.DIRECT_CODEC` and its block ids collected the way `NaturalBlocks` collects them,
+  cached per configured feature (sixty biomes share most of their features). A block is **bound** when, in every
+  dimension group where some biome places it, fewer than half of that group's biomes do (emerald ore: about ten of
+  the overworld's sixty; iron: all but the void); the map holds only bound blocks, each with the sorted ids of the
+  biomes that place it. A block the terrain settings or `PLACED_BY_CODE` names is never bound, and one no biome's
+  features name is not in the map at all. What it misses is what `NaturalBlocks` misses: structures, and blocks a
+  feature's code places with nothing in its configuration to read. A configured feature that fails to write out or
+  throws costs that feature (counted in the notes), never the section; a failed read is an empty map and a note, and
+  every block then prices as one no biome is bound to. The cost model's use of it is
+  `PlannerConfig.otherBiome` (see `docs/plan-inputs.md`).
 - Kill sources: entity types that have attributes (a living entity), other than the player and the armor stand. Each
   carries what the fight is, from the type's default attributes: `health` (max health), `attack` (attack damage, 0
   when it has none) and `spawnsNaturally` (its spawn category is not `MISC`: a golem or a villager stands only where a
@@ -170,7 +183,9 @@ assembly table is obtainable, not unobtainable.
 
 Global loot modifiers, mob drops coded outside loot tables beyond the rows the game-code table names (a totem of
 undying, a goat horn), blocks that drop their own item but never exist naturally, and trades rarer than about 1 in 20
-per listing. Recipes of special crafting types (armor dyeing, firework rockets, tipped arrows) report no result item,
+per listing. Which biomes place a block is said only of the bound ones: a structure's blocks and what a feature's
+code places are nowhere in that map, the gaps `NaturalBlocks` has for whether a block generates at all. Recipes of
+special crafting types (armor dyeing, firework rockets, tipped arrows) report no result item,
 so what only they make is not in `craftable()` and has no known way either. With the `trade_rebalance` feature on,
 villagers and the wandering trader use the experimental per-biome trade lists, which are not sampled. Yields are
 level-0 (no fortune, looting or luck); a yield that block state decides is the default state's for a mined block and

@@ -104,6 +104,7 @@ public final class SnapshotCollector {
         Snapshot.Builder builder = Snapshot.builder()
             .gameTime(level.getGameTime())
             .dimension(dimension)
+            .biome(level.getBiome(at).unwrapKey().map(k -> k.location().toString()).orElse(""))
             .pos(pos(at))
             .health(body.getHealth())
             .hunger(body.getFoodData().getFoodLevel());

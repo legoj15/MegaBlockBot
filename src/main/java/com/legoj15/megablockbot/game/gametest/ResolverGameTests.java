@@ -119,6 +119,26 @@ public final class ResolverGameTests {
         helper.succeed();
     }
 
+    // Where a block generates (issue #31): the index says which biomes place a bound block, so a mine whose vein is a
+    // journey away can be priced as one. Emerald ore is placed by the mountain biomes (about ten of the overworld's
+    // sixty), iron by all but the void, stone by the terrain itself, and a jungle log by the jungle.
+    @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
+    public static void boundBlocksCarryTheBiomesThatPlaceThem(GameTestHelper helper) {
+        AcquisitionIndex index = index(helper);
+        Set<String> emerald = mine(helper, index, "minecraft:emerald", "minecraft:emerald_ore", false).biomes();
+        helper.assertTrue(emerald.contains("minecraft:windswept_hills"),
+            "the windswept hills do not place emerald ore: " + emerald);
+        helper.assertTrue(!emerald.contains("minecraft:plains"), "the plains place emerald ore: " + emerald);
+        Set<String> iron = mine(helper, index, "minecraft:raw_iron", "minecraft:iron_ore", false).biomes();
+        helper.assertTrue(iron.isEmpty(), "iron ore is bound to biomes: " + iron);
+        Set<String> stone = mine(helper, index, "minecraft:cobblestone", "minecraft:stone", false).biomes();
+        helper.assertTrue(stone.isEmpty(), "stone is bound to biomes: " + stone);
+        Set<String> jungleLog = mine(helper, index, "minecraft:jungle_log", "minecraft:jungle_log", false).biomes();
+        helper.assertTrue(jungleLog.contains("minecraft:jungle"), "the jungle does not place its own log: " + jungleLog);
+        helper.assertTrue(!jungleLog.contains("minecraft:plains"), "the plains place jungle logs: " + jungleLog);
+        helper.succeed();
+    }
+
     @GameTest(templateNamespace = MegaBlockBot.MOD_ID, template = "empty", timeoutTicks = 20)
     public static void logsNeedNoTool(GameTestHelper helper) {
         AcquisitionIndex index = index(helper);

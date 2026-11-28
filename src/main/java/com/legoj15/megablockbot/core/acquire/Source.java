@@ -5,7 +5,9 @@ import com.legoj15.megablockbot.core.ToolClass;
 import com.legoj15.megablockbot.core.ToolTier;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 
 /**
  * One way a survival player can obtain an item (design 4.3). Immutable and Minecraft-free: the planner reads these
@@ -38,16 +40,27 @@ public sealed interface Source {
      * @param ore       where the block generates as an ore, or null when no ore placed feature produces it
      * @param generated true when the world generator places the block (a feature or the terrain names it); false for
      *                  one that stands only in a structure or where someone placed it
+     * @param biomes    the biomes whose features place the block, when fewer than half the biomes of its dimension
+     *                  do; empty when it is widespread, placed by the terrain or by code, or not known
      */
     record MineBlock(String id, ItemKey item, String block, ToolClass toolClass, ToolTier minTier, boolean toolRequired,
                      boolean needsSilkTouch, boolean needsShears, double yield, boolean random, OreRange ore,
-                     boolean generated)
+                     boolean generated, Set<String> biomes)
         implements Source {
         public MineBlock {
             Objects.requireNonNull(id, "id");
             Objects.requireNonNull(item, "item");
             Objects.requireNonNull(block, "block");
             Objects.requireNonNull(minTier, "minTier");
+            biomes = biomes == null ? Set.of() : java.util.Collections.unmodifiableSet(new TreeSet<>(biomes));
+        }
+
+        /** The form without biomes: a block that is widespread, placed by the terrain or by code, or not known. */
+        public MineBlock(String id, ItemKey item, String block, ToolClass toolClass, ToolTier minTier, boolean toolRequired,
+                         boolean needsSilkTouch, boolean needsShears, double yield, boolean random, OreRange ore,
+                         boolean generated) {
+            this(id, item, block, toolClass, minTier, toolRequired, needsSilkTouch, needsShears, yield, random, ore,
+                generated, Set.of());
         }
 
         /** A block the world generates: what a fixture that is not about where blocks come from needs. */

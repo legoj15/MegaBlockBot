@@ -16,6 +16,7 @@ import java.util.Map;
  * What the body knows at one instant (design 3.4, Snapshot). Immutable and Minecraft-free. Collected on the
  * server thread; collecting it never changes state. Postconditions and the planner read nothing else.
  *
+ * @param biome        the id of the biome at the body's position, "" when not known
  * @param items       inventory, armour and offhand counts by item key
  * @param equipped    what is worn or held right now
  * @param bestTools   best tier carried per tool class; a missing class means none ({@link ToolTier#HAND})
@@ -39,6 +40,7 @@ import java.util.Map;
 public record Snapshot(
         long gameTime,
         String dimension,
+        String biome,
         Pos pos,
         float health,
         int hunger,
@@ -96,6 +98,7 @@ public record Snapshot(
     public static final class Builder {
         private long gameTime;
         private String dimension = "minecraft:overworld";
+        private String biome = "";
         private Pos pos = new Pos(0, 64, 0);
         private float health = 20f;
         private int hunger = 20;
@@ -114,6 +117,10 @@ public record Snapshot(
 
         public Builder gameTime(long t) { gameTime = t; return this; }
         public Builder dimension(String d) { dimension = d; return this; }
+
+        /** The biome at the body's position, or the builder's "" when never said. */
+        public Builder biome(String b) { biome = b; return this; }
+
         public Builder pos(Pos p) { pos = p; return this; }
         public Builder health(float h) { health = h; return this; }
         public Builder hunger(int h) { hunger = h; return this; }
@@ -149,7 +156,7 @@ public record Snapshot(
         public Snapshot build() {
             Map<ItemKey, List<StackFacts>> facts = new HashMap<>();
             stackFacts.forEach((k, v) -> facts.put(k, List.copyOf(v)));
-            return new Snapshot(gameTime, dimension, pos, health, hunger, foodUnits, items, equipped, bestTools,
+            return new Snapshot(gameTime, dimension, biome, pos, health, hunger, foodUnits, items, equipped, bestTools,
                     stations, containers, facts, structures, observations, offers, nearbyBlocks, deliveries);
         }
     }

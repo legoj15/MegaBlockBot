@@ -125,7 +125,9 @@ public final class AcquisitionIndexBuilder {
         // Null when the read failed: every block then counts as generated, so one bad feature costs the planner a
         // wasted search at worst and never its sources.
         Set<String> generated = section("generated blocks", () -> NaturalBlocks.read(server, notes), null);
-        section("block loot", () -> blocks(ores, generated));
+        // Empty when the read failed: no block is then bound anywhere, so the planner prices mines as it always did.
+        Map<String, Set<String>> boundBiomes = section("block biomes", () -> BlockBiomes.read(server, notes), Map.of());
+        section("block loot", () -> blocks(ores, generated, boundBiomes));
         section("entity loot", this::entities);
         section("fishing", this::fishing);
         section("chest loot", this::chests);
@@ -190,7 +192,7 @@ public final class AcquisitionIndexBuilder {
     // Many blocks share a table (drops_like), and the evaluation is per table and per state rule.
     private record TableRule(String table, LootEval.StateRule rule) {}
 
-    private void blocks(Map<String, OreRange> ores, Set<String> generated) {
+    private void blocks(Map<String, OreRange> ores, Set<String> generated, Map<String, Set<String>> boundBiomes) {
         Map<TableRule, List<Route>> routesByTable = new HashMap<>();
         List<Block> blocks = new ArrayList<>();
         BuiltInRegistries.BLOCK.forEach(blocks::add);
@@ -230,7 +232,7 @@ public final class AcquisitionIndexBuilder {
                     index.addSource(new Source.MineBlock(id, item, blockId,
                         shears ? ToolClass.SHEARS : toolClass, shears ? ToolTier.HAND : tier, toolRequired, silk, shears,
                         route.expected(), route.random(), ores.get(blockId),
-                        generated == null || generated.contains(blockId)));
+                        generated == null || generated.contains(blockId), boundBiomes.getOrDefault(blockId, Set.of())));
                 }
             } catch (RuntimeException e) {
                 notes.skipped("blocks that threw while their loot table or their properties were read", blockId + " (" + e.getClass().getSimpleName() + ")");

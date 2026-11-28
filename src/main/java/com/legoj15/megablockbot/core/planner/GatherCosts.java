@@ -43,6 +43,12 @@ import java.util.function.ToLongFunction;
  * only block sources would move them against kills, fishing, trades, crafts and a strategy's proposal, and today's
  * choices would no longer be today's.
  *
+ * <p>Where the body stands (the snapshot's biome): a mining source whose block only some biomes place (the index
+ * says which, {@code MineBlock.biomes}) costs {@link PlannerConfig#otherBiome()} on top when the body stands in none
+ * of those biomes and the block is not in its sight — the ore is in the mountains and the body is in a taiga, so the
+ * price carries the journey, and a block the body can see is here whatever the map says. A snapshot with no biome of
+ * its own prices everything as it always did.
+ *
  * <p>A mining source whose required tool cannot be had at all (see {@link #toolObtainable}) costs {@code UNOBTAINABLE}:
  * the solver then never lists a craftable item as a gather through it, while the planner still tries the source last,
  * so the failure reported for an item with no other way is that source's own.
@@ -329,7 +335,19 @@ public final class GatherCosts implements CostModel<String, ItemKey> {
 
     private long breakingCost(Source.MineBlock mine) {
         long cost = ceilDiv(config.mineBase(), mine.yield());
-        return sighted(mine.ore() != null ? saturatingAdd(cost, config.deepOre()) : cost, mine.block());
+        if (mine.ore() != null) cost = saturatingAdd(cost, config.deepOre());
+        cost = sighted(cost, mine.block());
+        return awayFromItsBiomes(mine) ? saturatingAdd(cost, config.otherBiome()) : cost;
+    }
+
+    /**
+     * Whether the body stands in none of the biomes that place the source's block and cannot see the block: the
+     * charge for a mine whose vein is a journey away. A block the sight holds is here whatever the map says, and a
+     * snapshot with no biome, or a block no biome is bound to, never pays it.
+     */
+    private boolean awayFromItsBiomes(Source.MineBlock mine) {
+        return !mine.biomes().isEmpty() && !snapshot.biome().isEmpty() && !mine.biomes().contains(snapshot.biome())
+            && !snapshot.nearbyBlocks().containsKey(mine.block());
     }
 
     /**
