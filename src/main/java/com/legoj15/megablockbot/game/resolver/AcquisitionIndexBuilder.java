@@ -132,8 +132,20 @@ public final class AcquisitionIndexBuilder {
         // and when that fails too every block counts as generated: a wasted search at worst, never a lost source.
         // With no biome read no block is bound anywhere, and the planner prices mines as it always did.
         BlockBiomes.Read where = section("block biomes", () -> BlockBiomes.read(server, notes), null);
-        Set<String> generated = where != null ? where.placed()
-            : section("generated blocks", () -> NaturalBlocks.read(server, notes), null);
+        Set<String> generated;
+        if (where != null && where.skipped() == 0) {
+            generated = where.placed();
+        } else {
+            // The read failed, or left a biome or a feature out: what it missed may be a block the generator does
+            // place, and calling that "made" would take a real source away. The registry's wider answer is added.
+            Set<String> registry = section("generated blocks", () -> NaturalBlocks.read(server, notes), null);
+            if (where == null || registry == null) {
+                generated = registry;
+            } else {
+                generated = new TreeSet<>(registry);
+                generated.addAll(where.placed());
+            }
+        }
         Map<String, Set<String>> boundBiomes = where != null ? where.bound() : Map.of();
         section("block loot", () -> blocks(ores, generated, boundBiomes));
         section("entity loot", this::entities);

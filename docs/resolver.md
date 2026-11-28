@@ -120,10 +120,12 @@ Design: `AI-PLAYER-DESIGN.md` 4.3. Bot nodes only (1.21.1). Facts about the vani
   dimension group places it in at least half of its biomes: emerald ore (about ten of the overworld's sixty) is the
   mountains', and iron (every overworld biome but the void, none of the nether's or the end's) is the overworld's,
   which costs a body in the overworld nothing and tells one in the nether the truth. The map holds only bound
-  blocks, each with the sorted ids of the biomes that place it. The ground of the nether and of the end
-  (the blocks their terrain settings name and the overworld's do not) and what the game's code places only there
-  (glowstone, basalt, the chorus flower) is bound to that dimension's biomes; which overworld biome's ground holds
-  sand or terracotta is in the surface rules' conditions, which are not read, so those count as the overworld's own. A block the terrain settings or `PLACED_BY_CODE` names is never bound, and one no biome's
+  blocks, each with the sorted ids of the biomes that place it. The ground of each dimension (the blocks its
+  terrain settings name) and what the game's code places only there (glowstone, basalt, the chorus flower) is
+  every biome's of that dimension, so stone is the overworld's and netherrack the nether's; which overworld
+  biome's ground holds sand or terracotta is in the surface rules' conditions, which are not read, so those count
+  as every overworld biome's. When the read left a biome or a feature out, "generated" is widened by the feature
+  registry's answer, so an incomplete read costs a wasted search and never a source. A block the terrain settings or `PLACED_BY_CODE` names is never bound, and one no biome's
   features name is not in the map at all. What it misses is what `NaturalBlocks` misses: structures, and blocks a
   feature's code places with nothing in its configuration to read. A configured feature that fails to write out or
   throws costs that feature (counted in the notes), never the section; a failed read is an empty map and a note, and

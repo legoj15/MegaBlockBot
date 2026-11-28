@@ -904,6 +904,7 @@ public final class TradeTask extends BodyTask {
             return TickResult.RUNNING;
         }
         villager = who;
+        restockTicks = 0; // the wait for a restock is counted for the offer taken now, not for one before it
         rolled = null; // a trade begun is not a roll any more: its site stays down and the villager keeps its job
         MegaBlockBot.LOGGER.info("{}: takes the {}'s offer of {} x{} for {}", body.getGameProfile().getName(),
             profession, itemKey.id(), offer.getResult().getCount(), chargesOf(offer));

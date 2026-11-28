@@ -115,6 +115,11 @@ final class NightReflex implements Reflex {
     private int digTicks;
     /** The night a digging found nothing more to be had: it is not tried again that night. */
     private long noDigNight = Long.MIN_VALUE;
+    /** Where that was: the ground a body has since walked away from is asked about afresh. */
+    @Nullable
+    private BlockPos noDigAt;
+    /** What breaking a kind of block with a kind of tool was found to drop, so the question rolls its loot once. */
+    private final java.util.Map<String, Boolean> shelterDrops = new java.util.HashMap<>();
 
     // The bed.
     @Nullable
@@ -203,15 +208,6 @@ final class NightReflex implements Reflex {
             beginShelter(ctx);
             return true;
         }
-        // The ground was tried this night and had nothing more to give (bare stone, protected ground): the note, as
-        // before, and no second dig. It is asked after the question above, so a body that has come to carry the
-        // blocks since (a chest it took from, its own drops) still builds with them.
-        if (noDigNight == night) {
-            ctx.layer.note(have == 0
-                ? "night, and nothing to build a shelter with"
-                : "night, and nothing more to dig a shelter from here");
-            return false;
-        }
         // Not here: somewhere near that will do, if there is such a place.
         BlockPos better = grounded ? findSpot(ctx) : null;
         if (better != null) {
@@ -223,13 +219,27 @@ final class NightReflex implements Reflex {
         }
         // Short of blocks, and no spot near needs fewer of them: dig in where it stands (issue 21).
         if (grounded && have < needed) {
+            // The ground hereabouts was tried this night and had nothing more to give: no second dig until the body
+            // stands somewhere else. Asked here, after the two questions above, so that blocks it has come to
+            // carry since still build a shelter, and a spot they can close is still walked to.
+            if (noDigNight == night && noDigAt != null && here.closerThan(noDigAt, ReflexConstants.NIGHT_DIG_AGAIN_BLOCKS)) {
+                waiting = have == 0
+                    ? "night, and nothing to build a shelter with"
+                    : "night, and nothing more to dig a shelter from here";
+                ctx.layer.note(waiting);
+                retryAt = ctx.time + ReflexConstants.SHELTER_RETRY_TICKS;
+                return false;
+            }
             int depth = pitDepth(ctx, here, ReflexConstants.NIGHT_DIG_DEPTH);
             if (depth == 0) {
                 // Nothing to build with and nothing to be had from the ground here (bare stone, a roof of leaves,
-                // ground the break rules protect): the note it always gave, once that night, and no hold.
+                // ground the break rules protect): the note it always gave, and no hold.
                 noDigNight = night;
+                noDigAt = here.immutable();
                 ctx.layer.setNightResult(NightResult.NOTHING_TO_BUILD_WITH);
-                ctx.layer.note("night, and nothing to build a shelter with");
+                waiting = "night, and nothing to build a shelter with";
+                ctx.layer.note(waiting);
+                retryAt = ctx.time + ReflexConstants.SHELTER_RETRY_TICKS;
                 return false;
             }
             startNight(ctx);
@@ -542,6 +552,7 @@ final class NightReflex implements Reflex {
         MegaBlockBot.LOGGER.info("reflex {}: night digging ended after {} ticks, {} deep, with {} shelter blocks ({})",
             ctx.body.getGameProfile().getName(), digTicks, deep, have, why);
         noDigNight = nightIndex(ctx.level);
+        noDigAt = ctx.body.blockPosition().immutable();
         waiting = ""; // the note of a night with nothing to dig is the noDigNight branch's, not an old spot problem's
         outcome = "dug " + deep + " deep and got " + (have - digStartedWith) + " shelter blocks, not enough to close in: " + why;
         ctx.layer.setNightResult(NightResult.NOTHING_TO_BUILD_WITH);
@@ -612,13 +623,17 @@ final class NightReflex implements Reflex {
      * Whether breaking this cell with the best tool at hand puts a shelter block in the pack: the game's own answer,
      * from the block's loot (a grass block drops dirt, stone drops cobblestone to a pickaxe and nothing to a hand).
      */
-    private static boolean dropsShelterBlock(ReflexContext ctx, BlockPos cell, BlockState state) {
+    private boolean dropsShelterBlock(ReflexContext ctx, BlockPos cell, BlockState state) {
         ItemStack tool = toolFor(ctx, state);
         if (state.requiresCorrectToolForDrops() && !tool.isCorrectToolForDrops(state)) return false;
-        for (ItemStack drop : Block.getDrops(state, ctx.level, cell, null, ctx.body, tool)) {
-            if (Hands.isShelterBlock(drop)) return true;
-        }
-        return false;
+        // Asked once a kind of block and tool: the answer is the loot table's, and rolling it every tick of a dig
+        // would draw on the world's own random for a question.
+        return shelterDrops.computeIfAbsent(state + "|" + tool.getItem(), key -> {
+            for (ItemStack drop : Block.getDrops(state, ctx.level, cell, null, ctx.body, tool)) {
+                if (Hands.isShelterBlock(drop)) return true;
+            }
+            return false;
+        });
     }
 
     /**

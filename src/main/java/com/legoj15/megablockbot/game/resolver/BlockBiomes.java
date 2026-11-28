@@ -62,24 +62,27 @@ final class BlockBiomes {
      *               structure's own feature holds (the hay of a village's hay pile) is not among them: the
      *               feature registry lists that pile, but no biome places it, and a plan that priced hay bales
      *               as lying about set out to mine eighty-five of them for a farmer's wheat.
+     * @param skipped how many biomes and features could not be read. Above zero {@code placed} may lack a block the
+     *                generator does place, so the caller must not take it for the whole answer.
      */
-    record Read(Map<String, Set<String>> bound, Set<String> placed) {}
+    record Read(Map<String, Set<String>> bound, Set<String> placed, int skipped) {}
 
     static Read read(MinecraftServer server, BuildNotes notes) {
         RegistryAccess access = server.registryAccess();
         RegistryOps<JsonElement> ops = RegistryOps.create(JsonOps.INSTANCE, access);
         Registry<Biome> biomes = access.registryOrThrow(Registries.BIOME);
 
-        // The blocks the overworld's ground is made of, and those the game's code places wherever it places them,
-        // are not bound to any biome. (Which biome's ground holds sand or terracotta is in the surface rules'
-        // conditions, which are not read: they count as the overworld's own.) The ground of the nether and of the
-        // end, and what the code places only there, is that dimension's: it is added to the biomes below.
+        // The ground of each dimension is every biome's of that dimension, and so is what the game's code places
+        // only there: both are added to the biomes below. (Which overworld biome's ground holds sand or terracotta
+        // is in the surface rules' conditions, which are not read: they count as every overworld biome's.) What
+        // the code places with no dimension named is bound to nothing.
         Map<String, Set<String>> terrain = NaturalBlocks.terrainByDimension(server, notes);
         Map<String, String> codeIn = NaturalBlocks.placedByCodeIn();
-        Set<String> neverBound = new TreeSet<>(terrain.getOrDefault(NaturalBlocks.OVERWORLD, Set.of()));
+        Set<String> neverBound = new TreeSet<>();
         for (String byCode : NaturalBlocks.placedByCode()) {
             if (!codeIn.containsKey(byCode)) neverBound.add(byCode);
         }
+        int[] skipped = {0};
         Set<String> placedAtAll = new TreeSet<>(neverBound);
         terrain.values().forEach(placedAtAll::addAll);
         placedAtAll.addAll(NaturalBlocks.placedByCode());
@@ -100,6 +103,7 @@ final class BlockBiomes {
             } catch (RuntimeException e) {
                 // A modded biome that throws costs that biome, as a feature that throws costs that feature.
                 notes.skipped("biomes whose features could not be read", biomeId);
+                skipped[0]++;
                 continue;
             }
             groupSizes.merge(dimension, 1, Integer::sum);
@@ -108,25 +112,24 @@ final class BlockBiomes {
             // that dimension.
             String named = dimension == Dimension.NETHER ? NaturalBlocks.NETHER
                 : dimension == Dimension.END ? NaturalBlocks.END : NaturalBlocks.OVERWORLD;
-            if (dimension != Dimension.OVERWORLD) {
-                for (String ground : terrain.getOrDefault(named, Set.of())) {
-                    if (!neverBound.contains(ground)) inGroup.computeIfAbsent(ground, k -> new TreeSet<>()).add(biomeId);
-                }
-                for (Map.Entry<String, String> byCode : codeIn.entrySet()) {
-                    if (byCode.getValue().equals(named)) inGroup.computeIfAbsent(byCode.getKey(), k -> new TreeSet<>()).add(biomeId);
-                }
+            for (String ground : terrain.getOrDefault(named, Set.of())) {
+                if (!neverBound.contains(ground)) inGroup.computeIfAbsent(ground, k -> new TreeSet<>()).add(biomeId);
+            }
+            for (Map.Entry<String, String> byCode : codeIn.entrySet()) {
+                if (byCode.getValue().equals(named)) inGroup.computeIfAbsent(byCode.getKey(), k -> new TreeSet<>()).add(biomeId);
             }
             for (HolderSet<PlacedFeature> step : steps) {
                 for (Holder<PlacedFeature> holder : step) {
                     String placedId = holder.unwrapKey().map(k -> k.location().toString()).orElse("(inline feature)");
                     try {
                         for (ConfiguredFeature<?, ?> configured : (Iterable<ConfiguredFeature<?, ?>>) holder.value().getFeatures()::iterator) {
-                            Set<String> blocks = blocksOf(configured, ops, blocksOfFeature, notes);
+                            Set<String> blocks = blocksOf(configured, ops, blocksOfFeature, notes, skipped);
                             if (blocks == null) continue;
                             for (String block : blocks) inGroup.computeIfAbsent(block, k -> new TreeSet<>()).add(biomeId);
                         }
                     } catch (RuntimeException e) {
                         notes.skipped("placed features whose blocks could not be read", placedId);
+                        skipped[0]++;
                     }
                 }
             }
@@ -150,7 +153,7 @@ final class BlockBiomes {
         });
         Set<String> placed = new TreeSet<>(placedAtAll);
         for (Map<String, Set<String>> group : placedBy.values()) placed.addAll(group.keySet());
-        return new Read(out, placed);
+        return new Read(out, placed, skipped[0]);
     }
 
     /** The registry's biomes by id, so the read walks them the same way whatever the registry's own order is. */
@@ -165,7 +168,7 @@ final class BlockBiomes {
      * cannot be written out or throws, which costs that feature (a note here), never the section.
      */
     private static Set<String> blocksOf(ConfiguredFeature<?, ?> feature, RegistryOps<JsonElement> ops,
-                                        Map<ConfiguredFeature<?, ?>, Set<String>> cache, BuildNotes notes) {
+                                        Map<ConfiguredFeature<?, ?>, Set<String>> cache, BuildNotes notes, int[] skipped) {
         if (cache.containsKey(feature)) return cache.get(feature);
         Set<String> blocks = null;
         try {
@@ -179,7 +182,10 @@ final class BlockBiomes {
         } catch (RuntimeException e) {
             blocks = null;
         }
-        if (blocks == null) notes.count("configured features that could not be written out to read which biomes place their blocks");
+        if (blocks == null) {
+            notes.count("configured features that could not be written out to read which biomes place their blocks");
+            skipped[0]++;
+        }
         cache.put(feature, blocks);
         return blocks;
     }

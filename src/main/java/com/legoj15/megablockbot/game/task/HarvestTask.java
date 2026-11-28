@@ -101,6 +101,8 @@ public final class HarvestTask extends BodyTask {
      * walk and more than a body strays from a place while it gathers the rest of a plan.
      */
     private static final int RETURN_WALK_TICKS = 2400;
+    /** How old a sighting may be and still be walked back to: a day. What stood there longer ago may have been taken. */
+    private static final long SEEN_GOOD_TICKS = 24_000L;
     /** The navigator's goal for a walk to the harvest: within this many blocks of it, well inside the use-block reach. */
     private static final int REACH_RADIUS = 2;
     /** How far from the harvested block the drops of the leaf's item are walked to. */
@@ -281,7 +283,13 @@ public final class HarvestTask extends BodyTask {
         boolean owed = at != null && phase != Phase.GOING && phase != Phase.EXPLORING;
         preserving = null;
         preserveFilter = null;
-        if (!owed) {
+        if (phase == Phase.RETURNING && seenAt != null) {
+            // A pause in the middle of the walk back (a fight, nightfall): the walk is taken up again, for it is
+            // made once a task and a pause must not be what spends it.
+            at = null;
+            pendingReplant = false;
+            nav(body).goToXZ(seenAt[0], seenAt[1]);
+        } else if (!owed) {
             at = null;
             pendingReplant = false;
             phase = Phase.GOING;
@@ -530,8 +538,14 @@ public final class HarvestTask extends BodyTask {
         // bank where the sugar cane stood, and searched the forest it ended up in.
         if (!wentBack) {
             wentBack = true;
-            int[] seen = BotMemory.of(body.getUUID()).lastSeen(dimension, blockLabel);
-            if (seen != null && Math.hypot(seen[0] + 0.5 - body.getX(), seen[1] + 0.5 - body.getZ()) > SCAN_RADIUS) {
+            int[] seen = BotMemory.of(body.getUUID()).lastSeen(dimension, blockLabel, body.level().getGameTime(),
+                SEEN_GOOD_TICKS);
+            // Not into a live danger zone: the body does not go back to where it was driven off or killed, for a
+            // remembered plant any more than for one it can see (findNext).
+            // And only in the dimension the task began in: a column of another dimension is no place in this one.
+            if (seen != null && dimensionOf(body).equals(dimension)
+                    && Math.hypot(seen[0] + 0.5 - body.getX(), seen[1] + 0.5 - body.getZ()) > SCAN_RADIUS
+                    && !inDangerZone(body, new BlockPos(seen[0], body.blockPosition().getY(), seen[1]))) {
                 seenAt = seen;
                 phase = Phase.RETURNING;
                 phaseTicks = 0;

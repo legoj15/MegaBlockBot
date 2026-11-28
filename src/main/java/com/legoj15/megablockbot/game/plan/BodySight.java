@@ -156,10 +156,11 @@ final class BodySight {
             Scan scan = scan(level, at, RADIUS_CHUNKS, BELOW, ABOVE, wanted);
             taken = new Taken(dimension, at.immutable(), now, wanted, scan.nearest());
             memory.keepSight(taken);
-            // What this sight holds is remembered past it, a column a kind: the next sight forgets what it no longer
-            // sees, and a task that needs the block later goes back to where it was.
+            // What this sight holds is remembered past it, a column a kind, with the time: the kept sight is replaced
+            // by the next one, and a task that needs a block the body has since walked away from goes back to
+            // where it was. A kind this sight does not hold keeps the column an earlier one gave it.
             for (Map.Entry<String, Spot> seen : scan.nearest().entrySet()) {
-                memory.noteSeen(dimension, seen.getKey(), seen.getValue().x(), seen.getValue().z());
+                memory.noteSeen(dimension, seen.getKey(), seen.getValue().x(), seen.getValue().z(), now);
             }
         }
         for (Map.Entry<String, Spot> found : taken.nearest().entrySet()) {

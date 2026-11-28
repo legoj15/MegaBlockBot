@@ -131,7 +131,7 @@ public final class BotMemory {
     // The last scan of the blocks around the body (BodySight). A cache of the world, so it is never saved.
     private BodySight.Taken sight;
     /** Where each kind of wanted block was last seen, by dimension and block id: see {@link #lastSeen}. */
-    private final Map<String, Map<String, int[]>> seenBlocks = new HashMap<>();
+    private final Map<String, Map<String, long[]>> seenBlocks = new HashMap<>();
     private int sightScans;
     /** Where the body was driven off or killed, in the order noted. */
     private final List<DangerZone> dangerZones = new ArrayList<>();
@@ -441,31 +441,38 @@ public final class BotMemory {
 
     // ---- the sight ---------------------------------------------------------------------------------------------
 
-    /** The scan {@link BodySight} kept for this body, or null when it has taken none. */
     /**
      * Where the body last saw a block of that kind in the dimension, as a column ({@code {x, z}}), or null when it
      * never has (or was told to forget it). A sight holds only what is around the body now; this is what is left of
      * the sights before it, so a task can go back to the sugar cane the body walked away from an hour ago instead
-     * of searching where it happens to stand. One column a kind, the nearest of the latest sight that held it.
+     * of searching where it happens to stand. One column a kind, the nearest of the latest sight that held it; a
+     * sight that no longer holds the kind leaves the older column standing, which is the point. A column seen more
+     * than {@code maxAge} ticks before {@code now} is not given: what stood there may have been taken since.
      * Not saved: after a restart the body looks again.
      */
     @Nullable
-    public int[] lastSeen(String dimension, String block) {
-        Map<String, int[]> inDimension = seenBlocks.get(dimension);
-        int[] column = inDimension == null ? null : inDimension.get(block);
-        return column == null ? null : column.clone();
+    public int[] lastSeen(String dimension, String block, long now, long maxAge) {
+        Map<String, long[]> inDimension = seenBlocks.get(dimension);
+        long[] seen = inDimension == null ? null : inDimension.get(block);
+        if (seen == null) return null;
+        if (now - seen[2] > maxAge) {
+            inDimension.remove(block);
+            return null;
+        }
+        return new int[] {(int) seen[0], (int) seen[1]};
     }
 
-    void noteSeen(String dimension, String block, int x, int z) {
-        seenBlocks.computeIfAbsent(dimension, k -> new HashMap<>()).put(block, new int[] {x, z});
+    void noteSeen(String dimension, String block, int x, int z, long gameTime) {
+        seenBlocks.computeIfAbsent(dimension, k -> new HashMap<>()).put(block, new long[] {x, z, gameTime});
     }
 
     /** The place turned out to hold nothing of use any more: it is not gone back to again. */
     public void forgetSeen(String dimension, String block) {
-        Map<String, int[]> inDimension = seenBlocks.get(dimension);
+        Map<String, long[]> inDimension = seenBlocks.get(dimension);
         if (inDimension != null) inDimension.remove(block);
     }
 
+    /** The scan {@link BodySight} kept for this body, or null when it has taken none. */
     BodySight.Taken sight() {
         return sight;
     }

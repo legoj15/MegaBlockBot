@@ -305,6 +305,12 @@ public final class ReflexConstants {
      */
     public static final int NIGHT_DIG_DEPTH = 3;
     /**
+     * A body that has moved this far from ground that would not do stands on other ground, and is asked again whether
+     * it can dig in: eight blocks is past one failed pit's surroundings and well inside what a body at work covers
+     * in a night.
+     */
+    public static final int NIGHT_DIG_AGAIN_BLOCKS = 8;
+    /**
      * A block that would take longer than this to break, with the best tool at hand, is not dug at night. A bare
      * hand on dirt takes fifteen ticks and on a grass block eighteen, a wooden pickaxe on stone twenty-three; a bare
      * hand on stone, a hundred and fifty: that is the line between ground to dig into and ground to leave alone.

@@ -137,8 +137,12 @@ public final class ResolverGameTests {
         Set<String> iron = mine(helper, index, "minecraft:raw_iron", "minecraft:iron_ore", false).biomes();
         helper.assertTrue(iron.contains("minecraft:plains") && iron.contains("minecraft:windswept_hills")
             && !iron.contains("minecraft:nether_wastes"), "iron ore is said to be placed in " + iron);
+        // The ground itself is its dimension's: stone is every overworld biome's and no end biome's. (Some nether
+        // feature names stone as a block it may replace, so the nether's biomes are in the list too: the read
+        // over-counts that way, and errs toward not charging.)
         Set<String> stone = mine(helper, index, "minecraft:cobblestone", "minecraft:stone", false).biomes();
-        helper.assertTrue(stone.isEmpty(), "stone is bound to biomes: " + stone);
+        helper.assertTrue(stone.contains("minecraft:plains") && stone.contains("minecraft:taiga")
+            && !stone.contains("minecraft:the_end"), "stone is said to be placed in " + stone);
         // The ground of another dimension, and what the game's code places only there, is that dimension's.
         Set<String> netherrack = mine(helper, index, "minecraft:netherrack", "minecraft:netherrack", false).biomes();
         helper.assertTrue(netherrack.contains("minecraft:nether_wastes") && !netherrack.contains("minecraft:plains"),
