@@ -9,8 +9,10 @@
   fixes the clock at mid-morning (3000: the hours villagers work, which is when an offer that ran out is stocked
   again), spawns the bot with an empty inventory at -BotAt, and sets up what the run is NOT about:
     - with -Supplies chest (the default), a chest two blocks from the bot holding 64 emeralds, 4 leather and 12
-      sugar cane, named to the bot with "use chest at"; with -Supplies none, no chest: the emeralds are the bot's
-      to earn (issue 31) and the leather and the sugar cane its to find;
+      sugar cane, named to the bot with "use chest at"; with -Supplies cane, a chest holding the 12 sugar cane
+      and nothing else: the emeralds are the bot's to earn (issue 31) and the leather its to hunt, and the cane is
+      given because this seed has next to none (three blocks were counted by the taiga village's river, none in
+      three 240-block squares along the plains village's) and the bot does not farm; with -Supplies none, no chest;
     - adult villagers summoned at the village until -Jobless of them stay without a profession (the generated
       village has a free job site or two, which the first ones take). One is enough to roll a librarian; a run
       that also sells for its emeralds needs a second, since a villager that has traded keeps its job.
@@ -27,7 +29,7 @@
 param(
     [Parameter(Mandatory)][string]$Node,
     [ValidateSet('assisted', 'strict')][string]$Profile = 'assisted',
-    [ValidateSet('chest', 'none')][string]$Supplies = 'chest',
+    [ValidateSet('chest', 'cane', 'none')][string]$Supplies = 'chest',
     [int]$Jobless = 1,
     [string]$World = "e2e_mending_$Profile",
     [string]$Bot = 'Bot1',
@@ -57,13 +59,15 @@ $null = Send "clear $Bot"
 Start-Sleep -Seconds 2
 
 # The supplies, in a chest beside the bot, at its feet's height.
-if ($Supplies -eq 'chest') {
+if ($Supplies -ne 'none') {
 $pos = Send "data get entity $Bot Pos"
 if ($pos -notmatch '\[(-?[\d.]+)d, (-?[\d.]+)d, (-?[\d.]+)d\]') { [Console]::Error.WriteLine("evidence-mending: no position for ${Bot}: $pos"); exit 3 }
 $cx = [int][Math]::Floor([double]$Matches[1]) + 2
 $cy = [int][Math]::Floor([double]$Matches[2])
 $cz = [int][Math]::Floor([double]$Matches[3])
-$null = Send ('setblock {0} {1} {2} minecraft:chest{{Items:[{{Slot:0b,id:"minecraft:emerald",count:64}},{{Slot:1b,id:"minecraft:leather",count:4}},{{Slot:2b,id:"minecraft:sugar_cane",count:12}}]}}' -f $cx, $cy, $cz)
+$held = if ($Supplies -eq 'cane') { '{{Slot:0b,id:"minecraft:sugar_cane",count:12}}' }
+    else { '{{Slot:0b,id:"minecraft:emerald",count:64}},{{Slot:1b,id:"minecraft:leather",count:4}},{{Slot:2b,id:"minecraft:sugar_cane",count:12}}' }
+$null = Send (('setblock {0} {1} {2} minecraft:chest{{Items:[' + $held + ']}}') -f $cx, $cy, $cz)
 $null = Send ('setblock {0} {1} {2} minecraft:air' -f $cx, ($cy + 1), $cz)
 }
 
@@ -81,7 +85,7 @@ foreach ($n in 1..10) {
 if ($free -lt $Jobless) { [Console]::Error.WriteLine("evidence-mending: only $free summoned villagers stayed without a profession, $Jobless asked for"); exit 3 }
 
 # The chest is named, and looked into before the goal is given, so the plan is made knowing what it holds.
-if ($Supplies -eq 'chest') {
+if ($Supplies -ne 'none') {
 $null = Send ("aiplayer goal $Bot use chest at {0} {1} {2}" -f $cx, $cy, $cz)
 foreach ($try in 1..30) {
     Start-Sleep -Seconds 2
